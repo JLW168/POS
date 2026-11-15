@@ -1203,6 +1203,8 @@
 
         // Strict Whitelist of Normalized PayWay Chat IDs for Shops with Auto-Verification Enabled
         _allowedChatIdsSet: new Set(),
+        _bypassDbByChatIdMap: new Map(), // normalizedChatId -> boolean (true = Bypass Firebase DB)
+        _bypassDbByShopIdMap: new Map(), // shopId -> boolean (true = Bypass Firebase DB)
 
         normalizeChatId(rawId) {
             return String(rawId || '').trim().replace(/^-100/, '').replace(/^-/, '').trim();
@@ -1210,22 +1212,89 @@
 
         syncAllowedShops(shopsList = []) {
             const nextSet = new Set();
+            const nextBypassChatMap = new Map();
+            const nextBypassShopMap = new Map();
+
             (shopsList || []).forEach(shop => {
                 const cfg = shop?.khqrConfig;
-                // Strictly require paywayVerifyEnabled to be true AND a non-empty paywayChatId
-                if (cfg && cfg.paywayVerifyEnabled !== false && cfg.paywayChatId) {
-                    String(cfg.paywayChatId)
+                let secChatId = '';
+                let secBypass = undefined;
+                try {
+                    const localSec = localStorage.getItem(`solaris_payway_secrets_${shop?.id}`);
+                    if (localSec) {
+                        const parsedSec = JSON.parse(localSec);
+                        secChatId = parsedSec?.paywayChatId || parsedSec?.khqrConfigBackup?.paywayChatId || '';
+                        if (parsedSec?.bypassFirebaseDb !== undefined) {
+                            secBypass = parsedSec.bypassFirebaseDb !== false;
+                        } else if (parsedSec?.khqrConfigBackup?.bypassFirebaseDb !== undefined) {
+                            secBypass = parsedSec.khqrConfigBackup.bypassFirebaseDb !== false;
+                        }
+                    }
+                } catch (e) {}
+
+                // Default to ON (true) unless explicitly set to false
+                const bypassDb = cfg?.bypassFirebaseDb !== undefined
+                    ? cfg.bypassFirebaseDb !== false
+                    : (secBypass !== undefined ? secBypass : true);
+
+                if (shop?.id) {
+                    nextBypassShopMap.set(String(shop.id), bypassDb);
+                }
+
+                const combinedChatId = [cfg?.paywayChatId || '', secChatId].filter(Boolean).join(',');
+                // Include Chat IDs from shops where PayWay verification is enabled (or backup secrets exist)
+                if ((cfg && cfg.paywayVerifyEnabled !== false && combinedChatId) || (!cfg && secChatId)) {
+                    String(combinedChatId)
                         .split(/[\s,|;]+/)
                         .map(id => this.normalizeChatId(id))
                         .filter(Boolean)
-                        .forEach(id => nextSet.add(id));
+                        .forEach(id => {
+                            nextSet.add(id);
+                            if (nextBypassChatMap.has(id)) {
+                                nextBypassChatMap.set(id, nextBypassChatMap.get(id) && bypassDb);
+                            } else {
+                                nextBypassChatMap.set(id, bypassDb);
+                            }
+                        });
                 }
             });
             this._allowedChatIdsSet = nextSet;
+            this._bypassDbByChatIdMap = nextBypassChatMap;
+            this._bypassDbByShopIdMap = nextBypassShopMap;
             try {
                 localStorage.setItem('solaris_allowed_payway_chat_ids', JSON.stringify(Array.from(nextSet)));
+                localStorage.setItem('solaris_bypass_db_chat_map', JSON.stringify(Object.fromEntries(nextBypassChatMap)));
+                localStorage.setItem('solaris_bypass_db_shop_map', JSON.stringify(Object.fromEntries(nextBypassShopMap)));
             } catch (e) {}
             return nextSet;
+        },
+
+        // Evaluates whether Bank State (Telegram Feed) should bypass Firebase Database (Default ON = true)
+        shouldBypassFirebaseDb(shopId = '', chatId = '') {
+            if (shopId && shopId !== 'All' && this._bypassDbByShopIdMap?.has(String(shopId))) {
+                return this._bypassDbByShopIdMap.get(String(shopId));
+            }
+            const normChat = this.normalizeChatId(chatId);
+            if (normChat && this._bypassDbByChatIdMap?.has(normChat)) {
+                return this._bypassDbByChatIdMap.get(normChat);
+            }
+            try {
+                if (shopId && shopId !== 'All') {
+                    const shopMap = JSON.parse(localStorage.getItem('solaris_bypass_db_shop_map') || '{}');
+                    if (shopMap[shopId] !== undefined) return shopMap[shopId] !== false;
+                }
+                if (normChat) {
+                    const chatMap = JSON.parse(localStorage.getItem('solaris_bypass_db_chat_map') || '{}');
+                    if (chatMap[normChat] !== undefined) return chatMap[normChat] !== false;
+                }
+            } catch (e) {}
+            if (this._bypassDbByShopIdMap && this._bypassDbByShopIdMap.size > 0) {
+                for (const val of this._bypassDbByShopIdMap.values()) {
+                    if (val === false) return false;
+                }
+                return true;
+            }
+            return true; // Default ON: Bypass Firebase Database
         },
 
         getAllowedChatIdsSet() {
@@ -1334,9 +1403,10 @@
                 }
             } catch (e) {}
 
-            if (skipFirestoreWrite || window.SolarisPayWayVerifier?.isQuotaExceeded) return;
+            // SMART BYPASS GUARD: When Bypass Firebase DB is ON (default), skip Firestore write completely (0 Writes!)
+            if (skipFirestoreWrite || window.SolarisPayWayVerifier?.isQuotaExceeded || this.shouldBypassFirebaseDb('', resolvedChatId)) return;
 
-            // Non-blocking background cloud write (ONLY for whitelisted shop Chat IDs)
+            // Non-blocking background cloud write (ONLY when Bypass Firebase DB is explicitly OFF)
             const paymentDocData = {
                 trxId,
                 apv: String(enrichedParsed.apv || ''),
@@ -1522,11 +1592,11 @@
                 }
 
                 // SOURCE 3 & 4: Firestore Cloud Feed
-                // CRITICAL FIX: Because Firestore uses experimentalForceLongPolling, onSnapshot can lag by 5-25s on some networks.
-                // During an active KHQR checkout, perform a lightweight direct cloud check every 2.5s if not yet matched!
+                // SMART BYPASS GUARD: Only query Firestore `aba_payments` if Bypass Firebase DB is explicitly OFF for this shop/chat!
+                const isBypassDbActive = this.shouldBypassFirebaseDb(shopId, cleanFilterId);
                 const hasActiveRealtimeSub = !!(window.SolarisPayWayVerifier?.activeFirestoreUnsub);
                 const cloudFallbackIntervalMs = isActiveCheckout ? 2500 : 15000;
-                const shouldQueryFirestore = !window.SolarisPayWayVerifier?.isQuotaExceeded &&
+                const shouldQueryFirestore = !isBypassDbActive && !window.SolarisPayWayVerifier?.isQuotaExceeded &&
                     (forceCloudRead ||
                      (isActiveCheckout && (!this._lastFirestoreFetchMs || (nowMs - this._lastFirestoreFetchMs > cloudFallbackIntervalMs))) ||
                      (!hasActiveRealtimeSub && (mergedByTrxId.size === 0 || !this._lastFirestoreFetchMs || (nowMs - this._lastFirestoreFetchMs > 15000))));
@@ -2169,19 +2239,116 @@
             } finally {
                 this._scanInFlight = false;
             }
+        },
+
+        // Deep Historical Telegram Group Backfill by Date Range (offsetDate + offsetId pagination)
+        async fetchHistoricalAbaMessagesByDateRange(targetChatIdsStr = '', startMs = 0, endMs = Date.now(), maxMessages = 500) {
+            if (!this.client || !this.isConnected) return { ok: false, count: 0, items: [] };
+            try {
+                const rawChatIds = String(targetChatIdsStr || '')
+                    .split(/[\s,|;]+/)
+                    .map(s => s.trim())
+                    .filter(Boolean);
+
+                const entitiesToScan = [];
+                for (const cid of rawChatIds) {
+                    const resolved = await this.resolveTargetPeerFast(cid);
+                    if (resolved) entitiesToScan.push(resolved);
+                }
+
+                if (entitiesToScan.length === 0) {
+                    const dialogs = await this.client.getDialogs({ limit: 60 });
+                    for (const d of dialogs) {
+                        const cid = String(d.id || '');
+                        if ((d.isGroup || d.isChannel) && window.SolarisKHQREngine.isChatIdAllowed(cid, targetChatIdsStr)) {
+                            entitiesToScan.push({
+                                chatId: cid,
+                                strippedId: window.SolarisKHQREngine.normalizeChatId(cid),
+                                title: d.title || 'Group',
+                                entity: d.entity
+                            });
+                        }
+                    }
+                }
+
+                const extracted = [];
+                const safeEndSec = Math.floor((Number(endMs) || Date.now()) / 1000) + 120;
+                const safeStartMs = Number(startMs) > 0 ? Number(startMs) - 120000 : 0;
+                const cap = Math.min(1000, Math.max(50, Number(maxMessages) || 500));
+
+                for (const target of entitiesToScan) {
+                    let offsetId = 0;
+                    let fetched = 0;
+                    let reachedBeforeStart = false;
+
+                    while (fetched < cap && !reachedBeforeStart) {
+                        const batchLimit = Math.min(100, cap - fetched);
+                        const queryOpts = { limit: batchLimit };
+                        if (offsetId > 0) {
+                            queryOpts.offsetId = offsetId;
+                        } else if (endMs && Number(endMs) < Date.now() - 60000) {
+                            queryOpts.offsetDate = safeEndSec;
+                        }
+
+                        const msgs = await this.client.getMessages(target.entity, queryOpts);
+                        if (!msgs || msgs.length === 0) break;
+
+                        for (const m of msgs) {
+                            fetched++;
+                            if (m.id && (offsetId === 0 || m.id < offsetId)) {
+                                offsetId = m.id;
+                            }
+                            const msgServerMs = m.date ? Number(m.date) * 1000 : Date.now();
+                            if (safeStartMs > 0 && msgServerMs < safeStartMs) {
+                                reachedBeforeStart = true;
+                                break;
+                            }
+                            if (endMs && msgServerMs > Number(endMs) + 120000) continue;
+
+                            const txt = m?.message || m?.text || '';
+                            if (!txt) continue;
+                            const parsed = window.SolarisKHQREngine.parseABAPayWayMessage(txt);
+                            if (parsed && parsed.isValid && parsed.trxId) {
+                                await window.SolarisKHQREngine.broadcastDetectedAbaPayment(
+                                    parsed,
+                                    target.chatId,
+                                    `MTProto History (${target.title})`,
+                                    msgServerMs,
+                                    false
+                                );
+                                extracted.push({
+                                    ...parsed,
+                                    id: String(parsed.trxId).trim(),
+                                    trxId: String(parsed.trxId).trim(),
+                                    chatId: target.chatId,
+                                    receivedAt: msgServerMs,
+                                    paidTimestamp: Number(parsed.paidTimestamp) || msgServerMs
+                                });
+                            }
+                        }
+
+                        if (msgs.length < batchLimit) break;
+                    }
+                }
+                return { ok: true, count: extracted.length, items: extracted };
+            } catch (err) {
+                console.warn('MTProto historical range scan warning:', err);
+                return { ok: false, count: 0, items: [], error: err.message };
+            }
         }
     };
 
-    // --- Direct Render.com SSE & HTTP Bridge (https://po-listener.onrender.com) ---
-    // Ensures 0ms payment delivery even if Firebase daily write quota is exhausted, and keeps Render awake!
+    // --- Direct Render.com SSE & HTTP Bridge (https://pos-payway.onrender.com) ---
+    // Ensures 0ms payment delivery with 0 Firebase Reads/Writes when Bypass Mode is ON!
     window.SolarisRenderBridge = {
         baseUrl: (() => {
             try {
-                return localStorage.getItem('solaris_render_listener_url') || 'https://po-listener.onrender.com';
+                return localStorage.getItem('solaris_render_listener_url') || 'https://pos-payway.onrender.com';
             } catch (e) {
-                return 'https://po-listener.onrender.com';
+                return 'https://pos-payway.onrender.com';
             }
         })(),
+        fallbackUrl: 'https://po-listener.onrender.com',
         eventSource: null,
         isConnected: false,
         lastPingAt: 0,
@@ -2190,7 +2357,7 @@
         _pollInFlight: false,
 
         setBaseUrl(url) {
-            const clean = String(url || 'https://po-listener.onrender.com').trim().replace(/\/+$/, '');
+            const clean = String(url || 'https://pos-payway.onrender.com').trim().replace(/\/+$/, '');
             this.baseUrl = clean;
             try { localStorage.setItem('solaris_render_listener_url', clean); } catch (e) {}
             if (this.eventSource) {
@@ -2199,6 +2366,14 @@
                 this.isConnected = false;
             }
             this.ensureConnected();
+        },
+
+        getCandidateUrls() {
+            const urls = [this.baseUrl];
+            if (this.fallbackUrl && this.fallbackUrl !== this.baseUrl) {
+                urls.push(this.fallbackUrl);
+            }
+            return urls.filter(Boolean);
         },
 
         ingestRenderPayload(rawItem, sourceTag = 'Render Live SSE') {
@@ -2369,37 +2544,72 @@
             this._pollInFlight = true;
             try {
                 let totalIngested = 0;
-
-                // CRITICAL FIX: Request exact `/recent` WITHOUT query strings first so both old and new listener.mjs return the 30-50 item ring buffer!
+                const candidateBaseUrls = this.getCandidateUrls();
                 const jsonEndpoints = [
-                    '/recent',
-                    forceWake ? '/recent?scan=1' : null
+                    forceWake ? '/recent?scan=1&limit=400' : '/recent?limit=300',
+                    '/recent'
                 ].filter(Boolean);
 
-                for (const ep of jsonEndpoints) {
-                    try {
-                        const controller = new AbortController();
-                        const tid = setTimeout(() => controller.abort(), 4000);
-                        const r = await fetch(`${this.baseUrl}${ep}`, { signal: controller.signal, cache: 'no-store' });
-                        clearTimeout(tid);
-                        if (r.ok && (r.headers.get('content-type') || '').includes('application/json')) {
-                            this.isConnected = true;
-                            this.lastPingAt = Date.now();
-                            const d = await r.json();
-                            const arr = d.payments || d.recentPayments || d.items || d.messages || (Array.isArray(d) ? d : []);
-                            if (Array.isArray(arr)) {
-                                arr.forEach(item => {
-                                    if (this.ingestRenderPayload(item, 'Render (/recent)')) totalIngested++;
-                                });
-                                break;
+                for (const base of candidateBaseUrls) {
+                    let connectedToBase = false;
+                    for (const ep of jsonEndpoints) {
+                        try {
+                            const controller = new AbortController();
+                            const tid = setTimeout(() => controller.abort(), 4500);
+                            const r = await fetch(`${base}${ep}`, { signal: controller.signal, cache: 'no-store', mode: 'cors' });
+                            clearTimeout(tid);
+                            if (r.ok && (r.headers.get('content-type') || '').includes('application/json')) {
+                                this.isConnected = true;
+                                this.lastPingAt = Date.now();
+                                connectedToBase = true;
+                                const d = await r.json();
+                                const arr = d.payments || d.recentPayments || d.items || d.messages || (Array.isArray(d) ? d : []);
+                                if (Array.isArray(arr)) {
+                                    arr.forEach(item => {
+                                        if (this.ingestRenderPayload(item, 'Render (/recent)')) totalIngested++;
+                                    });
+                                    break;
+                                }
                             }
-                        }
-                    } catch (e) {}
+                        } catch (e) {}
+                    }
+                    if (connectedToBase) break;
                 }
                 return { count: totalIngested };
             } finally {
                 this._pollInFlight = false;
             }
+        },
+
+        // Fetches historical ABA PayWay transactions from Render `/history` endpoint for any date/time range
+        async fetchHistoryFromRender({ chatId = '', startMs = 0, endMs = Date.now(), limit = 800 } = {}) {
+            if (!this.baseUrl) return { ok: false, items: [] };
+            const candidateBaseUrls = this.getCandidateUrls();
+            const qs = `?chatId=${encodeURIComponent(chatId || '')}&startMs=${Number(startMs) || 0}&endMs=${Number(endMs) || Date.now()}&limit=${Number(limit) || 800}`;
+
+            for (const base of candidateBaseUrls) {
+                try {
+                    const controller = new AbortController();
+                    const tid = setTimeout(() => controller.abort(), 12000);
+                    const r = await fetch(`${base}/history${qs}`, {
+                        signal: controller.signal,
+                        cache: 'no-store',
+                        mode: 'cors'
+                    });
+                    clearTimeout(tid);
+                    if (r.ok && (r.headers.get('content-type') || '').includes('application/json')) {
+                        this.isConnected = true;
+                        this.lastPingAt = Date.now();
+                        const d = await r.json();
+                        const arr = d.payments || d.items || d.messages || [];
+                        if (Array.isArray(arr)) {
+                            arr.forEach(item => this.ingestRenderPayload(item, 'Render History (/history)'));
+                            return { ok: true, items: arr, usedUrl: base };
+                        }
+                    }
+                } catch (e) {}
+            }
+            return { ok: false, items: [] };
         }
     };
 
@@ -2444,6 +2654,8 @@
         loadLocalAbaCache() {
             if (this._localCacheLoaded) return;
             this._localCacheLoaded = true;
+            // Temporary Web Cache Retention Window: 7 days (automatically evicts older temporary entries)
+            const tempRetentionCutoffMs = Date.now() - (7 * 24 * 60 * 60 * 1000);
             try {
                 const rawDeleted = localStorage.getItem('solaris_deleted_aba_trx_v1');
                 if (rawDeleted) {
@@ -2458,6 +2670,8 @@
                             if (item && item.updateId && item.parsedAba?.trxId) {
                                 const cleanId = String(item.updateId).trim();
                                 if (this.deletedTrxIdsMemory.has(cleanId)) return;
+                                const itemDateMs = Number(item.date || item.parsedAba?.receivedAt || 0);
+                                if (itemDateMs > 0 && itemDateMs < tempRetentionCutoffMs) return;
                                 const itemChatId = item.chatId || item.parsedAba?.chatId || '';
                                 if (window.SolarisKHQREngine && !window.SolarisKHQREngine.isChatIdAllowed(itemChatId)) {
                                     return;
@@ -2480,16 +2694,22 @@
 
         saveLocalAbaCache() {
             try {
+                const tempRetentionCutoffMs = Date.now() - (7 * 24 * 60 * 60 * 1000);
                 const paymentsArr = Array.from(this.inMemoryAbaPayments.values())
-                    .filter(item => !this.deletedTrxIdsMemory.has(String(item?.updateId || item?.parsedAba?.trxId || '').trim()))
+                    .filter(item => {
+                        const cleanId = String(item?.updateId || item?.parsedAba?.trxId || '').trim();
+                        if (this.deletedTrxIdsMemory.has(cleanId)) return false;
+                        const itemDateMs = Number(item?.date || item?.parsedAba?.receivedAt || 0);
+                        return !itemDateMs || itemDateMs >= tempRetentionCutoffMs;
+                    })
                     .sort((a, b) => (Number(b.date) || 0) - (Number(a.date) || 0))
-                    .slice(0, 150);
+                    .slice(0, 800);
                 localStorage.setItem('solaris_aba_payments_cache_v1', JSON.stringify(paymentsArr));
 
-                const claimedArr = Array.from(this.processedTrxIdsMemory).slice(-300);
+                const claimedArr = Array.from(this.processedTrxIdsMemory).slice(-1000);
                 localStorage.setItem('solaris_aba_claimed_trx_v1', JSON.stringify(claimedArr));
 
-                const deletedArr = Array.from(this.deletedTrxIdsMemory).slice(-600);
+                const deletedArr = Array.from(this.deletedTrxIdsMemory).slice(-1000);
                 localStorage.setItem('solaris_deleted_aba_trx_v1', JSON.stringify(deletedArr));
             } catch (e) {}
         },
@@ -2623,6 +2843,14 @@
                         }
                     };
                 } catch (e) {}
+            }
+            // SMART BYPASS GUARD: Do NOT attach Firestore `aba_payments` onSnapshot listener when Bypass Firebase DB is ON!
+            if (window.SolarisKHQREngine?.shouldBypassFirebaseDb()) {
+                if (this.activeFirestoreUnsub) {
+                    try { this.activeFirestoreUnsub(); } catch (e) {}
+                    this.activeFirestoreUnsub = null;
+                }
+                return;
             }
             if (this.activeFirestoreUnsub || this.isQuotaExceeded) return;
             try {
@@ -2803,7 +3031,9 @@
                 }).catch(() => {});
             }
 
-            if (this.isQuotaExceeded || window.SolarisQuotaGuard?.isTripped) return;
+            // SMART BYPASS GUARD: Skip Firestore `aba_payments` write if Bypass Firebase DB is ON
+            const itemChatId = existingMem?.chatId || existingMem?.parsedAba?.chatId || '';
+            if (this.isQuotaExceeded || window.SolarisQuotaGuard?.isTripped || window.SolarisKHQREngine?.shouldBypassFirebaseDb('', itemChatId)) return;
             try {
                 const payload = { claimedByOrderId: String(saleRefOrId) };
                 if (invoiceNo) payload.claimedByInvoiceNo = String(invoiceNo);
@@ -2942,6 +3172,422 @@
     // React Hooks
     const { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, memo } = React;
 
+    // ============================================================================
+    // PHASE 1: SOLARIS INDEXEDDB CATALOG VAULT (SolarisCatalogDB)
+    // Stores 10,000+ Products, Categories, and Vendors in IndexedDB (Unlimited
+    // Browser Storage) instead of 5MB localStorage, supporting 10+ Shop Locations
+    // on the Firebase Spark (Free) Plan with 0ms startup hydration.
+    // ============================================================================
+    window.SolarisCatalogDB = {
+        DB_NAME: 'SolarisCatalogVault_v2',
+        DB_VERSION: 1,
+        _dbPromise: null,
+
+        open() {
+            if (this._dbPromise) return this._dbPromise;
+            this._dbPromise = new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined') {
+                    reject(new Error('IndexedDB not supported'));
+                    return;
+                }
+                const req = indexedDB.open(this.DB_NAME, this.DB_VERSION);
+                req.onupgradeneeded = (e) => {
+                    const idb = e.target.result;
+                    ['products', 'vendors', 'categories', 'meta'].forEach(storeName => {
+                        if (!idb.objectStoreNames.contains(storeName)) {
+                            idb.createObjectStore(storeName, { keyPath: 'id' });
+                        }
+                    });
+                };
+                req.onsuccess = (e) => resolve(e.target.result);
+                req.onerror = (e) => {
+                    this._dbPromise = null;
+                    reject(e.target.error);
+                };
+            });
+            return this._dbPromise;
+        },
+
+        async getAll(storeName) {
+            try {
+                const idb = await this.open();
+                return await new Promise((resolve, reject) => {
+                    const tx = idb.transaction(storeName, 'readonly');
+                    const store = tx.objectStore(storeName);
+                    const req = store.getAll();
+                    req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+                    req.onerror = () => reject(req.error);
+                });
+            } catch (e) {
+                return [];
+            }
+        },
+
+        async putBatch(storeName, items = [], replaceAll = false) {
+            if (!Array.isArray(items)) return;
+            try {
+                const idb = await this.open();
+                await new Promise((resolve, reject) => {
+                    const tx = idb.transaction(storeName, 'readwrite');
+                    const store = tx.objectStore(storeName);
+                    if (replaceAll) {
+                        store.clear();
+                    }
+                    items.forEach(item => {
+                        if (item && item.id) {
+                            const safeItem = window.SolarisCollectionMutator
+                                ? window.SolarisCollectionMutator.sanitizeForLocalCache(item)
+                                : item;
+                            store.put(safeItem);
+                        }
+                    });
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = () => reject(tx.error);
+                });
+            } catch (e) {
+                console.warn(`SolarisCatalogDB putBatch(${storeName}) warning:`, e);
+            }
+        },
+
+        async deleteOne(storeName, id) {
+            if (!id) return;
+            try {
+                const idb = await this.open();
+                await new Promise((resolve, reject) => {
+                    const tx = idb.transaction(storeName, 'readwrite');
+                    tx.objectStore(storeName).delete(id);
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = () => reject(tx.error);
+                });
+            } catch (e) {}
+        },
+
+        async getMeta(key) {
+            try {
+                const idb = await this.open();
+                return await new Promise((resolve) => {
+                    const tx = idb.transaction('meta', 'readonly');
+                    const req = tx.objectStore('meta').get(key);
+                    req.onsuccess = () => resolve(req.result ? req.result.value : null);
+                    req.onerror = () => resolve(null);
+                });
+            } catch (e) {
+                return null;
+            }
+        },
+
+        async setMeta(key, value) {
+            try {
+                const idb = await this.open();
+                await new Promise((resolve) => {
+                    const tx = idb.transaction('meta', 'readwrite');
+                    tx.objectStore('meta').put({ id: key, value, updatedAt: Date.now() });
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = () => resolve(false);
+                });
+            } catch (e) {}
+        }
+    };
+
+    // ============================================================================
+    // PHASE 2: SOLARIS SMART PRODUCT ENGINE (10,000+ Items Across 10 Shops)
+    // - 0ms Instant Startup from IndexedDB (0 Firebase Reads)
+    // - Real-Time Delta Listener (`updatedAt > lastSyncDate`)
+    // - Automatic Legacy `updatedAt` Backfill & Cross-Shop Deletion Sync
+    // ============================================================================
+    window.SolarisSmartProductEngine = {
+        productsMap: new Map(),
+        listeners: new Set(),
+        statusListeners: new Set(),
+        unsubDelta: null,
+        unsubDeleteSignal: null,
+        isInitialized: false,
+        syncStatus: {
+            mode: 'initializing', // 'initializing' | 'cache-ready' | 'delta-live' | 'full-sync' | 'offline-cache'
+            cachedCount: 0,
+            deltaReadsSession: 0,
+            lastSyncMs: 0,
+            isFullSyncing: false
+        },
+
+        subscribeProducts(fn) {
+            this.listeners.add(fn);
+            if (this.productsMap.size > 0) {
+                try { fn(this.getProductsArray()); } catch (e) {}
+            }
+            return () => this.listeners.delete(fn);
+        },
+
+        subscribeStatus(fn) {
+            this.statusListeners.add(fn);
+            try { fn({ ...this.syncStatus }); } catch (e) {}
+            return () => this.statusListeners.delete(fn);
+        },
+
+        notifyProducts() {
+            const arr = this.getProductsArray();
+            this.syncStatus.cachedCount = arr.length;
+            this.listeners.forEach(fn => {
+                try { fn(arr); } catch (e) {}
+            });
+            this.notifyStatus();
+        },
+
+        notifyStatus() {
+            const snapshot = { ...this.syncStatus, cachedCount: this.productsMap.size };
+            this.statusListeners.forEach(fn => {
+                try { fn(snapshot); } catch (e) {}
+            });
+        },
+
+        getProductsArray() {
+            if (!window.SolarisCollectionMutator) {
+                return Array.from(this.productsMap.values());
+            }
+            return window.SolarisCollectionMutator.applyOverridesToList(
+                'products',
+                Array.from(this.productsMap.values())
+            );
+        },
+
+        // Called whenever a product is created/edited/adjusted locally so UI & IndexedDB update in 0ms
+        applyLocalProductUpsert(productId, partialData) {
+            if (!productId) return;
+            const existing = this.productsMap.get(productId) || { id: productId };
+            const cleanData = window.SolarisCollectionMutator
+                ? window.SolarisCollectionMutator.sanitizeForLocalCache(partialData)
+                : partialData;
+            const merged = {
+                ...existing,
+                ...cleanData,
+                id: productId,
+                updatedAt: new Date().toISOString()
+            };
+            this.productsMap.set(productId, merged);
+            window.SolarisCatalogDB.putBatch('products', [merged], false);
+            this.notifyProducts();
+        },
+
+        // Immediately adjusts stockByShop[shopId] in memory and IndexedDB in 0ms
+        applyLocalStockDelta(productId, shopId, qtyDelta, extraFields = {}) {
+            if (!productId || !shopId) return;
+            const existing = this.productsMap.get(productId);
+            if (!existing) return;
+            const currentStockMap = { ...(existing.stockByShop || {}) };
+            const prevQty = Number(currentStockMap[shopId]) || 0;
+            currentStockMap[shopId] = prevQty + (Number(qtyDelta) || 0);
+            const merged = {
+                ...existing,
+                ...extraFields,
+                stockByShop: currentStockMap,
+                updatedAt: new Date().toISOString()
+            };
+            this.productsMap.set(productId, merged);
+            window.SolarisCatalogDB.putBatch('products', [merged], false);
+            this.notifyProducts();
+        },
+
+        applyLocalProductDelete(productId, broadcastToOtherShops = false) {
+            if (!productId) return;
+            const existed = this.productsMap.has(productId);
+            this.productsMap.delete(productId);
+            window.SolarisCatalogDB.deleteOne('products', productId);
+            if (existed) {
+                this.notifyProducts();
+            }
+            if (broadcastToOtherShops && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
+                db.collection('system_settings').doc('catalog_sync_signal').set({
+                    lastDeletedProductId: productId,
+                    deletedAtMs: Date.now()
+                }, { merge: true }).catch(() => {});
+            }
+        },
+
+        async init() {
+            if (this.isInitialized) return;
+            this.isInitialized = true;
+
+            // 1. Hydrate from IndexedDB first (Unlimited capacity for 10,000+ items)
+            let idbProducts = await window.SolarisCatalogDB.getAll('products');
+
+            // Fallback migration: if IndexedDB is empty on first upgrade, check legacy localStorage
+            if ((!idbProducts || idbProducts.length === 0)) {
+                try {
+                    const legacyRaw = localStorage.getItem('solaris_products_cache_v1');
+                    if (legacyRaw) {
+                        const parsed = JSON.parse(legacyRaw);
+                        if (Array.isArray(parsed) && parsed.length > 0) {
+                            idbProducts = parsed;
+                            await window.SolarisCatalogDB.putBatch('products', parsed, true);
+                            // Free up 5MB localStorage quota once migrated to IndexedDB
+                            localStorage.removeItem('solaris_products_cache_v1');
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            const lastSyncMs = Number(await window.SolarisCatalogDB.getMeta('products_last_sync_ms')) || 0;
+
+            if (Array.isArray(idbProducts) && idbProducts.length > 0) {
+                idbProducts.forEach(p => {
+                    if (p && p.id) this.productsMap.set(p.id, p);
+                });
+                this.syncStatus.mode = 'cache-ready';
+                this.syncStatus.lastSyncMs = lastSyncMs || Date.now();
+                this.notifyProducts();
+            }
+
+            // 2. Listen for cross-shop product deletions & force-sync signals (1 tiny doc for all 10 shops)
+            this.attachCatalogSignalListener();
+
+            // 3. Decide between Delta Live Sync (0 startup reads) vs Initial Full Bootstrap
+            if (this.productsMap.size > 0 && lastSyncMs > 0) {
+                this.startDeltaListener(lastSyncMs);
+            } else if (this.productsMap.size > 0 && !lastSyncMs) {
+                // We have migrated products from localStorage; stamp lastSyncMs and start Delta Sync
+                const nowMs = Date.now();
+                await window.SolarisCatalogDB.setMeta('products_last_sync_ms', nowMs);
+                this.startDeltaListener(nowMs - (5 * 60 * 1000));
+            } else {
+                // First time on this device: run one-time full catalog bootstrap
+                await this.runFullCatalogSync(false);
+            }
+        },
+
+        attachCatalogSignalListener() {
+            if (this.unsubDeleteSignal) return;
+            try {
+                this.unsubDeleteSignal = db.collection('system_settings').doc('catalog_sync_signal')
+                    .onSnapshot((docSnap) => {
+                        if (!docSnap.exists) return;
+                        const data = docSnap.data() || {};
+                        if (data.lastDeletedProductId && this.productsMap.has(data.lastDeletedProductId)) {
+                            this.applyLocalProductDelete(data.lastDeletedProductId, false);
+                        }
+                    }, () => {});
+            } catch (e) {}
+        },
+
+        startDeltaListener(sinceMs) {
+            if (this.unsubDelta) {
+                try { this.unsubDelta(); } catch (e) {}
+                this.unsubDelta = null;
+            }
+
+            // Subtract 2 minutes for clock-skew safety across 10 shop terminals
+            const safeSinceDate = new Date(Math.max(0, Number(sinceMs) - 120000));
+            this.syncStatus.mode = 'delta-live';
+            this.notifyStatus();
+
+            this.unsubDelta = db.collection('products')
+                .where('updatedAt', '>', safeSinceDate)
+                .onSnapshot((snapshot) => {
+                    const changedItems = [];
+                    let maxUpdatedMs = this.syncStatus.lastSyncMs || Date.now();
+
+                    snapshot.docChanges().forEach((change) => {
+                        const docData = { id: change.doc.id, ...change.doc.data() };
+                        if (change.type === 'added' || change.type === 'modified') {
+                            this.productsMap.set(change.doc.id, docData);
+                            changedItems.push(docData);
+                            this.syncStatus.deltaReadsSession += 1;
+
+                            const docTs = safeToDate(docData.updatedAt);
+                            if (docTs && docTs.getTime() > maxUpdatedMs) {
+                                maxUpdatedMs = docTs.getTime();
+                            }
+                        } else if (change.type === 'removed') {
+                            this.productsMap.delete(change.doc.id);
+                            window.SolarisCatalogDB.deleteOne('products', change.doc.id);
+                        }
+                    });
+
+                    if (changedItems.length > 0) {
+                        const nextSyncMs = Math.max(Date.now(), maxUpdatedMs);
+                        this.syncStatus.lastSyncMs = nextSyncMs;
+                        window.SolarisCatalogDB.putBatch('products', changedItems, false);
+                        window.SolarisCatalogDB.setMeta('products_last_sync_ms', nextSyncMs);
+                        this.notifyProducts();
+                    } else {
+                        this.notifyStatus();
+                    }
+                }, (err) => {
+                    console.warn("Delta product sync paused (operating from IndexedDB cache):", err?.code || err?.message);
+                    this.syncStatus.mode = 'offline-cache';
+                    this.notifyStatus();
+                });
+        },
+
+        async runFullCatalogSync(isManualTrigger = true) {
+            if (this.syncStatus.isFullSyncing) return;
+            this.syncStatus.isFullSyncing = true;
+            this.syncStatus.mode = 'full-sync';
+            this.notifyStatus();
+
+            try {
+                const snap = await db.collection('products').get();
+                const allItems = [];
+                const missingUpdatedAtIds = [];
+
+                snap.forEach(doc => {
+                    const data = doc.data() || {};
+                    const item = { id: doc.id, ...data };
+                    allItems.push(item);
+                    if (!data.updatedAt) {
+                        missingUpdatedAtIds.push(doc.id);
+                    }
+                });
+
+                if (allItems.length > 0) {
+                    this.productsMap.clear();
+                    allItems.forEach(item => this.productsMap.set(item.id, item));
+                    await window.SolarisCatalogDB.putBatch('products', allItems, true);
+                }
+
+                const nowMs = Date.now();
+                this.syncStatus.lastSyncMs = nowMs;
+                await window.SolarisCatalogDB.setMeta('products_last_sync_ms', nowMs);
+
+                // Background one-time backfill for legacy products missing `updatedAt`
+                if (missingUpdatedAtIds.length > 0 && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
+                    this.backfillLegacyUpdatedAt(missingUpdatedAtIds);
+                }
+
+                this.notifyProducts();
+                this.startDeltaListener(nowMs);
+                return { ok: true, count: allItems.length };
+            } catch (err) {
+                console.warn("Full catalog sync fallback (using IndexedDB cache):", err?.code || err?.message);
+                this.syncStatus.mode = 'offline-cache';
+                this.notifyStatus();
+                return { ok: false, error: err?.message || 'Sync failed' };
+            } finally {
+                this.syncStatus.isFullSyncing = false;
+                this.notifyStatus();
+            }
+        },
+
+        async backfillLegacyUpdatedAt(docIds = []) {
+            const alreadyBackfilled = await window.SolarisCatalogDB.getMeta('legacy_updatedAt_backfilled_v1');
+            if (alreadyBackfilled) return;
+            try {
+                // Chunk in batches of 400 to respect Firestore 500-write batch limit
+                for (let i = 0; i < docIds.length; i += 400) {
+                    const chunk = docIds.slice(i, i + 400);
+                    const batch = db.batch();
+                    chunk.forEach(id => {
+                        const ref = db.collection('products').doc(id);
+                        batch.update(ref, { updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+                    });
+                    await batch.commit();
+                }
+                await window.SolarisCatalogDB.setMeta('legacy_updatedAt_backfilled_v1', true);
+            } catch (e) {
+                console.warn("Legacy updatedAt backfill paused:", e?.code || e?.message);
+            }
+        }
+    };
+
     // --- 2. GLOBAL CONTEXTS (State Management) ---
 
     // Application Data Context
@@ -2951,6 +3597,7 @@
         const [productsLoading, setProductsLoading] = useState(true);
         const [highPriorityLoaded, setHighPriorityLoaded] = useState(false);
         const [backgroundFetchInitiated, setBackgroundFetchInitiated] = useState(false);
+        const [productSyncStatus, setProductSyncStatus] = useState(() => window.SolarisSmartProductEngine.syncStatus);
         
         // --- NEW: System Config State ---
         const [systemConfig, setSystemConfig] = useState({ appName: 'PO System' });
@@ -2995,6 +3642,7 @@
                     khqrConfig: s.khqrConfig ? {
                         enabled: !!s.khqrConfig.enabled,
                         paywayVerifyEnabled: s.khqrConfig.paywayVerifyEnabled !== false,
+                        bypassFirebaseDb: s.khqrConfig.bypassFirebaseDb !== false,
                         paywayChatId: s.khqrConfig.paywayChatId || '',
                         accountName: s.khqrConfig.accountName || '',
                         khrAccount: s.khqrConfig.khrAccount || '',
@@ -3046,55 +3694,41 @@
             return () => unsubscribe();
         }, []);
 
-        // STEP 2: Single-Listener Quota-Optimized Product Loader + LocalStorage Cache
+        // PHASE 2: Smart IndexedDB + Delta Live Sync Product Loader (10,000+ Items Across 10 Shops)
         useEffect(() => {
-            // 1. Hydrate immediately from LocalStorage cache so POS works in 0ms even if Firestore quota is exhausted!
-            try {
-                const cachedProducts = localStorage.getItem('solaris_products_cache_v1');
-                if (cachedProducts) {
-                    const parsed = JSON.parse(cachedProducts);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                        setProducts(parsed);
-                        setHighPriorityLoaded(true);
-                        setProductsLoading(false);
-                    }
-                }
-            } catch (e) {}
-
             setBackgroundFetchInitiated(true);
-            const allProductsMap = new Map();
 
-            // 2. Attach ONE single collection listener instead of N chunked vendor listeners (cuts peak snapshot listeners by 80%)
-            const unsub = db.collection('products').onSnapshot(snapshot => {
-                let hasChanges = false;
-                snapshot.docChanges().forEach((change) => {
-                    hasChanges = true;
-                    if (change.type === "added" || change.type === "modified") {
-                        allProductsMap.set(change.doc.id, { id: change.doc.id, ...change.doc.data() });
-                    } else if (change.type === "removed") {
-                        allProductsMap.delete(change.doc.id);
-                    }
-                });
-
-                if (hasChanges || snapshot.empty) {
-                    const list = Array.from(allProductsMap.values());
-                    setProducts(list);
-                    try {
-                        localStorage.setItem('solaris_products_cache_v1', JSON.stringify(list));
-                    } catch (e) {}
-                }
-                setHighPriorityLoaded(true);
-                setProductsLoading(false);
-            }, (error) => {
-                console.warn("Product sync warning (using local cache):", error?.code || error?.message);
-                if (error?.code === 'resource-exhausted' && window.SolarisPayWayVerifier) {
-                    window.SolarisPayWayVerifier.isQuotaExceeded = true;
-                }
+            const unsubProducts = window.SolarisSmartProductEngine.subscribeProducts((updatedList) => {
+                setProducts(updatedList);
                 setHighPriorityLoaded(true);
                 setProductsLoading(false);
             });
 
-            return () => unsub();
+            const unsubStatus = window.SolarisSmartProductEngine.subscribeStatus((st) => {
+                setProductSyncStatus(st);
+                if (st.mode === 'delta-live' || st.mode === 'cache-ready' || st.mode === 'offline-cache') {
+                    setHighPriorityLoaded(true);
+                    setProductsLoading(false);
+                }
+            });
+
+            const unsubMutator = window.SolarisCollectionMutator
+                ? window.SolarisCollectionMutator.subscribe('products', () => {
+                    setProducts(window.SolarisSmartProductEngine.getProductsArray());
+                })
+                : () => {};
+
+            window.SolarisSmartProductEngine.init();
+
+            return () => {
+                unsubProducts();
+                unsubStatus();
+                unsubMutator();
+            };
+        }, []);
+
+        const forceFullProductSync = useCallback(async () => {
+            return await window.SolarisSmartProductEngine.runFullCatalogSync(true);
         }, []);
 
         const isLoading = vendorsLoading || shopsLoading || (enableHeavyCollections && (posLoading || transfersLoading || usersLoading));
@@ -3112,7 +3746,9 @@
             posLoading, transfersLoading, usersLoading, customersLoading,
             backgroundFetchInitiated, backgroundLoadComplete,
             systemConfig, // <-- Expose config
-            activateHeavyCollections // <-- Lazy-load trigger for Inventory / Admin tabs
+            activateHeavyCollections, // <-- Lazy-load trigger for Inventory / Admin tabs
+            productSyncStatus, // <-- Smart Delta Sync Telemetry
+            forceFullProductSync // <-- Manual Full Cloud Sync Trigger
         };
 
         return (
@@ -3236,7 +3872,11 @@
                 ? db.collection(collectionName).doc(docId)
                 : db.collection(collectionName).doc();
             const finalId = targetRef.id;
-            const localSafeData = this.sanitizeForLocalCache(data);
+            const dataWithTimestamp = {
+                ...data,
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            };
+            const localSafeData = this.sanitizeForLocalCache(dataWithTimestamp);
 
             try {
                 const { upserts, deleted } = this.getOverrides(collectionName);
@@ -3253,13 +3893,20 @@
                 localStorage.setItem(cacheKey, JSON.stringify(mergedList.slice(0, 500)));
             } catch (e) {}
 
+            // Sync with IndexedDB Catalog Vault for products, vendors, and categories
+            if (collectionName === 'products' && window.SolarisSmartProductEngine) {
+                window.SolarisSmartProductEngine.applyLocalProductUpsert(finalId, localSafeData);
+            } else if ((collectionName === 'vendors' || collectionName === 'categories') && window.SolarisCatalogDB) {
+                window.SolarisCatalogDB.putBatch(collectionName, [{ ...localSafeData, id: finalId }], false);
+            }
+
             this.notify(collectionName);
 
             // Always persist to Firestore / IndexedDB with automatic retry if a transient stream error occurs
             const performWrite = (attempt = 1) => {
                 const writePromise = isNew
-                    ? targetRef.set(data)
-                    : targetRef.set(data, { merge: true });
+                    ? targetRef.set(dataWithTimestamp)
+                    : targetRef.set(dataWithTimestamp, { merge: true });
 
                 writePromise.catch(err => {
                     const msg = err?.message || '';
@@ -3295,6 +3942,12 @@
                 }
             } catch (e) {}
 
+            if (collectionName === 'products' && window.SolarisSmartProductEngine) {
+                window.SolarisSmartProductEngine.applyLocalProductDelete(docId, true);
+            } else if ((collectionName === 'vendors' || collectionName === 'categories') && window.SolarisCatalogDB) {
+                window.SolarisCatalogDB.deleteOne(collectionName, docId);
+            }
+
             this.notify(collectionName);
 
             // Always persist deletion to Firestore / IndexedDB with stream-retry protection
@@ -3314,9 +3967,10 @@
         }
     };
 
-    // Fetches a Firestore collection with real-time updates (supports lazy loading via options.enabled & LocalStorage Quota Fallback)
+    // Fetches a Firestore collection with real-time updates (supports IndexedDB hydration for vendors & categories + lazy loading)
     const useCollection = (collectionName, options = {}) => {
         const cacheKey = `solaris_col_cache_${collectionName}_${JSON.stringify(options.query || [])}`;
+        const isIdbCatalogStore = !options.query && (collectionName === 'vendors' || collectionName === 'categories');
         const [rawCloudData, setRawCloudData] = useState(() => {
             try {
                 const cached = localStorage.getItem(cacheKey);
@@ -3336,6 +3990,19 @@
             });
         }, [collectionName]);
 
+        // Hydrate vendors & categories from IndexedDB immediately on mount
+        useEffect(() => {
+            if (!isIdbCatalogStore || !window.SolarisCatalogDB) return;
+            let active = true;
+            window.SolarisCatalogDB.getAll(collectionName).then(items => {
+                if (active && Array.isArray(items) && items.length > 0) {
+                    setRawCloudData(prev => (prev.length === 0 ? items : prev));
+                    setLoading(false);
+                }
+            }).catch(() => {});
+            return () => { active = false; };
+        }, [collectionName, isIdbCatalogStore]);
+
         useEffect(() => {
             if (!isEnabled) {
                 setLoading(false);
@@ -3353,6 +4020,9 @@
                 const items = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 setRawCloudData(items);
                 setLoading(false);
+                if (isIdbCatalogStore && window.SolarisCatalogDB) {
+                    window.SolarisCatalogDB.putBatch(collectionName, items, true);
+                }
                 if (items.length > 0 && items.length <= 500) {
                     try {
                         localStorage.setItem(cacheKey, JSON.stringify(items));
@@ -3367,7 +4037,7 @@
             });
 
             return () => unsubscribe();
-        }, [collectionName, JSON.stringify(options.query), isEnabled, cacheKey]);
+        }, [collectionName, JSON.stringify(options.query), isEnabled, cacheKey, isIdbCatalogStore]);
 
         const data = useMemo(() => {
             if (!window.SolarisCollectionMutator) return rawCloudData;
@@ -3404,34 +4074,45 @@
         }
         if (typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
         if (typeof timestamp._seconds === 'number') return new Date(timestamp._seconds * 1000);
-        // Handle un-resolved firebase.firestore.FieldValue.serverTimestamp() sentinel objects stored in local cache
-        if (typeof timestamp === 'object' && timestamp._methodName === 'FieldValue.serverTimestamp') {
+        // Handle un-resolved firebase.firestore.FieldValue.serverTimestamp() sentinel objects (v8 & v9 compat)
+        if (
+            typeof timestamp === 'object' &&
+            (timestamp._methodName === 'FieldValue.serverTimestamp' ||
+             timestamp._methodName === 'serverTimestamp' ||
+             timestamp._delegate?._methodName === 'serverTimestamp' ||
+             timestamp._delegate?._methodName === 'FieldValue.serverTimestamp' ||
+             (typeof timestamp.isEqual === 'function' && typeof timestamp.toDate !== 'function' && timestamp.seconds === undefined))
+        ) {
             return new Date();
         }
         return null;
     };
 
-    // Safely formats any timestamp into a locale date-time string without ever throwing on null
+    // Safely formats any timestamp into DD-MM-YY | HH:MM:SS AM/PM across the entire application
     const safeFormatDateTime = (timestamp, fallback = '-') => {
         const d = safeToDate(timestamp);
-        return d ? d.toLocaleString() : fallback;
+        if (!d) return fallback;
+        const pad = (n) => String(n).padStart(2, '0');
+        const day = pad(d.getDate());
+        const month = pad(d.getMonth() + 1);
+        const year = String(d.getFullYear()).slice(-2);
+        let hours = d.getHours();
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        hours = hours % 12 || 12;
+        const mins = pad(d.getMinutes());
+        const secs = pad(d.getSeconds());
+        return `${day}-${month}-${year} | ${pad(hours)}:${mins}:${secs} ${ampm}`;
     };
 
-    // Safely formats any timestamp into a short time string (HH:MM) without ever throwing on null
+    // Safely formats any timestamp into DD-MM-YY | HH:MM:SS AM/PM without ever throwing on null
     const safeFormatTime = (timestamp, fallback = 'Just now') => {
-        const d = safeToDate(timestamp);
-        return d ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : fallback;
+        return safeFormatDateTime(timestamp, fallback);
     };
 
-    // Formats a date object or compatible string into DD-MM-YYYY format
+    // Formats a date object or compatible string into DD-MM-YY | HH:MM:SS AM/PM format
     const formatDateDDMMYYYY = (dateObj) => {
         if (!dateObj) return 'N/A';
-        const d = safeToDate(dateObj);
-        if (!d) return 'N/A';
-        const day = String(d.getDate()).padStart(2, '0');
-        const month = String(d.getMonth() + 1).padStart(2, '0'); // Month is 0-indexed
-        const year = d.getFullYear();
-        return `${day}-${month}-${year}`;
+        return safeFormatDateTime(dateObj, 'N/A');
     };
 
     // Generates a unique, non-duplicate product code.
@@ -3539,10 +4220,13 @@
         return `${payloadWithoutCRC}${crcHex}`;
     };
 
-    // --- NEW: Bank AutoSum (Telegram Feed) Modal for POS Terminal ---
+    // --- NEW: Bank AutoSum (Telegram Feed) Modal for POS Terminal (Supports Zero-Quota Bypass Mode) ---
     const BankAutoSumModal = ({ show, onClose, currentShift, shop }) => {
         const [payments, setPayments] = useState([]);
         const [loading, setLoading] = useState(true);
+        const isBypassDb = window.SolarisKHQREngine
+            ? window.SolarisKHQREngine.shouldBypassFirebaseDb(shop?.id || '', shop?.khqrConfig?.paywayChatId || '')
+            : true;
 
         useEffect(() => {
             if (!show || !currentShift) return;
@@ -3554,25 +4238,81 @@
                 : (new Date(currentShift.startTime || Date.now()).getTime());
 
             const targetChatId = (shop?.khqrConfig?.paywayChatId || '').trim();
+            const normTargetIds = targetChatId
+                ? targetChatId.split(/[\s,|;]+/).map(id => window.SolarisKHQREngine.normalizeChatId(id)).filter(Boolean)
+                : [];
 
-            const unsub = db.collection('aba_payments')
+            const collectLocalAndRenderShiftPayments = () => {
+                if (!window.SolarisPayWayVerifier) return [];
+                window.SolarisPayWayVerifier.loadLocalAbaCache();
+                const list = [];
+                window.SolarisPayWayVerifier.inMemoryAbaPayments.forEach((entry, trxId) => {
+                    if (!entry || !entry.parsedAba) return;
+                    const recMs = Number(entry.date || entry.parsedAba.receivedAt || entry.parsedAba.paidTimestamp || 0);
+                    if (recMs < shiftStartMs) return;
+                    const msgChatNorm = window.SolarisKHQREngine.normalizeChatId(entry.chatId || entry.parsedAba.chatId || '');
+                    if (normTargetIds.length > 0 && (!msgChatNorm || !normTargetIds.includes(msgChatNorm))) return;
+                    list.push({
+                        id: trxId,
+                        trxId,
+                        ...entry.parsedAba,
+                        receivedAt: recMs,
+                        claimedByOrderId: entry.claimedByOrderId || null
+                    });
+                });
+                return list.sort((a, b) => (Number(b.receivedAt) || 0) - (Number(a.receivedAt) || 0));
+            };
+
+            // Initial immediate hydration from Local Web Cache + Render SSE memory
+            setPayments(collectLocalAndRenderShiftPayments());
+
+            if (window.SolarisRenderBridge) {
+                window.SolarisRenderBridge.ensureConnected();
+                window.SolarisRenderBridge.pollRecentFromRender(true).then(() => {
+                    setPayments(collectLocalAndRenderShiftPayments());
+                    setLoading(false);
+                }).catch(() => setLoading(false));
+            } else {
+                setLoading(false);
+            }
+
+            const unsubVerifier = window.SolarisPayWayVerifier
+                ? window.SolarisPayWayVerifier.subscribe(() => {
+                    setPayments(collectLocalAndRenderShiftPayments());
+                })
+                : () => {};
+
+            // SMART BYPASS GUARD: When Bypass Firebase DB is ON (Default), do NOT attach Firestore `aba_payments` listener!
+            if (isBypassDb) {
+                return () => {
+                    if (typeof unsubVerifier === 'function') unsubVerifier();
+                };
+            }
+
+            const unsubFirestore = db.collection('aba_payments')
                 .where('receivedAt', '>=', shiftStartMs)
                 .orderBy('receivedAt', 'desc')
                 .onSnapshot(snap => {
                     let data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    // Filter strictly by the current branch's Chat ID to prevent cross-contamination
-                    if (targetChatId) {
-                        data = data.filter(d => d.chatId === targetChatId);
+                    if (normTargetIds.length > 0) {
+                        data = data.filter(d => normTargetIds.includes(window.SolarisKHQREngine.normalizeChatId(d.chatId)));
                     }
-                    setPayments(data);
+                    // Merge with local/Render cache
+                    const mergedMap = new Map();
+                    collectLocalAndRenderShiftPayments().forEach(p => mergedMap.set(String(p.id), p));
+                    data.forEach(p => mergedMap.set(String(p.id), { ...(mergedMap.get(String(p.id)) || {}), ...p }));
+                    setPayments(Array.from(mergedMap.values()).sort((a, b) => (Number(b.receivedAt) || 0) - (Number(a.receivedAt) || 0)));
                     setLoading(false);
                 }, err => {
                     console.error("Bank AutoSum Error:", err);
                     setLoading(false);
                 });
 
-            return () => unsub();
-        }, [show, currentShift, shop]);
+            return () => {
+                if (typeof unsubVerifier === 'function') unsubVerifier();
+                if (typeof unsubFirestore === 'function') unsubFirestore();
+            };
+        }, [show, currentShift, shop, isBypassDb]);
 
         if (!show) return null;
 
@@ -3589,7 +4329,7 @@
                             <div>
                                 <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Shift Started</p>
                                 <p className="text-sm text-slate-200 font-mono mt-1">
-                                    {currentShift.startTime ? new Date(currentShift.startTime.toMillis ? currentShift.startTime.toMillis() : currentShift.startTime).toLocaleString() : 'Unknown'}
+                                    {currentShift.startTime ? safeFormatDateTime(currentShift.startTime, 'Unknown') : 'Unknown'}
                                 </p>
                             </div>
                             <div className="text-left sm:text-right">
@@ -3636,7 +4376,7 @@
                                         payments.map(p => (
                                             <tr key={p.id} className="hover:bg-slate-700/50 transition-colors">
                                                 <td className="px-4 py-3 text-xs sm:text-sm text-slate-300 font-mono whitespace-nowrap">
-                                                    {new Date(p.receivedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                                    {safeFormatDateTime(p.receivedAt)}
                                                 </td>
                                                 <td className="px-4 py-3 text-xs sm:text-sm text-slate-200">
                                                     <span className="font-semibold">{p.payerName}</span> <span className="text-[11px] text-slate-400">({p.maskedAccount})</span>
@@ -4116,11 +4856,50 @@
     };
 
     const Header = ({ pageTitle, userProfile, toggleSidebar, onOpenInstallModal }) => {
+        const { productSyncStatus, forceFullProductSync } = useData();
         const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
         const [isSigningOut, setIsSigningOut] = useState(false);
+        const [isMasterSyncing, setIsMasterSyncing] = useState(false);
+        const [syncToast, setSyncToast] = useState(null);
         const [isFullscreen, setIsFullscreen] = useState(() => !!(document.fullscreenElement || document.webkitFullscreenElement));
         const [pwaState, setPwaState] = useState(() => window.SolarisPWAManager ? window.SolarisPWAManager.getState() : { canInstallPrompt: false, isInstalled: false });
         const menuRef = useRef(null);
+
+        const isSyncingNow = isMasterSyncing || !!productSyncStatus?.isFullSyncing;
+
+        const handleMasterAppSync = async () => {
+            if (isSyncingNow) return;
+            setIsMasterSyncing(true);
+            setSyncToast(null);
+            try {
+                if (window.SolarisQuotaGuard) {
+                    window.SolarisQuotaGuard.resetAndReconnect();
+                }
+                const [prodRes, vendorsSnap, categoriesSnap] = await Promise.all([
+                    forceFullProductSync ? forceFullProductSync() : window.SolarisSmartProductEngine.runFullCatalogSync(true),
+                    db.collection('vendors').get().catch(() => null),
+                    db.collection('categories').get().catch(() => null)
+                ]);
+
+                if (vendorsSnap && !vendorsSnap.empty && window.SolarisCatalogDB) {
+                    const vList = vendorsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    await window.SolarisCatalogDB.putBatch('vendors', vList, true);
+                }
+                if (categoriesSnap && !categoriesSnap.empty && window.SolarisCatalogDB) {
+                    const cList = categoriesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    await window.SolarisCatalogDB.putBatch('categories', cList, true);
+                }
+
+                const syncedCount = prodRes?.count ?? window.SolarisSmartProductEngine?.productsMap?.size ?? 0;
+                setSyncToast(`AppSync Complete (${khrFormatter.format(syncedCount)} items)`);
+                setTimeout(() => setSyncToast(null), 3500);
+            } catch (err) {
+                setSyncToast('AppSync Offline Cache Active');
+                setTimeout(() => setSyncToast(null), 3500);
+            } finally {
+                setIsMasterSyncing(false);
+            }
+        };
 
         useEffect(() => {
             if (!window.SolarisPWAManager) return;
@@ -4194,6 +4973,39 @@
                         <i className={`fas ${isFullscreen ? 'fa-compress' : 'fa-expand'}`}></i>
                         <span className="hidden lg:inline">{isFullscreen ? 'Kiosk Active' : 'Full Screen'}</span>
                     </button>
+
+                    {/* Master AppSync: 1-Click Force Full Cloud Sync Icon Button */}
+                    <div className="relative flex items-center">
+                        {syncToast && (
+                            <div className="hidden sm:flex items-center gap-1.5 mr-2 px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold whitespace-nowrap animate-fade-in-up">
+                                <i className="fas fa-check-circle text-emerald-400"></i>
+                                <span>{syncToast}</span>
+                            </div>
+                        )}
+                        <button
+                            type="button"
+                            onClick={handleMasterAppSync}
+                            disabled={isSyncingNow}
+                            title={`Master AppSync — 1-Click Force Full Cloud Sync (IDB Cache: ${khrFormatter.format(productSyncStatus?.cachedCount || 0)} items | +${productSyncStatus?.deltaReadsSession || 0} delta)`}
+                            className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 disabled:opacity-60 ${
+                                isSyncingNow
+                                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                                    : 'bg-slate-700/70 hover:bg-blue-600/25 text-emerald-400 hover:text-blue-300 border-slate-600 hover:border-blue-500/50'
+                            }`}
+                        >
+                            <i className={`fas fa-cloud-arrow-down text-sm sm:text-base ${isSyncingNow ? ' hidden' : ''}`}></i>
+                            {isSyncingNow && <i className="fas fa-sync-alt fa-spin text-sm sm:text-base text-amber-300"></i>}
+                            <span
+                                className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border-2 border-slate-800 ${
+                                    isSyncingNow
+                                        ? 'bg-amber-400 animate-ping'
+                                        : productSyncStatus?.mode === 'offline-cache'
+                                            ? 'bg-amber-400'
+                                            : 'bg-emerald-400'
+                                }`}
+                            ></span>
+                        </button>
+                    </div>
 
                     <div className="hidden md:flex flex-col items-end">
                         <span className="text-sm font-medium text-slate-200">{userProfile?.name || 'User'}</span>
@@ -5524,8 +6336,12 @@
                     sanitizedCart.forEach(item => {
                         const productRef = db.collection("products").doc(item.productId);
                         batch.update(productRef, {
-                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-item.quantity)
+                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                         });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, selectedShopId, -item.quantity);
+                        }
                     });
                 }
 
@@ -10521,7 +11337,7 @@
 
     // --- NEW: Receipt Modal ---
     const ReceiptModal = ({ saleData, onClose }) => {
-        const { customers, shops, systemConfig } = useData();
+        const { customers, shops, devices, currentDeviceId, systemConfig } = useData();
         const receiptRef = useRef(null);
         const [isPrinting, setIsPrinting] = useState(false);
         const [isSavingImage, setIsSavingImage] = useState(false);
@@ -10531,6 +11347,18 @@
             if (!saleData?.shopId || !shops) return null;
             return shops.find(s => s.id === saleData.shopId) || null;
         }, [shops, saleData?.shopId]);
+
+        const resolvedTerminalName = useMemo(() => {
+            if (saleData?.deviceName && saleData.deviceName !== 'Unknown Device') {
+                return saleData.deviceName;
+            }
+            const targetDevId = saleData?.deviceId || currentDeviceId;
+            if (targetDevId && devices) {
+                const dev = devices.find(d => d.id === targetDevId);
+                if (dev?.name) return dev.name;
+            }
+            return saleData?.deviceName || 'POS-01';
+        }, [saleData?.deviceName, saleData?.deviceId, currentDeviceId, devices]);
 
         // Resolve Receipt Template Settings (Per-Branch override or Global Default)
         const receiptTemplate = useMemo(() => {
@@ -10548,6 +11376,7 @@
                     : (shopObj?.location || ''),
                 showDateTime: merged.showDateTime !== undefined ? !!merged.showDateTime : true,
                 showStaffId: merged.showStaffId !== undefined ? !!merged.showStaffId : true,
+                showTerminalName: merged.showTerminalName !== undefined ? !!merged.showTerminalName : true,
                 showInvoiceNumber: merged.showInvoiceNumber !== undefined ? !!merged.showInvoiceNumber : true,
                 showCustomerDetails: merged.showCustomerDetails !== undefined ? !!merged.showCustomerDetails : true,
                 footerText: merged.footerText !== undefined ? merged.footerText : 'Thank you for your visit!',
@@ -10570,10 +11399,12 @@
         }, [customers, saleData?.customerId]);
 
         const formattedDateTime = useMemo(() => {
-            const d = safeToDate(saleData?.timestamp || saleData?.createdAt) || new Date();
-            const pad = (n) => String(n).padStart(2, '0');
-            return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        }, [saleData?.timestamp, saleData?.createdAt]);
+            const resolvedDate =
+                safeToDate(saleData?.createdAt) ||
+                safeToDate(saleData?.timestamp) ||
+                new Date();
+            return safeFormatDateTime(resolvedDate, safeFormatDateTime(new Date()));
+        }, [saleData?.createdAt, saleData?.timestamp]);
 
         const subtotalVal = Number(saleData?.subtotal) || (Number(saleData?.grandTotal || 0) + Number(saleData?.discount || 0));
         const manualDiscountVal = Number(saleData?.manualDiscount || 0);
@@ -10639,7 +11470,7 @@
                 html2canvas(input, { scale: 3, backgroundColor: '#ffffff', useCORS: true })
                     .then(canvas => {
                         const link = document.createElement('a');
-                        const safeDate = formattedDateTime.replace(/[:\s]/g, '-');
+                        const safeDate = formattedDateTime.replace(/[|:\s/\\]+/g, '-').replace(/-+/g, '-');
                         link.download = `Receipt-${safeDate}.png`;
                         link.href = canvas.toDataURL('image/png');
                         document.body.appendChild(link);
@@ -10708,15 +11539,15 @@
                                     )}
                                 </div>
 
-                                {(receiptTemplate.showStaffId || receiptTemplate.showDateTime) && (
+                                {(receiptTemplate.showStaffId || receiptTemplate.showTerminalName) && (
                                     <>
                                         <div className="border-b border-dashed border-gray-400 my-2.5"></div>
                                         <div className="flex justify-between items-center text-[11px] font-bold text-gray-800 gap-2 flex-wrap">
                                             {receiptTemplate.showStaffId && (
                                                 <span>Staff: {saleData.cashierName || 'Staff'}</span>
                                             )}
-                                            {receiptTemplate.showDateTime && (
-                                                <span className="ml-auto">Date: {formattedDateTime}</span>
+                                            {receiptTemplate.showTerminalName && (
+                                                <span className="ml-auto">Terminal: {resolvedTerminalName}</span>
                                             )}
                                         </div>
                                     </>
@@ -10803,31 +11634,40 @@
 
                                 {(
                                     (receiptTemplate.showInvoiceNumber && !hideInvForImage) ||
-                                    receiptTemplate.showCustomerDetails
+                                    receiptTemplate.showCustomerDetails ||
+                                    receiptTemplate.showDateTime
                                 ) && (
                                     <>
                                         <div className="border-b border-dashed border-gray-400 my-2.5"></div>
-                                        <div className="space-y-1 text-[11px] font-bold">
+                                        <div className="space-y-1.5 text-[11px] font-bold leading-normal">
                                             {receiptTemplate.showInvoiceNumber && !hideInvForImage && (
-                                                <div className="flex justify-between items-center text-gray-900">
+                                                <div className="flex justify-between items-baseline text-gray-900 py-0.5">
                                                     <span>Inv:</span>
-                                                    <span className="font-mono">{saleData.receiptNo}</span>
+                                                    <span className="font-mono text-right">{saleData.receiptNo}</span>
+                                                </div>
+                                            )}
+                                            {receiptTemplate.showCustomerDetails && (
+                                                <div className="flex justify-between items-baseline text-gray-900 gap-2 py-0.5">
+                                                    <span className="shrink-0">Cust:</span>
+                                                    <span className="break-words max-w-[195px] text-right leading-normal">{saleData.customerName || 'Walk-in'}</span>
+                                                </div>
+                                            )}
+                                            {receiptTemplate.showDateTime && (
+                                                <div className="flex justify-between items-baseline text-gray-900 py-0.5">
+                                                    <span>Date:</span>
+                                                    <span className="font-mono text-right leading-normal">{formattedDateTime}</span>
                                                 </div>
                                             )}
                                             {receiptTemplate.showCustomerDetails && (
                                                 <>
-                                                    <div className="flex justify-between items-center text-gray-900">
-                                                        <span>Cust:</span>
-                                                        <span className="truncate max-w-[180px] text-right">{saleData.customerName || 'Walk-in'}</span>
-                                                    </div>
                                                     {(saleData.customerId || activePoints > 0 || saleData.pointsEarned > 0) && (
-                                                        <div className="flex justify-between items-center text-[#d97706]">
+                                                        <div className="flex justify-between items-baseline text-[#d97706] py-0.5">
                                                             <span>Active Points:</span>
                                                             <span>{new Intl.NumberFormat('en-US').format(activePoints)} Pts</span>
                                                         </div>
                                                     )}
                                                     {freeClaimsCount > 0 && (
-                                                        <div className="flex justify-between items-center text-[#e11d48]">
+                                                        <div className="flex justify-between items-baseline text-[#e11d48] py-0.5">
                                                             <span>Free Claims:</span>
                                                             <span>{freeClaimsCount}</span>
                                                         </div>
@@ -10939,8 +11779,12 @@
                 sale.items.forEach(item => {
                     const productRef = db.collection('products').doc(item.productId);
                     batch.update(productRef, {
-                        [`stockByShop.${targetShopId}`]: firebase.firestore.FieldValue.increment(item.quantity)
+                        [`stockByShop.${targetShopId}`]: firebase.firestore.FieldValue.increment(item.quantity),
+                        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                     });
+                    if (window.SolarisSmartProductEngine) {
+                        window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, targetShopId, item.quantity);
+                    }
 
                     // 3. Log Negative Movement (Return)
                     const moveRef = db.collection("productMovement").doc();
@@ -11239,12 +12083,9 @@
             return loyaltyRules.find(r => r.shopId === 'All' && r.status !== 'Inactive') || loyaltyRules[0] || null;
         }, [loyaltyRules]);
 
-        // Helper: Format exact Date & Time (DD-MM-YYYY HH:mm)
+        // Helper: Format exact Date & Time (DD-MM-YY | HH:MM:SS AM/PM)
         const formatDateTimeFull = useCallback((ts) => {
-            const d = safeToDate(ts);
-            if (!d) return 'N/A';
-            const pad = (n) => String(n).padStart(2, '0');
-            return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            return safeFormatDateTime(ts, 'N/A');
         }, []);
 
         // Live Customer Map with Evaluated Active Points & Expiration Status
@@ -12947,8 +13788,12 @@
                     originalLossItems.forEach(item => {
                         const prodRef = db.collection('products').doc(item.productId);
                         batch.update(prodRef, {
-                            [`stockByShop.${oldLossShopInfo.id}`]: firebase.firestore.FieldValue.increment(item.quantity)
+                            [`stockByShop.${oldLossShopInfo.id}`]: firebase.firestore.FieldValue.increment(item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                         });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, oldLossShopInfo.id, item.quantity);
+                        }
                         
                         const moveRef = db.collection('productMovement').doc();
                         batch.set(moveRef, {
@@ -12970,8 +13815,12 @@
                     items.forEach(item => {
                         const prodRef = db.collection('products').doc(item.productId);
                         batch.update(prodRef, {
-                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity)
+                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                         });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, shopId, -item.quantity);
+                        }
 
                         const moveRef = db.collection('productMovement').doc();
                         batch.set(moveRef, {
@@ -13022,8 +13871,12 @@
                     items.forEach(item => {
                         const prodRef = db.collection('products').doc(item.productId);
                         batch.update(prodRef, {
-                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity)
+                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                         });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, shopId, -item.quantity);
+                        }
 
                         const moveRef = db.collection('productMovement').doc();
                         batch.set(moveRef, {
@@ -14526,7 +15379,13 @@
                     }
 
                     if (shop?.manageStock && qtyChange !== 0) {
-                        batch.update(productRef, { [`stockByShop.${poDataToAudit.shopId}`]: firebase.firestore.FieldValue.increment(qtyChange) });
+                        batch.update(productRef, {
+                            [`stockByShop.${poDataToAudit.shopId}`]: firebase.firestore.FieldValue.increment(qtyChange),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, poDataToAudit.shopId, qtyChange);
+                        }
                     }
 
                     if (qtyChange !== 0) {
@@ -14559,7 +15418,13 @@
                     const currentLiveCost = currentProduct ? (parseFloat(currentProduct.cost) || 0) : 0;
 
                     if (newCostPerUnit > 0 && Math.abs(newCostPerUnit - currentLiveCost) > 0.01) {
-                        batch.update(productRef, { cost: newCostPerUnit });
+                        batch.update(productRef, {
+                            cost: newCostPerUnit,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalProductUpsert(item.productId, { cost: newCostPerUnit });
+                        }
                         const historyRef = db.collection("costHistory").doc();
                         batch.set(historyRef, {
                             productId: item.productId, poNumber: poDataToAudit.poNumber,
@@ -14929,8 +15794,12 @@
                 deleteReport.items.forEach(item => {
                     const prodRef = db.collection('products').doc(item.productId);
                     batch.update(prodRef, {
-                        [`stockByShop.${deleteReport.shopId}`]: firebase.firestore.FieldValue.increment(item.quantity)
+                        [`stockByShop.${deleteReport.shopId}`]: firebase.firestore.FieldValue.increment(item.quantity),
+                        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                     });
+                    if (window.SolarisSmartProductEngine) {
+                        window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, deleteReport.shopId, item.quantity);
+                    }
 
                     const moveRef = db.collection('productMovement').doc();
                     batch.set(moveRef, {
@@ -16667,14 +17536,22 @@
                         // Decrement stock from the 'from' shop if it manages stock
                         if (fromShop?.manageStock) {
                             batch.update(productRef, {
-                                [`stockByShop.${transferData.fromShopId}`]: firebase.firestore.FieldValue.increment(-receivedQty)
+                                [`stockByShop.${transferData.fromShopId}`]: firebase.firestore.FieldValue.increment(-receivedQty),
+                                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                             });
+                            if (window.SolarisSmartProductEngine) {
+                                window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, transferData.fromShopId, -receivedQty);
+                            }
                         }
                         // Increment stock in the 'to' shop if it manages stock
                         if (toShop?.manageStock) {
                             batch.update(productRef, {
-                                [`stockByShop.${transferData.toShopId}`]: firebase.firestore.FieldValue.increment(receivedQty)
+                                [`stockByShop.${transferData.toShopId}`]: firebase.firestore.FieldValue.increment(receivedQty),
+                                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                             });
+                            if (window.SolarisSmartProductEngine) {
+                                window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, transferData.toShopId, receivedQty);
+                            }
                         }
 
                         // Add product movement log for transfer
@@ -17707,6 +18584,18 @@
 
         const effectiveBankStateFeedMode = configuredBankStateFeedMode;
 
+        // Evaluate whether Bank State Bypass Firebase Database Mode is ON (Default = true) for the selected shop filter
+        const isBypassFirebaseDbActive = useMemo(() => {
+            if (selectedShopId && selectedShopId !== 'All') {
+                const shopObj = shops.find(s => s.id === selectedShopId);
+                if (shopObj?.khqrConfig?.bypassFirebaseDb !== undefined) {
+                    return shopObj.khqrConfig.bypassFirebaseDb !== false;
+                }
+                return window.SolarisKHQREngine ? window.SolarisKHQREngine.shouldBypassFirebaseDb(selectedShopId) : true;
+            }
+            return window.SolarisKHQREngine ? window.SolarisKHQREngine.shouldBypassFirebaseDb() : true;
+        }, [selectedShopId, shops]);
+
         const stripTgChatId = useCallback((rawId) => {
             return window.SolarisKHQREngine
                 ? window.SolarisKHQREngine.normalizeChatId(rawId)
@@ -17893,24 +18782,53 @@
             const shopObj = (selectedShopId && selectedShopId !== 'All')
                 ? shops.find(s => s.id === selectedShopId)
                 : null;
+            const targetChatId = shopObj
+                ? getShopPaywayChatIds(shopObj).join(',')
+                : Array.from(window.SolarisKHQREngine?.getAllowedChatIdsSet() || []).join(',');
 
             try {
                 await ensureSecretChatIdsLoaded();
 
-                // Poll Render / Telegram Bot + Firestore only when explicitly requested on demand
+                let renderHistoryItems = [];
+                let mtprotoHistoryItems = [];
+
+                // Poll Render / Telegram History + Bot + Firestore when requested or when viewing a historical date range
                 if (forceNetworkPoll) {
-                    if (window.SolarisRenderBridge) {
-                        await window.SolarisRenderBridge.pollRecentFromRender(true).catch(() => {});
-                    }
-                    if (window.SolarisKHQREngine) {
-                        await window.SolarisKHQREngine.fetchRecentAbaPaymentsFromFirestore(
-                            shopObj?.khqrConfig?.paywayChatId || '',
-                            selectedShopId || '',
-                            true,
-                            true,
-                            false
-                        ).catch(() => {});
-                    }
+                    const isHistoricalRange = startMs < (Date.now() - 12 * 60 * 60 * 1000);
+                    await Promise.all([
+                        window.SolarisRenderBridge
+                            ? window.SolarisRenderBridge.pollRecentFromRender(true).catch(() => {})
+                            : Promise.resolve(),
+                        window.SolarisRenderBridge?.fetchHistoryFromRender
+                            ? window.SolarisRenderBridge.fetchHistoryFromRender({
+                                chatId: targetChatId,
+                                startMs,
+                                endMs,
+                                limit: isHistoricalRange ? 800 : 300
+                            }).then(res => {
+                                if (res?.ok && Array.isArray(res.items)) renderHistoryItems = res.items;
+                            }).catch(() => {})
+                            : Promise.resolve(),
+                        window.SolarisBrowserMTProto?.isConnected && window.SolarisBrowserMTProto?.fetchHistoricalAbaMessagesByDateRange
+                            ? window.SolarisBrowserMTProto.fetchHistoricalAbaMessagesByDateRange(
+                                targetChatId,
+                                startMs,
+                                endMs,
+                                isHistoricalRange ? 600 : 200
+                            ).then(res => {
+                                if (res?.ok && Array.isArray(res.items)) mtprotoHistoryItems = res.items;
+                            }).catch(() => {})
+                            : Promise.resolve(),
+                        window.SolarisKHQREngine
+                            ? window.SolarisKHQREngine.fetchRecentAbaPaymentsFromFirestore(
+                                targetChatId,
+                                selectedShopId || '',
+                                true,
+                                true,
+                                false
+                            ).catch(() => {})
+                            : Promise.resolve()
+                    ]);
                 }
 
                 const mergedMap = new Map();
@@ -17929,22 +18847,30 @@
                     if (recMs < startMs || recMs > endMs) return;
 
                     const cleanDocChatId = String(rawDoc.chatId || '').trim();
-                    if (window.SolarisKHQREngine && !window.SolarisKHQREngine.isChatIdAllowed(cleanDocChatId)) {
+                    if (window.SolarisKHQREngine && !window.SolarisKHQREngine.isChatIdAllowed(cleanDocChatId, targetChatId)) {
                         return;
                     }
 
+                    const prev = mergedMap.get(trxId) || {};
                     const normalized = {
+                        ...prev,
                         ...rawDoc,
                         id: trxId,
                         trxId,
-                        docId: String(fallbackId || rawDoc.id || trxId).trim(),
+                        docId: String(fallbackId || rawDoc.id || prev.docId || trxId).trim(),
                         receivedAt: recMs,
                         paidTimestamp: Number(rawDoc.paidTimestamp) || recMs,
-                        chatId: cleanDocChatId
+                        chatId: cleanDocChatId || prev.chatId || '',
+                        claimedByOrderId: rawDoc.claimedByOrderId || prev.claimedByOrderId || null,
+                        claimedByInvoiceNo: rawDoc.claimedByInvoiceNo || prev.claimedByInvoiceNo || null
                     };
 
                     mergedMap.set(trxId, normalized);
                 };
+
+                // 0. Historical items pulled directly from Render `/history` & Browser MTProto
+                renderHistoryItems.forEach(item => addCandidate(item, item?.trxId));
+                mtprotoHistoryItems.forEach(item => addCandidate(item, item?.trxId));
 
                 // 1. In-memory live payments
                 if (window.SolarisPayWayVerifier) {
@@ -17964,21 +18890,21 @@
                     });
                 }
 
-                // 2. Direct Firestore `aba_payments` query for the selected date range
-                if (!window.SolarisPayWayVerifier?.isQuotaExceeded) {
+                // 2. Direct Firestore `aba_payments` query ONLY when Bypass Firebase Database Mode is OFF!
+                if (!isBypassFirebaseDbActive && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
                     try {
                         const snap = await db.collection('aba_payments')
                             .where('receivedAt', '>=', startMs)
                             .where('receivedAt', '<=', endMs)
                             .orderBy('receivedAt', 'desc')
-                            .limit(400)
+                            .limit(500)
                             .get();
                         snap.forEach(doc => addCandidate(doc.data(), doc.id));
                     } catch (qErr) {
                         try {
                             const fallbackSnap = await db.collection('aba_payments')
                                 .orderBy('receivedAt', 'desc')
-                                .limit(150)
+                                .limit(250)
                                 .get();
                             fallbackSnap.forEach(doc => addCandidate(doc.data(), doc.id));
                         } catch (e2) {}
@@ -17996,7 +18922,7 @@
                 isRefreshingBankStateRef.current = false;
                 setBankStateLoading(false);
             }
-        }, [startDate, endDate, selectedShopId, shops, ensureSecretChatIdsLoaded]);
+        }, [startDate, endDate, selectedShopId, shops, isBypassFirebaseDbActive, ensureSecretChatIdsLoaded, getShopPaywayChatIds]);
 
         // --- INTEGRATED WORKFLOW: Auto-Subscribe & Stream in "Live Feed" Mode vs. Pause in "On-Demand Fetch" Mode ---
         useEffect(() => {
@@ -18185,16 +19111,95 @@
             return filteredBankStateData.slice(start, start + bankStateItemsPerPage);
         }, [filteredBankStateData, bankStateCurrentPage]);
 
+        // --- NEW: Live SubTotal Amount Transaction Table by Shop Location ---
+        const bankStateSubtotalsByShop = useMemo(() => {
+            const map = new Map();
+            let grandTotalKhr = 0;
+            let grandTotalUsd = 0;
+            let grandConvertedKhr = 0;
+            let grandCount = 0;
+            let grandVerifiedCount = 0;
+
+            filteredBankStateData.forEach(b => {
+                const shopObj = resolveShopForBankPayment(b);
+                const shopKey = shopObj ? shopObj.id : (b.merchantName || b.chatId || 'unassigned');
+                const shopLabel = shopObj ? shopObj.name : (b.merchantName || `Chat ${b.chatId || 'Unknown'}`);
+                const rate = Math.max(100, Number(shopObj?.khqrConfig?.exchangeRate) || 4000);
+
+                if (!map.has(shopKey)) {
+                    map.set(shopKey, {
+                        shopId: shopObj?.id || '',
+                        shopName: shopLabel,
+                        chatId: b.chatId || shopObj?.khqrConfig?.paywayChatId || '-',
+                        exchangeRate: rate,
+                        trxCount: 0,
+                        verifiedCount: 0,
+                        unverifiedCount: 0,
+                        subtotalKhr: 0,
+                        subtotalUsd: 0,
+                        combinedEquivKhr: 0
+                    });
+                }
+
+                const entry = map.get(shopKey);
+                const amt = Number(b.amount) || 0;
+                const isUsd = String(b.currency || 'KHR').toUpperCase() === 'USD';
+                const isClaimed = !!b.claimedByOrderId;
+
+                entry.trxCount += 1;
+                if (isClaimed) entry.verifiedCount += 1;
+                else entry.unverifiedCount += 1;
+
+                if (isUsd) {
+                    entry.subtotalUsd += amt;
+                    entry.combinedEquivKhr += Math.round(amt * entry.exchangeRate);
+                    grandTotalUsd += amt;
+                    grandConvertedKhr += Math.round(amt * entry.exchangeRate);
+                } else {
+                    entry.subtotalKhr += amt;
+                    entry.combinedEquivKhr += Math.round(amt);
+                    grandTotalKhr += amt;
+                    grandConvertedKhr += Math.round(amt);
+                }
+
+                grandCount += 1;
+                if (isClaimed) grandVerifiedCount += 1;
+            });
+
+            const rows = Array.from(map.values()).sort((a, b) => b.combinedEquivKhr - a.combinedEquivKhr);
+            return {
+                rows,
+                grandTotalKhr,
+                grandTotalUsd,
+                grandConvertedKhr,
+                grandCount,
+                grandVerifiedCount,
+                grandUnverifiedCount: Math.max(0, grandCount - grandVerifiedCount)
+            };
+        }, [filteredBankStateData, resolveShopForBankPayment]);
+
+        // Smart Refresh Handler for Live Feed Mode (Forces MTProto + Render SSE + Bot + Firestore Sync)
+        const handleSmartBankFeedRefresh = useCallback(async () => {
+            if (effectiveBankStateFeedMode !== 'live') return;
+            const targetShopObj = (selectedShopId && selectedShopId !== 'All')
+                ? shops.find(s => s.id === selectedShopId)
+                : null;
+            const targetChatId = targetShopObj?.khqrConfig?.paywayChatId || '';
+
+            if (window.SolarisQuotaGuard) {
+                window.SolarisQuotaGuard.resetAndReconnect();
+            }
+            if (window.SolarisBrowserMTProto?.isConnected) {
+                await window.SolarisBrowserMTProto.scanRecentDialogsForAbaMessages(targetChatId, true).catch(() => {});
+            }
+            if (window.SolarisRenderBridge) {
+                window.SolarisRenderBridge.ensureConnected();
+            }
+            await refreshBankStateMultiSource(true, true);
+        }, [effectiveBankStateFeedMode, selectedShopId, shops, refreshBankStateMultiSource]);
+
         const formatDateTimeFullAba = useCallback((ts) => {
-            const num = Number(ts);
-            if (!num) return 'N/A';
-            const d = new Date(num);
-            const pad = (n) => String(n).padStart(2, '0');
-            const yy = String(d.getFullYear()).slice(-2);
-            let h = d.getHours();
-            const ampm = h >= 12 ? 'PM' : 'AM';
-            h = h % 12 || 12;
-            return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${yy} | ${pad(h)}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${ampm}`;
+            return safeFormatDateTime(ts, 'N/A');
         }, []);
 
         const handleBulkDeleteBankState = async () => {
@@ -18220,25 +19225,27 @@
                     }).catch(() => {});
                 }
 
-                // 3. Delete documents from Firestore `/aba_payments` in batches of 450
-                const chunks = [];
-                for (let i = 0; i < idsToDelete.length; i += 450) {
-                    chunks.push(idsToDelete.slice(i, i + 450));
-                }
+                // 3. Delete documents from Firestore `/aba_payments` ONLY when Bypass Firebase DB is OFF
+                if (!isBypassFirebaseDbActive) {
+                    const chunks = [];
+                    for (let i = 0; i < idsToDelete.length; i += 450) {
+                        chunks.push(idsToDelete.slice(i, i + 450));
+                    }
 
-                for (const chunk of chunks) {
-                    const batch = db.batch();
-                    chunk.forEach(id => {
-                        batch.delete(db.collection('aba_payments').doc(id));
-                    });
-                    await batch.commit();
+                    for (const chunk of chunks) {
+                        const batch = db.batch();
+                        chunk.forEach(id => {
+                            batch.delete(db.collection('aba_payments').doc(id));
+                        });
+                        await batch.commit();
+                    }
                 }
 
                 setModal({
                     type: 'message',
                     data: {
                         title: 'Deleted Successfully',
-                        message: `Deleted ${targetList.length} bank transaction(s) from Bank State & Firebase storage.`
+                        message: `Deleted ${targetList.length} bank transaction(s) from ${isBypassFirebaseDbActive ? 'Render & Local Web Cache' : 'Bank State & Firebase storage'}.`
                     }
                 });
             } catch (err) {
@@ -18273,12 +19280,14 @@
                     }).catch(() => {});
                 }
 
-                // 3. Delete from Firestore `/aba_payments`
-                const batch = db.batch();
-                idsToDelete.forEach(id => {
-                    batch.delete(db.collection('aba_payments').doc(id));
-                });
-                await batch.commit();
+                // 3. Delete from Firestore `/aba_payments` ONLY when Bypass Firebase DB is OFF
+                if (!isBypassFirebaseDbActive) {
+                    const batch = db.batch();
+                    idsToDelete.forEach(id => {
+                        batch.delete(db.collection('aba_payments').doc(id));
+                    });
+                    await batch.commit();
+                }
 
                 setModal({
                     type: 'message',
@@ -18317,12 +19326,14 @@
             try {
                 const batch = db.batch();
                 
-                // 1. Update aba_payments document
-                const paymentRef = db.collection('aba_payments').doc(payment.id);
-                batch.update(paymentRef, {
-                    claimedByOrderId: sale.id,
-                    claimedByInvoiceNo: sale.receiptNo
-                });
+                // 1. Update aba_payments document ONLY when Bypass Firebase DB is OFF
+                if (!isBypassFirebaseDbActive) {
+                    const paymentRef = db.collection('aba_payments').doc(payment.id);
+                    batch.set(paymentRef, {
+                        claimedByOrderId: sale.id,
+                        claimedByInvoiceNo: sale.receiptNo
+                    }, { merge: true });
+                }
 
                 // 2. Update sales document to reflect the linked KHQR payment
                 const saleRef = db.collection('sales').doc(sale.id);
@@ -18841,8 +19852,12 @@
                         if (stockDelta !== 0) {
                             const prodRef = db.collection('products').doc(prodId);
                             batch.update(prodRef, {
-                                [`stockByShop.${origSale.shopId}`]: firebase.firestore.FieldValue.increment(stockDelta)
+                                [`stockByShop.${origSale.shopId}`]: firebase.firestore.FieldValue.increment(stockDelta),
+                                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                             });
+                            if (window.SolarisSmartProductEngine) {
+                                window.SolarisSmartProductEngine.applyLocalStockDelta(prodId, origSale.shopId, stockDelta);
+                            }
                         }
                     });
                 }
@@ -18918,8 +19933,12 @@
                             if (qty > 0) {
                                 const prodRef = db.collection('products').doc(item.productId);
                                 batch.update(prodRef, {
-                                    [`stockByShop.${targetSale.shopId}`]: firebase.firestore.FieldValue.increment(qty)
+                                    [`stockByShop.${targetSale.shopId}`]: firebase.firestore.FieldValue.increment(qty),
+                                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                                 });
+                                if (window.SolarisSmartProductEngine) {
+                                    window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, targetSale.shopId, qty);
+                                }
                             }
                         });
                     }
@@ -19981,51 +21000,35 @@
                                         <table className="min-w-full divide-y divide-slate-700">
                                             <thead className="bg-slate-900/50">
                                                 <tr>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date & Time</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop Name</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift Name</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff Name</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date &amp; Time</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (KHR)</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (USD)</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (KHR)</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (USD)</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Discount</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Net Sale</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
+                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Discount</th>
+                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Sale</th>
+                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Margin</th>
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
-                                                {shiftsData.filter(s => s.status === 'closed').map(shift => {
-                                                    const shopName = shops.find(s => s.id === shift.shopId)?.name || 'Unknown';
+                                                {shiftsData.filter(s => s.status === 'closed').map(s => {
+                                                    const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
                                                     return (
-                                                        <tr key={shift.id} className="hover:bg-slate-700/50">
-                                                            <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">
-                                                                {safeFormatDateTime(shift.endTime || shift.startTime, '-')}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-slate-200 font-semibold">{shopName}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-300">{shift.shiftName || '-'}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-300">{shift.closedBy || shift.cashierName || '-'}</td>
-                                                            <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold">
-                                                                ៛{khrFormatter.format(shift.closeInputCashKHR || 0)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-emerald-300 font-bold">
-                                                                ${Number(shift.closeInputCashUSD || 0).toFixed(2)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-sky-400 font-bold">
-                                                                ៛{khrFormatter.format(shift.closeInputBankKHR || 0)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-sky-300 font-bold">
-                                                                ${Number(shift.closeInputBankUSD || 0).toFixed(2)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-rose-400 font-semibold">
-                                                                -៛{khrFormatter.format(shift.statsDiscount || 0)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-emerald-400 font-black">
-                                                                ៛{khrFormatter.format(shift.statsNet || shift.totalSales || 0)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-cyan-400 font-bold">
-                                                                {Number(shift.statsMargin || 0).toFixed(2)}%
-                                                            </td>
+                                                        <tr key={s.id} className="hover:bg-slate-700/50">
+                                                            <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
+                                                            <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
+                                                            <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
+                                                            <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono text-emerald-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono text-emerald-300">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono text-sky-300">{usdFormatter.format(s.closeInputBankUSD || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono text-rose-400">៛{khrFormatter.format(s.statsDiscount || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono font-bold text-white">៛{khrFormatter.format(s.statsNet || s.totalSales || 0)}</td>
+                                                            <td className="px-4 py-3 text-sm text-right font-mono font-bold text-cyan-400">{Number(s.statsMargin || 0).toFixed(2)}%</td>
                                                         </tr>
                                                     );
                                                 })}
@@ -20036,23 +21039,25 @@
                             </TableCard>
                         )}
 
-                        {/* NEW: Bank State (TG Feed) Log (Mode Strictly Controlled by Settings → KHQR & ABA PayWay Configuration) */}
+                        {/* NEW: Phase 7 - Bank State (Telegram Feed) */}
                         {activeTab === 'bank-state' && (
-                            <TableCard title={`Bank State (Telegram Feed) - ${filteredBankStateData.length} Records`}>
-                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-row justify-between items-center gap-2.5">
-                                    <div className="relative flex-1 max-w-md min-w-0">
+                            <TableCard title={`Bank State (Telegram Feed) - ${filteredBankStateData.length} Transactions`}>
+                                {/* Top Search & Mode Status Bar */}
+                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-3">
+                                    {/* 1. Search Box */}
+                                    <div className="relative flex-1 max-w-md">
                                         <input
                                             type="text"
                                             value={bankStateSearchTerm}
-                                            onChange={e => setBankStateSearchTerm(e.target.value)}
-                                            placeholder="Search payer, bank, APV, or Invoice..."
+                                            onChange={e => { setBankStateSearchTerm(e.target.value); setBankStateCurrentPage(1); }}
+                                            placeholder="Search payer name, bank name, APV, or invoice no..."
                                             className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm h-[40px]"
                                         />
                                         <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
                                         {bankStateSearchTerm && (
                                             <button
                                                 type="button"
-                                                onClick={() => setBankStateSearchTerm('')}
+                                                onClick={() => { setBankStateSearchTerm(''); setBankStateCurrentPage(1); }}
                                                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                                             >
                                                 <i className="fas fa-times-circle text-xs"></i>
@@ -20060,54 +21065,177 @@
                                         )}
                                     </div>
 
-                                    {/* Compact Icon-Only Controls: Mode Status, Purge Unconfigured Chat IDs, & Fetch Bank Feed */}
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                        {/* 1. Mode Indicator Icon (Read-Only, Configured in Settings → KHQR & ABA PayWay Configuration) */}
-                                        <div
-                                            className={`w-10 h-10 rounded-xl border flex items-center justify-center relative shrink-0 ${
+                                    {/* 2. Mode Pill + Bypass DB Badge + Purge Unconfigured Button + Smart Refresh Button */}
+                                    <div className="flex flex-wrap items-center justify-end gap-2">
+                                        <span
+                                            className={`px-3 py-2 rounded-xl text-xs font-bold border flex items-center gap-1.5 h-[40px] ${
+                                                isBypassFirebaseDbActive
+                                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                                    : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                                            }`}
+                                            title={
+                                                isBypassFirebaseDbActive
+                                                    ? 'Bank State Bypass Firebase Database is ON (Default): 0 Firebase Reads/Writes — Streaming directly from Telegram MTProto → Render.com → Web Local Cache'
+                                                    : 'Bank State Bypass Firebase Database is OFF: All Bank State transactions are saved & queried in Firebase Firestore (/aba_payments)'
+                                            }
+                                        >
+                                            <i className={`fas ${isBypassFirebaseDbActive ? 'fa-bolt text-emerald-400' : 'fa-database text-amber-400'}`}></i>
+                                            <span>{isBypassFirebaseDbActive ? 'Bypass DB: ON (0 Quota)' : 'Firebase DB: ON'}</span>
+                                        </span>
+
+                                        <span
+                                            className={`px-3 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 h-[40px] ${
                                                 effectiveBankStateFeedMode === 'live'
-                                                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-                                                    : 'bg-sky-500/15 border-sky-500/40 text-sky-300'
+                                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                                    : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                                            }`}
+                                            title="Configured in Settings → KHQR & ABA PayWay Configuration"
+                                        >
+                                            <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
+                                            <span>Mode: {effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
+                                        </span>
+
+                                        {userProfile?.role === 'Admin' && (
+                                            <button
+                                                type="button"
+                                                onClick={handlePurgeUnconfiguredChatIdsFromDb}
+                                                disabled={bankStateLoading}
+                                                className="px-3 py-2 h-[40px] rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-xs font-bold transition flex items-center gap-1.5"
+                                                title="Purge stray transactions from unconfigured Telegram Chat IDs"
+                                            >
+                                                <i className="fas fa-broom"></i>
+                                                <span className="hidden sm:inline">Clean Stray IDs</span>
+                                            </button>
+                                        )}
+
+                                        {/* 3. Smart Refresh Bank Feed Icon Button (Active & Smart when Report Mode is set to 'Live Feed' in KHQR Settings) */}
+                                        <button
+                                            type="button"
+                                            disabled={bankStateLoading || effectiveBankStateFeedMode !== 'live'}
+                                            onClick={handleSmartBankFeedRefresh}
+                                            className={`w-10 h-10 rounded-xl border transition flex items-center justify-center relative shrink-0 ${
+                                                effectiveBankStateFeedMode === 'live'
+                                                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/50 shadow-md shadow-emerald-900/30 active:scale-95 cursor-pointer'
+                                                    : 'bg-slate-800/70 text-slate-500 border-slate-700 opacity-50 cursor-not-allowed'
                                             }`}
                                             title={
                                                 effectiveBankStateFeedMode === 'live'
-                                                    ? 'Mode: Live Feed (Configured in Settings → KHQR & ABA PayWay Configuration)'
-                                                    : 'Mode: On-Demand Fetch (Configured in Settings → KHQR & ABA PayWay Configuration)'
+                                                    ? 'Smart Live Refresh — Force Instant Sync from Telegram MTProto, Render Bridge & Cloud Feed'
+                                                    : 'Smart Refresh Disabled — Switch "Bank State Report Mode" to "Live Feed" in Settings → KHQR & ABA PayWay Configuration to enable'
                                             }
                                         >
-                                            {effectiveBankStateFeedMode === 'live' ? (
-                                                <>
-                                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping absolute top-1.5 right-1.5"></span>
-                                                    <i className="fas fa-satellite-dish text-sm text-emerald-400"></i>
-                                                </>
-                                            ) : (
-                                                <i className="fas fa-hand-pointer text-sm text-sky-400"></i>
+                                            <i className={`fas fa-sync-alt text-sm ${bankStateLoading ? 'fa-spin' : ''}`}></i>
+                                            {effectiveBankStateFeedMode === 'live' && !bankStateLoading && (
+                                                <span className="w-2 h-2 rounded-full bg-amber-300 border border-emerald-800 absolute -top-0.5 -right-0.5"></span>
                                             )}
-                                        </div>
-
-                                        {/* 2. Purge Unconfigured Chat IDs Icon Button */}
-                                        <button
-                                            type="button"
-                                            onClick={handlePurgeUnconfiguredChatIdsFromDb}
-                                            disabled={bankStateLoading}
-                                            className="w-10 h-10 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 transition flex items-center justify-center active:scale-95 disabled:opacity-50"
-                                            title="Purge Unconfigured Chat IDs from /aba_payments"
-                                        >
-                                            <i className="fas fa-broom text-sm"></i>
-                                        </button>
-
-                                        {/* 3. Fetch / Refresh Bank Feed Icon Button */}
-                                        <button
-                                            type="button"
-                                            disabled={bankStateLoading}
-                                            onClick={() => refreshBankStateMultiSource(true, true)}
-                                            className="w-10 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition flex items-center justify-center shadow-md shadow-emerald-900/30 active:scale-95 disabled:opacity-50"
-                                            title={effectiveBankStateFeedMode === 'live' ? 'Refresh Bank Feed Now' : 'Fetch Bank Feed'}
-                                        >
-                                            <i className={`fas ${bankStateLoading ? 'fa-spinner fa-spin' : 'fa-cloud-download-alt'} text-sm`}></i>
                                         </button>
                                     </div>
                                 </div>
+
+                                {/* NEW: Live SubTotal Amount Transaction Table by Shop Location */}
+                                {bankStateSubtotalsByShop.rows.length > 0 && (
+                                    <div className="mb-5 bg-slate-900/70 rounded-xl border border-slate-700/90 overflow-hidden shadow-inner">
+                                        <div className="px-4 py-2.5 bg-slate-900 border-b border-slate-700/80 flex flex-wrap items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                                                <h5 className="text-xs font-black uppercase tracking-wider text-emerald-300 flex items-center gap-1.5">
+                                                    <i className="fas fa-store-alt text-orange-400"></i>
+                                                    <span>Live SubTotal Amount by Shop Location ({bankStateSubtotalsByShop.rows.length} {bankStateSubtotalsByShop.rows.length === 1 ? 'Shop' : 'Shops'})</span>
+                                                </h5>
+                                            </div>
+                                            <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
+                                                <span>Total Trx: <strong className="text-white">{bankStateSubtotalsByShop.grandCount}</strong></span>
+                                                <span>•</span>
+                                                <span>Verified: <strong className="text-emerald-400">{bankStateSubtotalsByShop.grandVerifiedCount}</strong></span>
+                                                {bankStateSubtotalsByShop.grandUnverifiedCount > 0 && (
+                                                    <>
+                                                        <span>•</span>
+                                                        <span>Unverified: <strong className="text-amber-400">{bankStateSubtotalsByShop.grandUnverifiedCount}</strong></span>
+                                                    </>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full divide-y divide-slate-800 text-xs sm:text-sm">
+                                                <thead className="bg-slate-950/60 text-[11px] font-bold uppercase text-slate-400">
+                                                    <tr>
+                                                        <th className="px-4 py-2.5 text-left">Shop Location</th>
+                                                        <th className="px-4 py-2.5 text-center">Transactions</th>
+                                                        <th className="px-4 py-2.5 text-center">Verified / Open</th>
+                                                        <th className="px-4 py-2.5 text-right">SubTotal KHR (៛)</th>
+                                                        <th className="px-4 py-2.5 text-right">SubTotal USD ($)</th>
+                                                        <th className="px-4 py-2.5 text-right">Combined Equiv. (៛)</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-800/80 bg-slate-900/40">
+                                                    {bankStateSubtotalsByShop.rows.map((row, idx) => (
+                                                        <tr
+                                                            key={row.shopId || idx}
+                                                            onClick={() => {
+                                                                if (row.shopId) {
+                                                                    setSelectedShopId(selectedShopId === row.shopId ? '' : row.shopId);
+                                                                }
+                                                            }}
+                                                            className={`transition-colors ${row.shopId ? 'cursor-pointer hover:bg-slate-800/70' : ''} ${selectedShopId && selectedShopId === row.shopId ? 'bg-blue-950/40' : ''}`}
+                                                            title={row.shopId ? 'Click to filter by this Shop Location' : ''}
+                                                        >
+                                                            <td className="px-4 py-2.5 font-bold text-slate-100 whitespace-nowrap">
+                                                                <div className="flex items-center gap-2">
+                                                                    <i className="fas fa-store text-orange-400 text-xs"></i>
+                                                                    <span>{row.shopName}</span>
+                                                                    {selectedShopId && selectedShopId === row.shopId && (
+                                                                        <span className="px-1.5 py-0.5 text-[9px] font-black uppercase bg-blue-600 text-white rounded">Filtered</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="text-[10px] font-mono text-slate-500">Chat ID: {row.chatId}</div>
+                                                            </td>
+                                                            <td className="px-4 py-2.5 text-center font-mono font-bold text-slate-200">
+                                                                {row.trxCount}
+                                                            </td>
+                                                            <td className="px-4 py-2.5 text-center whitespace-nowrap">
+                                                                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold mr-1">
+                                                                    {row.verifiedCount} Verified
+                                                                </span>
+                                                                {row.unverifiedCount > 0 && (
+                                                                    <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[11px] font-bold">
+                                                                        {row.unverifiedCount} Open
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="px-4 py-2.5 text-right font-mono font-bold text-emerald-400 whitespace-nowrap">
+                                                                ៛{khrFormatter.format(row.subtotalKhr)}
+                                                            </td>
+                                                            <td className="px-4 py-2.5 text-right font-mono font-bold text-sky-400 whitespace-nowrap">
+                                                                {usdFormatter.format(row.subtotalUsd)}
+                                                            </td>
+                                                            <td className="px-4 py-2.5 text-right font-mono font-black text-white whitespace-nowrap">
+                                                                ៛{khrFormatter.format(row.combinedEquivKhr)}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                                <tfoot className="bg-slate-950/90 border-t border-slate-700 font-black text-xs sm:text-sm">
+                                                    <tr>
+                                                        <td className="px-4 py-2.5 text-left text-slate-300 uppercase">Grand Total</td>
+                                                        <td className="px-4 py-2.5 text-center font-mono text-white">{bankStateSubtotalsByShop.grandCount}</td>
+                                                        <td className="px-4 py-2.5 text-center text-xs font-mono text-emerald-400">
+                                                            {bankStateSubtotalsByShop.grandVerifiedCount} / {bankStateSubtotalsByShop.grandCount}
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-right font-mono text-emerald-400 whitespace-nowrap">
+                                                            ៛{khrFormatter.format(bankStateSubtotalsByShop.grandTotalKhr)}
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-right font-mono text-sky-400 whitespace-nowrap">
+                                                            {usdFormatter.format(bankStateSubtotalsByShop.grandTotalUsd)}
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-right font-mono text-amber-300 whitespace-nowrap">
+                                                            ៛{khrFormatter.format(bankStateSubtotalsByShop.grandConvertedKhr)}
+                                                        </td>
+                                                    </tr>
+                                                </tfoot>
+                                            </table>
+                                        </div>
+                                    </div>
+                                )}
                                 {bankStateLoading ? (
                                     <div className="flex flex-col items-center justify-center p-10 text-slate-300 gap-3">
                                         <div className="loader"></div>
@@ -20942,6 +22070,9 @@
                     [`stockByShop.${shopId}`]: newStockValue,
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                 });
+                if (window.SolarisSmartProductEngine) {
+                    window.SolarisSmartProductEngine.applyLocalStockDelta(product.id, shopId, quantityChange);
+                }
 
                 // 2. Log Movement
                 // Only log if there's an actual change
@@ -21207,6 +22338,7 @@
                                 setCatVendorSearch('');
                                 setSelectedCatVendor(null);
                                 setCatVendorResults([]);
+                                setIsDropdownOpen(false);
                             }}
                             className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                             title="Clear Category / Vendor Filter"
@@ -21221,13 +22353,10 @@
                                 <div
                                     key={`${item.type}_${item.id}_${idx}`}
                                     onMouseDown={() => handleSelectOption(item)}
-                                    className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex items-center justify-between gap-2 text-xs sm:text-sm transition"
+                                    className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex items-center justify-between gap-2 text-xs sm:text-sm"
                                 >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                        <i className={`fas ${item.type === 'category' ? 'fa-tag text-emerald-400' : 'fa-truck text-orange-400'} text-xs shrink-0`}></i>
-                                        <span className="font-semibold text-slate-200 truncate">{item.name}</span>
-                                    </div>
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 border ${
+                                    <span className="font-semibold text-slate-200 truncate">{item.name}</span>
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0 border ${
                                         item.type === 'category'
                                             ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                                             : 'bg-orange-500/15 text-orange-300 border-orange-500/30'
@@ -21243,9 +22372,10 @@
         );
     });
 
-    // Component for handling the main action buttons (Compact Icon-Only Toolbar + Shop View Droplist)
-    const ProductActions = memo(({ onAddNew, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView }) => {
+    // Component for handling the main action buttons (Compact Icon-Only Toolbar + Shop View Droplist + Live Delta Sync Badge)
+    const ProductActions = memo(({ onAddNew, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView, productSyncStatus, onForceFullSync }) => {
         const [isImporting, setIsImporting] = useState(false);
+        const [isSyncingCloud, setIsSyncingCloud] = useState(false);
         const fileInputRef = useRef(null);
 
         const handleFileChange = (e) => {
@@ -21258,8 +22388,48 @@
             });
         };
 
+        const handleForceSyncClick = async () => {
+            if (!onForceFullSync || isSyncingCloud || productSyncStatus?.isFullSyncing) return;
+            setIsSyncingCloud(true);
+            try {
+                await onForceFullSync();
+            } finally {
+                setIsSyncingCloud(false);
+            }
+        };
+
+        const syncMode = productSyncStatus?.mode || 'delta-live';
+        const deltaReads = productSyncStatus?.deltaReadsSession || 0;
+        const cachedCount = productSyncStatus?.cachedCount || 0;
+        const isFullSyncing = isSyncingCloud || !!productSyncStatus?.isFullSyncing;
+
         return (
             <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 shrink-0">
+                {/* Smart IndexedDB & Live Delta Sync Status Badge + 1-Click Force Cloud Sync */}
+                <div className="flex items-center gap-1.5 bg-slate-900/90 px-2.5 py-1.5 rounded-xl border border-slate-700 text-[11px] font-semibold">
+                    <span className={`w-2 h-2 rounded-full ${
+                        isFullSyncing
+                            ? 'bg-amber-400 animate-ping'
+                            : syncMode === 'delta-live' || syncMode === 'cache-ready'
+                                ? 'bg-emerald-400'
+                                : 'bg-amber-400'
+                    }`}></span>
+                    <span className="text-slate-300 whitespace-nowrap" title="0-Read IndexedDB Startup + Live Delta Sync (updatedAt > lastSync)">
+                        IDB: <strong className="text-emerald-400">{khrFormatter.format(cachedCount)}</strong>
+                        <span className="text-slate-500 mx-1">|</span>
+                        <span className="text-cyan-400">+{deltaReads} delta</span>
+                    </span>
+                    <button
+                        type="button"
+                        onClick={handleForceSyncClick}
+                        disabled={isFullSyncing}
+                        title="Force Full Cloud Catalog Sync (Re-downloads all products to IndexedDB)"
+                        className="ml-1 w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-600 flex items-center justify-center transition active:scale-95 disabled:opacity-50"
+                    >
+                        <i className={`fas fa-sync-alt text-[10px] ${isFullSyncing ? 'fa-spin text-amber-300' : ''}`}></i>
+                    </button>
+                </div>
+
                 {/* Shop View Droplist (Default: All Shop View + Shop 1, Shop 2, ...) */}
                 {managedShops.length > 0 && (
                     <div className="relative min-w-[170px] sm:min-w-[195px] flex-1 sm:flex-initial">
@@ -21912,7 +23082,7 @@
 
     // Main ProductList component, now using client-side filtering + Smart FIFO Valuation by Shop
     const ProductList = ({ userProfile }) => {
-        const { products: allProducts, vendors, categories, shops, allPOs, allTransfers, isLoading: dataLoading } = useData();
+        const { products: allProducts, vendors, categories, shops, allPOs, allTransfers, isLoading: dataLoading, productSyncStatus, forceFullProductSync } = useData();
         
         const [filters, setFilters] = useState({ searchTerm: '', vendorId: '', categoryName: '', catVendorQuery: '' });
         const [focusedShopId, setFocusedShopId] = useState('ALL');
@@ -22205,7 +23375,14 @@
 
         const handleDelete = async (id) => {
             try {
-                await db.collection("products").doc(id).delete();
+                if (window.SolarisCollectionMutator) {
+                    window.SolarisCollectionMutator.deleteDoc("products", id);
+                } else {
+                    await db.collection("products").doc(id).delete();
+                    if (window.SolarisSmartProductEngine) {
+                        window.SolarisSmartProductEngine.applyLocalProductDelete(id, true);
+                    }
+                }
                 handleAction('show-message', { title: 'Success', message: 'Product deleted.' });
             } catch (error) {
                 handleAction('show-message', { title: 'Error', message: 'Failed to delete product.', isError: true });
@@ -22319,8 +23496,12 @@
                                     if (hasStockUpdate) {
                                         updateData.stockByShop = newStockByShop;
                                     }
+                                    updateData.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
 
                                     await db.collection("products").doc(docId).update(updateData);
+                                    if (window.SolarisSmartProductEngine) {
+                                        window.SolarisSmartProductEngine.applyLocalProductUpsert(docId, { ...existingData, ...updateData, id: docId });
+                                    }
                                     updated++;
                                 } else {
                                     // --- CREATE LOGIC ---
@@ -22354,9 +23535,13 @@
                                         stockByShop: initialStock,
                                         createdByName: userProfile.name,
                                         createdByUID: userProfile.uid,
-                                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                                        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
                                     };
-                                    await db.collection("products").add(productData);
+                                    const newDocRef = await db.collection("products").add(productData);
+                                    if (window.SolarisSmartProductEngine) {
+                                        window.SolarisSmartProductEngine.applyLocalProductUpsert(newDocRef.id, { ...productData, id: newDocRef.id });
+                                    }
                                     created++;
                                 }
                             } catch (e) { 
@@ -22475,6 +23660,11 @@
                     await batch.commit();
                     querySnapshot = await productsRef.limit(500).get();
                 }
+                if (window.SolarisSmartProductEngine) {
+                    window.SolarisSmartProductEngine.productsMap.clear();
+                    await window.SolarisCatalogDB.putBatch('products', [], true);
+                    window.SolarisSmartProductEngine.notifyProducts();
+                }
                 handleAction('show-message', { title: 'Success', message: `All products deleted.` });
             } catch (error) {
                 handleAction('show-message', { title: 'Error', message: 'An error occurred while deleting products.', isError: true });
@@ -22524,6 +23714,16 @@
                             managedShops={managedShops}
                             focusedShopId={focusedShopId}
                             onSelectShopView={setFocusedShopId}
+                            productSyncStatus={productSyncStatus}
+                            onForceFullSync={async () => {
+                                const res = await forceFullProductSync();
+                                if (res?.ok) {
+                                    handleAction('show-message', {
+                                        title: 'Full Cloud Catalog Sync Complete',
+                                        message: `Synchronized ${khrFormatter.format(res.count)} products from Firebase into your local IndexedDB vault.`
+                                    });
+                                }
+                            }}
                         />
                     </div>
                     {dataLoading ? (
@@ -23357,13 +24557,19 @@
                                 )}
                             </div>
                         </div>
-                        <button
-                            type="button"
-                            onClick={handleAddNew}
-                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shrink-0 shadow-lg shadow-emerald-900/20 text-xs sm:text-sm h-[40px]"
-                        >
-                            <i className="fas fa-plus"></i> Add New Category
-                        </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-xs font-semibold text-emerald-400 h-[40px]" title="Categories are cached in IndexedDB and live-synced with Firestore">
+                                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                                <span>IDB Live Sync ({categories?.length || 0})</span>
+                            </span>
+                            <button
+                                type="button"
+                                onClick={handleAddNew}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shrink-0 shadow-lg shadow-emerald-900/20 text-xs sm:text-sm h-[40px]"
+                            >
+                                <i className="fas fa-plus"></i> Add New Category
+                            </button>
+                        </div>
                     </div>
 
                     {categoriesLoading ? (
@@ -23468,20 +24674,29 @@
         const resetForm = () => { setFormData({ name: '', contact: '', priority: 'Low' }); setEditId(null); };
         const handleEdit = (vendor) => { setEditId(vendor.id); setFormData({ name: vendor.name, contact: vendor.contact, priority: vendor.priority || 'Low' }); window.scrollTo(0, 0); };
 
-        const handleDelete = async (id) => {
+        const handleDeleteVendor = async (id) => {
             try {
-                await db.collection("vendors").doc(id).delete();
+                if (window.SolarisCollectionMutator) {
+                    window.SolarisCollectionMutator.deleteDoc("vendors", id);
+                } else {
+                    await db.collection("vendors").doc(id).delete();
+                }
                 setModal({ type: 'message', data: { title: 'Success', message: 'Vendor deleted.' } });
             } catch (error) {
                 setModal({ type: 'message', data: { title: 'Error', message: 'Failed to delete vendor.', isError: true } });
             }
         };
 
-        const handleSubmit = async (e) => {
+        const handleSubmitVendor = async (e) => {
             e.preventDefault();
             try {
-                if (editId) await db.collection("vendors").doc(editId).update(formData);
-                else await db.collection("vendors").add(formData);
+                if (window.SolarisCollectionMutator) {
+                    window.SolarisCollectionMutator.upsertDoc("vendors", editId || null, formData, !editId);
+                } else if (editId) {
+                    await db.collection("vendors").doc(editId).update(formData);
+                } else {
+                    await db.collection("vendors").add(formData);
+                }
                 setModal({ type: 'message', data: { title: 'Success', message: `Vendor ${editId ? 'updated' : 'added'}.` } });
                 resetForm();
             } catch (error) {
@@ -23498,11 +24713,11 @@
         return (
             <div className="space-y-6">
                 <MessageModal {...modal.data} show={modal.type === 'message'} onClose={() => setModal({ type: null })} />
-                <ConfirmationModal title="Delete Shop" message="Are you sure?" show={modal.type === 'confirmDelete'} onConfirm={() => {handleDelete(modal.data); setModal({type: null})}} onCancel={() => setModal({ type: null })} />
+                <ConfirmationModal title="Delete Vendor" message="Are you sure?" show={modal.type === 'confirmDelete'} onConfirm={() => {handleDeleteVendor(modal.data); setModal({type: null})}} onCancel={() => setModal({ type: null })} />
 
                 <Card>
                     <h4 className="text-xl font-semibold mb-4 text-slate-200">{editId ? "Edit Vendor" : "Add New Vendor"}</h4>
-                    <form onSubmit={handleSubmit} className="p-6 bg-slate-900/50 rounded-lg border border-slate-700">
+                    <form onSubmit={handleSubmitVendor} className="p-6 bg-slate-900/50 rounded-lg border border-slate-700">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div>
                                 <label className="block text-sm font-medium text-slate-300 mb-1">
@@ -23537,20 +24752,26 @@
                 </Card>
 
                 <TableCard title="Existing Vendors">
-                    <div className="mb-4 border-b border-slate-700 pb-4">
-                        <label className="block text-sm font-medium text-slate-300 mb-1">
-                            <i className="fas fa-search text-purple-400 mr-2"></i>Search Vendor
-                        </label>
-                        <div className="relative max-w-sm">
-                            <input 
-                                type="text" 
-                                placeholder="Search by name or contact..." 
-                                value={searchTerm} 
-                                onChange={(e) => setSearchTerm(e.target.value)} 
-                                className="w-full bg-slate-700 text-slate-100 px-3 py-2 pl-10 border border-slate-600 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
-                            />
-                            <i className="fas fa-search absolute left-3 top-3 text-slate-400"></i>
+                    <div className="mb-4 border-b border-slate-700 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3">
+                        <div className="w-full max-w-sm">
+                            <label className="block text-sm font-medium text-slate-300 mb-1">
+                                <i className="fas fa-search text-purple-400 mr-2"></i>Search Vendor
+                            </label>
+                            <div className="relative">
+                                <input 
+                                    type="text" 
+                                    placeholder="Search by name or contact..." 
+                                    value={searchTerm} 
+                                    onChange={(e) => setSearchTerm(e.target.value)} 
+                                    className="w-full bg-slate-700 text-slate-100 px-3 py-2 pl-10 border border-slate-600 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                                />
+                                <i className="fas fa-search absolute left-3 top-3 text-slate-400"></i>
+                            </div>
                         </div>
+                        <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-xs font-semibold text-emerald-400 shrink-0" title="Vendors are cached in IndexedDB and live-synced with Firestore">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                            <span>IDB Live Sync ({vendors?.length || 0} Vendors)</span>
+                        </span>
                     </div>
                     {filteredVendors.length === 0 ? <p className="text-center p-4 text-slate-400">No vendors found.</p> : (
                         <table className="min-w-full divide-y divide-slate-700">
@@ -24268,13 +25489,7 @@
         const formatExactTimestamp = (ts) => {
             const num = Number(ts || 0);
             if (!num) return 'No timestamp';
-            return new Date(num).toLocaleString([], {
-                month: 'short',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            });
+            return safeFormatDateTime(num, 'No timestamp');
         };
 
         const evaluateDeviceStatus = (device) => {
@@ -25379,6 +26594,10 @@
                         requireRemoteKhqr: cfg.requireRemoteKhqr !== undefined ? !!cfg.requireRemoteKhqr : false,
                         remoteThresholdMeters: cfg.remoteThresholdMeters !== undefined ? Number(cfg.remoteThresholdMeters) : 100,
                         paywayVerifyEnabled: cfg.paywayVerifyEnabled !== undefined ? !!cfg.paywayVerifyEnabled : true,
+                        bypassFirebaseDb: cfg.bypassFirebaseDb !== undefined
+                            ? cfg.bypassFirebaseDb !== false
+                            : (secData?.bypassFirebaseDb !== undefined ? secData.bypassFirebaseDb !== false : true),
+                        renderListenerUrl: cfg.renderListenerUrl || secData?.renderListenerUrl || window.SolarisRenderBridge?.baseUrl || 'https://pos-payway.onrender.com',
                         bankStateFeedMode: cfg.bankStateFeedMode || 'on-demand',
                         qrValidMinutes: cfg.qrValidMinutes !== undefined ? Number(cfg.qrValidMinutes) : 2,
                         autoVerifyWindowMinutes: cfg.autoVerifyWindowMinutes !== undefined ? Number(cfg.autoVerifyWindowMinutes) : 5,
@@ -25449,32 +26668,18 @@
                         } catch (e) {}
                         try {
                             await db.collection('payway_secrets').doc(s.id).set(secretPayload, { merge: true });
-                        } catch (secErr) {
-                            console.warn("payway_secrets rule not published yet, cached locally:", secErr);
-                        }
+                        } catch (e) {}
+
+                        const cleanCfg = { ...cfg };
+                        delete cleanCfg.mtprotoApiId;
+                        delete cleanCfg.mtprotoApiHash;
+                        delete cleanCfg.mtprotoPhone;
+                        delete cleanCfg.mtprotoSessionString;
+                        delete cleanCfg.paywayBotToken;
+                        await db.collection('shops').doc(s.id).set({ khqrConfig: cleanCfg }, { merge: true });
                     }
-
-                    const sanitizedConfig = {
-                        enabled: !!cfg.enabled,
-                        requireRemoteKhqr: !!cfg.requireRemoteKhqr,
-                        remoteThresholdMeters: Number(cfg.remoteThresholdMeters) || 100,
-                        paywayVerifyEnabled: cfg.paywayVerifyEnabled !== undefined ? !!cfg.paywayVerifyEnabled : true,
-                        bankStateFeedMode: cfg.bankStateFeedMode || 'on-demand',
-                        qrValidMinutes: Number(cfg.qrValidMinutes) || 2,
-                        autoVerifyWindowMinutes: Number(cfg.autoVerifyWindowMinutes) || 5,
-                        paywayChatId: String(cfg.paywayChatId || '').trim(),
-                        accountName: String(cfg.accountName || 'POS TERMINAL').trim(),
-                        khrAccount: String(cfg.khrAccount || '').trim(),
-                        usdAccount: String(cfg.usdAccount || '').trim(),
-                        exchangeRate: Math.max(100, Number(cfg.exchangeRate) || 4000),
-                        baseEmvPayload: String(cfg.baseEmvPayload || '').trim(),
-                        staticQrImage: cfg.staticQrImage || '',
-                        updatedAt: Date.now()
-                    };
-                    await db.collection('shops').doc(s.id).update({ khqrConfig: sanitizedConfig });
                 }
-
-                showToast("Wiped legacy secrets from public 'shops' documents!", "success");
+                showToast("Migrated secrets to staff-only vault & purged public shop fields!", "success");
             } catch (err) {
                 showToast("Failed to purge secrets: " + err.message, "error");
             } finally {
@@ -25482,14 +26687,41 @@
             }
         };
 
-        const handleTestPaywayGroupConnection = async () => {
+        const handleTestPaywayGroupConnection = async (backfillDays = 0) => {
             setIsTestingPaywayGroup(true);
             setPaywayScanSummary(null);
             try {
+                const targetChatId = (formData?.paywayChatId || '').trim();
+                let backfilledCount = 0;
+
+                if (backfillDays > 0 && targetChatId) {
+                    const endMs = Date.now();
+                    const startMs = endMs - (backfillDays * 24 * 60 * 60 * 1000);
+                    const [renderRes, mtprotoRes] = await Promise.all([
+                        window.SolarisRenderBridge?.fetchHistoryFromRender
+                            ? window.SolarisRenderBridge.fetchHistoryFromRender({
+                                chatId: targetChatId,
+                                startMs,
+                                endMs,
+                                limit: 600
+                            }).catch(() => ({ ok: false, items: [] }))
+                            : Promise.resolve({ ok: false, items: [] }),
+                        window.SolarisBrowserMTProto?.isConnected && window.SolarisBrowserMTProto?.fetchHistoricalAbaMessagesByDateRange
+                            ? window.SolarisBrowserMTProto.fetchHistoricalAbaMessagesByDateRange(
+                                targetChatId,
+                                startMs,
+                                endMs,
+                                500
+                            ).catch(() => ({ ok: false, items: [] }))
+                            : Promise.resolve({ ok: false, items: [] })
+                    ]);
+                    backfilledCount = (renderRes?.items?.length || 0) + (mtprotoRes?.items?.length || 0);
+                }
+
                 const res = await window.SolarisKHQREngine.fetchRecentAbaPaymentsFromFirestore(
-                    (formData?.paywayChatId || '').trim(),
+                    targetChatId,
                     filterShop,
-                    false,
+                    true,
                     true
                 );
 
@@ -25497,12 +26729,18 @@
                     const abaMatches = res.messages.filter(m => m.parsedAba?.isValid);
                     setPaywayScanSummary({
                         ok: true,
-                        sourceMode: 'FIRESTORE_LISTENER',
+                        sourceMode: backfillDays > 0 ? `HISTORY_BACKFILL_${backfillDays}D` : 'FIRESTORE_LISTENER',
                         totalInChat: res.unfilteredAbaCount || abaMatches.length,
                         abaCount: abaMatches.length,
+                        backfilledCount,
                         latestAba: abaMatches[0] || null
                     });
-                    showToast(`Firestore 'aba_payments' connected! Found ${abaMatches.length} unclaimed payment(s).`, "success");
+                    showToast(
+                        backfillDays > 0
+                            ? `Backfilled ${backfilledCount} historical TG payment(s)! Total matched for chat: ${abaMatches.length}.`
+                            : `Feed connected! Found ${abaMatches.length} payment(s) for this Chat ID.`,
+                        "success"
+                    );
                 } else {
                     setPaywayScanSummary({ ok: false, isPermissionDenied: res.isPermissionDenied, error: res.error });
                     showToast(res.error, "error");
@@ -25566,11 +26804,20 @@
                 }
 
                 const currentShopObj = shops.find(s => s.id === filterShop);
-                const emvInfo = formData.baseEmvPayload
+                const cleanRenderUrl = String(formData.renderListenerUrl || 'https://pos-payway.onrender.com').trim().replace(/\/+$/, '');
+                if (window.SolarisRenderBridge) {
+                    window.SolarisRenderBridge.setBaseUrl(cleanRenderUrl);
+                }
+
+                const extractedEmv = formData.baseEmvPayload && window.SolarisKHQREngine
                     ? window.SolarisKHQREngine.extractMerchantInfoFromEMV(formData.baseEmvPayload)
                     : { merchantName: null };
                 const dynamicAccountName = String(
-                    formData.accountName || emvInfo.merchantName || currentShopObj?.brandingName || currentShopObj?.name || 'POS TERMINAL'
+                    formData.accountName ||
+                    extractedEmv.merchantName ||
+                    currentShopObj?.brandingName ||
+                    currentShopObj?.name ||
+                    ''
                 ).trim();
 
                 const cleanKhqrConfig = {
@@ -25578,6 +26825,8 @@
                     requireRemoteKhqr: !!formData.requireRemoteKhqr,
                     remoteThresholdMeters: Number(formData.remoteThresholdMeters) || 100,
                     paywayVerifyEnabled: !!formData.paywayVerifyEnabled,
+                    bypassFirebaseDb: formData.bypassFirebaseDb !== false,
+                    renderListenerUrl: cleanRenderUrl,
                     bankStateFeedMode: formData.bankStateFeedMode === 'live' ? 'live' : 'on-demand',
                     qrValidMinutes: Math.max(1, Number(formData.qrValidMinutes) || 2),
                     autoVerifyWindowMinutes: Math.max(1, Number(formData.autoVerifyWindowMinutes) || 5),
@@ -25596,6 +26845,8 @@
                     shopId: filterShop,
                     shopName: shops.find(s => s.id === filterShop)?.name || '',
                     paywayChatId: cleanKhqrConfig.paywayChatId,
+                    bypassFirebaseDb: cleanKhqrConfig.bypassFirebaseDb,
+                    renderListenerUrl: cleanKhqrConfig.renderListenerUrl,
                     bankStateFeedMode: cleanKhqrConfig.bankStateFeedMode,
                     tgApiId: String(secretFormData.tgApiId || '').trim(),
                     tgApiHash: String(secretFormData.tgApiHash || '').trim(),
@@ -25620,9 +26871,20 @@
                     khqrConfig: cleanKhqrConfig
                 }, { merge: true });
 
-                // 4. Notify Render Listener Bridge (`listener.mjs`) immediately so it reloads `bankStateFeedMode` & Chat ID whitelist in 0ms
+                // Update in-memory Bypass DB maps immediately
+                if (window.SolarisKHQREngine) {
+                    const updatedShopsList = (shops || []).map(s =>
+                        s.id === filterShop ? { ...s, khqrConfig: cleanKhqrConfig } : s
+                    );
+                    window.SolarisKHQREngine.syncAllowedShops(updatedShopsList);
+                }
+                if (window.SolarisPayWayVerifier) {
+                    window.SolarisPayWayVerifier.ensureSharedListeners();
+                }
+
+                // 4. Notify Render Listener Bridge (`listener.mjs`) immediately so it reloads `bypassFirebaseDb`, `bankStateFeedMode` & Chat ID whitelist in 0ms
                 if (window.SolarisRenderBridge?.baseUrl) {
-                    fetch(`${window.SolarisRenderBridge.baseUrl}/sync-config?shopId=${encodeURIComponent(filterShop)}&mode=${encodeURIComponent(cleanKhqrConfig.bankStateFeedMode)}`, {
+                    fetch(`${window.SolarisRenderBridge.baseUrl}/sync-config?shopId=${encodeURIComponent(filterShop)}&mode=${encodeURIComponent(cleanKhqrConfig.bankStateFeedMode)}&bypassDb=${cleanKhqrConfig.bypassFirebaseDb ? '1' : '0'}`, {
                         mode: 'cors',
                         cache: 'no-store'
                     }).catch(() => {});
@@ -25849,6 +27111,78 @@
 
                                 {formData.paywayVerifyEnabled && (
                                     <div className="p-4 rounded-2xl bg-sky-50/60 border border-sky-200 space-y-3 animate-fade-in-up">
+                                        {/* NEW (Phase B-2): Smart Bank State Bypass Firebase Database Toggle (ON Default vs OFF) */}
+                                        <div className={`p-3.5 rounded-xl border shadow-sm space-y-2.5 transition ${
+                                            formData.bypassFirebaseDb !== false
+                                                ? 'bg-emerald-50/90 border-emerald-300'
+                                                : 'bg-amber-50/90 border-amber-300'
+                                        }`}>
+                                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                                <div>
+                                                    <div className="text-xs font-black uppercase tracking-wider text-stone-900 flex items-center gap-1.5">
+                                                        <i className={`fa-solid ${formData.bypassFirebaseDb !== false ? 'fa-bolt text-emerald-600' : 'fa-database text-amber-600'}`}></i>
+                                                        <span>Bank State Bypass Firebase Database (1,000+ Daily Trx Quota Saver)</span>
+                                                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase ${
+                                                            formData.bypassFirebaseDb !== false
+                                                                ? 'bg-emerald-600 text-white'
+                                                                : 'bg-amber-600 text-white'
+                                                        }`}>
+                                                            {formData.bypassFirebaseDb !== false ? 'ON (Default • 0 DB Quota)' : 'OFF (Save to Firebase)'}
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-[11px] text-stone-600 mt-0.5 leading-relaxed">
+                                                        {formData.bypassFirebaseDb !== false
+                                                            ? 'ON (Default): Bypasses Firebase Database read/write for Bank State. Streams directly: Personal Telegram (MTProto) → Render.com → Web Local Cache → Bank State Table.'
+                                                            : 'OFF: Saves and reads all Bank State (Telegram Feed) transactions in Firebase Firestore (/aba_payments).'}
+                                                    </p>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-1.5 bg-white p-1 rounded-xl border border-stone-300 shrink-0 self-start sm:self-center">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setFormData({ ...formData, bypassFirebaseDb: true })}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center justify-center gap-1.5 transition ${
+                                                            formData.bypassFirebaseDb !== false
+                                                                ? 'bg-emerald-600 text-white shadow-sm'
+                                                                : 'text-stone-600 hover:text-stone-900'
+                                                        }`}
+                                                    >
+                                                        <i className="fa-solid fa-bolt text-[10px]"></i>
+                                                        <span>ON (Bypass DB)</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setFormData({ ...formData, bypassFirebaseDb: false })}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center justify-center gap-1.5 transition ${
+                                                            formData.bypassFirebaseDb === false
+                                                                ? 'bg-amber-600 text-white shadow-sm'
+                                                                : 'text-stone-600 hover:text-stone-900'
+                                                        }`}
+                                                    >
+                                                        <i className="fa-solid fa-database text-[10px]"></i>
+                                                        <span>OFF (Save DB)</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {/* Direct Render.com Listener Bridge URL */}
+                                            <div className="pt-2 border-t border-stone-200/80 flex flex-col sm:flex-row sm:items-center gap-2">
+                                                <label className="text-[10px] font-black uppercase text-stone-700 shrink-0 flex items-center gap-1">
+                                                    <i className="fa-solid fa-server text-sky-600"></i>
+                                                    <span>Direct Render Bridge URL:</span>
+                                                </label>
+                                                <input
+                                                    type="url"
+                                                    placeholder="https://pos-payway.onrender.com"
+                                                    className="flex-1 border border-stone-300 rounded-lg px-2.5 py-1 text-xs font-mono font-bold text-stone-800 bg-white outline-none focus:border-emerald-600"
+                                                    value={formData.renderListenerUrl || 'https://pos-payway.onrender.com'}
+                                                    onChange={e => setFormData({ ...formData, renderListenerUrl: e.target.value })}
+                                                />
+                                                <span className="text-[10px] font-bold text-emerald-700 bg-white px-2 py-1 rounded border border-emerald-200 shrink-0">
+                                                    <i className="fa-solid fa-clock mr-1"></i>7-Day Local Cache TTL
+                                                </span>
+                                            </div>
+                                        </div>
+
                                         {/* Bank State (Telegram Feed) Report Mode Selector: Live Feed vs. On-Demand Fetch */}
                                         <div className="bg-white p-3.5 rounded-xl border border-sky-200 shadow-sm space-y-2">
                                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -25908,22 +27242,33 @@
                                                 <label className="block text-[10px] font-bold text-sky-900 uppercase mb-1">
                                                     1. ABA PayWay Telegram Group / Chat ID (`PAYWAY_CHAT_ID`)
                                                 </label>
-                                                <div className="flex gap-2">
+                                                <div className="flex flex-wrap sm:flex-nowrap gap-1.5">
                                                     <input
                                                         type="text"
                                                         placeholder="e.g. -5433015912 or -1001987654321"
-                                                        className="flex-1 border border-sky-300 rounded-xl px-3.5 py-2 text-xs font-mono font-bold text-stone-800 bg-white outline-none focus:border-sky-600 shadow-sm"
+                                                        className="flex-1 min-w-[160px] border border-sky-300 rounded-xl px-3.5 py-2 text-xs font-mono font-bold text-stone-800 bg-white outline-none focus:border-sky-600 shadow-sm"
                                                         value={formData.paywayChatId}
                                                         onChange={e => setFormData({ ...formData, paywayChatId: e.target.value })}
                                                     />
                                                     <button
                                                         type="button"
                                                         disabled={isTestingPaywayGroup}
-                                                        onClick={handleTestPaywayGroupConnection}
-                                                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                                                        onClick={() => handleTestPaywayGroupConnection(0)}
+                                                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-2 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                                                        title="Test live connection & recent feed for this Chat ID"
                                                     >
                                                         {isTestingPaywayGroup ? <i className="fa-solid fa-spinner fa-spin"></i> : <i className="fa-solid fa-satellite-dish"></i>}
                                                         <span>{isTestingPaywayGroup ? 'Checking...' : 'Test Feed'}</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={isTestingPaywayGroup || !formData.paywayChatId}
+                                                        onClick={() => handleTestPaywayGroupConnection(7)}
+                                                        className="bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs px-3 py-2 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-50"
+                                                        title="Pull & Backfill past 7 days of historical bank transactions directly from this Telegram Group Chat ID"
+                                                    >
+                                                        <i className="fa-solid fa-clock-rotate-left"></i>
+                                                        <span>Backfill 7d</span>
                                                     </button>
                                                 </div>
                                             </div>
@@ -26794,8 +28139,20 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
     };
 
     const ReceiptTemplateSettings = ({ userProfile }) => {
-        const { systemConfig, shops } = useData();
+        const { systemConfig, shops, devices, currentDeviceId } = useData();
         const [selectedShopId, setSelectedShopId] = useState('All');
+
+        const previewTerminalName = useMemo(() => {
+            if (selectedShopId !== 'All' && devices) {
+                const shopDev = devices.find(d => d.shopId === selectedShopId);
+                if (shopDev?.name) return shopDev.name;
+            }
+            if (currentDeviceId && devices) {
+                const activeDev = devices.find(d => d.id === currentDeviceId);
+                if (activeDev?.name) return activeDev.name;
+            }
+            return 'Counter 1';
+        }, [selectedShopId, devices, currentDeviceId]);
 
         const defaultReceiptTemplate = useMemo(() => ({
             paperSize: '80mm',
@@ -26803,6 +28160,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             shopAddress: '',
             showDateTime: true,
             showStaffId: true,
+            showTerminalName: true,
             showInvoiceNumber: true,
             showCustomerDetails: true,
             footerText: 'Thank you for your visit!',
@@ -26857,6 +28215,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                     shopAddress: String(templateData.shopAddress || '').trim(),
                     showDateTime: !!templateData.showDateTime,
                     showStaffId: !!templateData.showStaffId,
+                    showTerminalName: !!templateData.showTerminalName,
                     showInvoiceNumber: !!templateData.showInvoiceNumber,
                     showCustomerDetails: !!templateData.showCustomerDetails,
                     footerText: String(templateData.footerText || '').trim(),
@@ -27037,10 +28396,11 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             </label>
                             <div className="bg-[#f8f8f7] rounded-2xl border border-stone-200 divide-y divide-stone-200/80 px-4">
                                 {[
-                                    { key: 'showDateTime', label: 'Show Date & Time' },
-                                    { key: 'showStaffId', label: 'Show Staff ID' },
+                                    { key: 'showStaffId', label: 'Show Staff Name' },
+                                    { key: 'showTerminalName', label: 'Show Terminal Name (Same Line as Staff)' },
                                     { key: 'showInvoiceNumber', label: 'Show Invoice Number' },
-                                    { key: 'showCustomerDetails', label: 'Show Customer Details' }
+                                    { key: 'showCustomerDetails', label: 'Show Customer Details' },
+                                    { key: 'showDateTime', label: 'Show Date & Time (Under Cust)' }
                                 ].map(field => {
                                     const isChecked = !!templateData[field.key];
                                     return (
@@ -27169,15 +28529,15 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                     )}
                                 </div>
 
-                                {(templateData.showStaffId || templateData.showDateTime) && (
+                                {(templateData.showStaffId || templateData.showTerminalName) && (
                                     <>
                                         <div className="border-b border-dashed border-gray-300 my-2.5"></div>
                                         <div className="flex justify-between items-center text-[11px] font-bold text-gray-800 gap-2 flex-wrap">
                                             {templateData.showStaffId && (
-                                                <span>Staff: J-001</span>
+                                                <span>Staff: {userProfile?.name || 'J-001'}</span>
                                             )}
-                                            {templateData.showDateTime && (
-                                                <span className="ml-auto">Date: 12-11-2026 12:34</span>
+                                            {templateData.showTerminalName && (
+                                                <span className="ml-auto">Terminal: {previewTerminalName}</span>
                                             )}
                                         </div>
                                     </>
@@ -27233,7 +28593,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                     </div>
                                 </div>
 
-                                {(templateData.showInvoiceNumber || templateData.showCustomerDetails) && (
+                                {(templateData.showInvoiceNumber || templateData.showCustomerDetails || templateData.showDateTime) && (
                                     <>
                                         <div className="border-b border-dashed border-gray-300 my-2.5"></div>
                                         <div className="space-y-1 text-[11px] font-bold">
@@ -27244,11 +28604,19 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                                 </div>
                                             )}
                                             {templateData.showCustomerDetails && (
+                                                <div className="flex justify-between items-center text-gray-900">
+                                                    <span>Cust:</span>
+                                                    <span>Mr. Test Customer</span>
+                                                </div>
+                                            )}
+                                            {templateData.showDateTime && (
+                                                <div className="flex justify-between items-center text-gray-900">
+                                                    <span>Date:</span>
+                                                    <span className="font-mono text-right">15-11-26 | 04:54:00 PM</span>
+                                                </div>
+                                            )}
+                                            {templateData.showCustomerDetails && (
                                                 <>
-                                                    <div className="flex justify-between items-center text-gray-900">
-                                                        <span>Cust:</span>
-                                                        <span>Mr. Test Customer</span>
-                                                    </div>
                                                     <div className="flex justify-between items-center text-[#d97706]">
                                                         <span>Active Points:</span>
                                                         <span>120 Pts</span>
@@ -28059,13 +29427,14 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         };
 
         const handleDelete = async (id) => {
+            if (!id) return;
             try {
                 if (window.SolarisCollectionMutator) {
                     window.SolarisCollectionMutator.deleteDoc("users", id);
                 } else {
                     await db.collection("users").doc(id).delete();
                 }
-                setModal({ type: 'message', data: { title: 'Success', message: 'User deleted from database.' } });
+                setModal({ type: 'message', data: { title: 'Success', message: 'User profile deleted.' } });
             } catch (error) {
                 setModal({ type: 'message', data: { title: 'Error', message: 'Failed to delete user.', isError: true } });
             }
@@ -28116,22 +29485,26 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             throw authError;
                         }
                     } finally {
-                        secondaryApp.delete().catch(() => {});
+                        await secondaryApp.delete();
                     }
 
+                    const newUserProfile = {
+                        ...formData,
+                        uid: uidToSave,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    };
                     if (window.SolarisCollectionMutator) {
-                        window.SolarisCollectionMutator.upsertDoc("users", null, { ...formData, uid: uidToSave }, true);
+                        window.SolarisCollectionMutator.upsertDoc("users", null, newUserProfile, true);
                     } else {
-                        await db.collection("users").add({ ...formData, uid: uidToSave });
+                        await db.collection("users").add(newUserProfile);
                     }
                 }
-                
+
                 resetForm();
                 setModal({ type: 'message', data: { title: 'Success', message: `User ${editId ? 'updated' : 'created'} successfully.` } });
             } catch (error) {
                 console.error("User save error:", error);
                 setModal({ type: 'message', data: { title: 'Error', message: error.message || 'Failed to save user.', isError: true } });
-            } finally {
                 setIsSubmitting(false);
             }
         };
@@ -28349,10 +29722,23 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
 
     // --- 8.9 Dashboard (Layout) COMPONENT ---
 
+    const resolveDefaultActivePage = (userProfile) => {
+        if (!userProfile) return 'pos-terminal';
+        const permissions = userProfile?.permissions || [];
+        if (
+            userProfile.role === 'Admin' ||
+            (userProfile.assignedShops && userProfile.assignedShops.length > 0) ||
+            permissions.includes('pos-terminal')
+        ) {
+            return 'pos-terminal';
+        }
+        return permissions[0] || null;
+    };
+
     const Dashboard = ({ userProfile }) => {
         const [isSidebarOpen, setSidebarOpen] = useState(false);
         const [showInstallModal, setShowInstallModal] = useState(false);
-        const [activePage, setActivePage] = useState(null);
+        const [activePage, setActivePage] = useState(() => resolveDefaultActivePage(userProfile));
         const [pageData, setPageData] = useState(null);
         const { backgroundFetchInitiated, backgroundLoadComplete, systemConfig, activateHeavyCollections } = useData(); // Get config & lazy-loader
 
@@ -28402,13 +29788,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
 
         useEffect(() => {
             if (!userProfile) return;
-            const permissions = userProfile?.permissions || [];
-            // Set default page: POS Terminal if allowed/assigned, otherwise first allowed page
-            if (userProfile.role === 'Admin' || (userProfile.assignedShops && userProfile.assignedShops.length > 0) || permissions.includes('pos-terminal')) {
-                setActivePage('pos-terminal');
-            } else {
-                setActivePage(permissions[0] || null);
-            }
+            setActivePage(prev => prev || resolveDefaultActivePage(userProfile));
         }, [userProfile]);
 
         const toggleSidebar = () => setSidebarOpen(!isSidebarOpen);
