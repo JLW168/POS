@@ -1,19 +1,19 @@
 /**
- * ABA PayWay Telegram Group Listener Bridge — Quota-Safe & Anti-Spin-Down Edition (listener.mjs)
+ * ABA PayWay Telegram Group Listener Bridge — Strict Shop Chat ID Whitelist Edition (listener.mjs)
  *
  * ROOT CAUSES FIXED IN THIS VERSION:
- * 1. REMOVED `prewarmFirestoreChannel()` 45-second heartbeat write! Previously, writing to Firestore
- *    every 45s consumed ~2,000 writes/day + multiplied by N connected snapshot listeners (~150,000 reads/day),
- *    which exhausted your Firebase Free Tier quota and caused `RESOURCE_EXHAUSTED`!
- * 2. FIXED URL parsing (`const urlObj = new URL(req.url, ...)`): Previously, `if (req.url === "/recent")`
- *    failed whenever query parameters like `/recent?t=12345` or `/recent?scan=1` were sent by the POS!
- * 3. FIXED `receivedAt` timestamp on wake-up / boot: Previously, `saveParsedPaymentToFirestore` overwrote
- *    `receivedAt = Date.now()` for historical messages scanned after a Render wake-up, causing old payments
- *    to look brand-new or get dropped. Now preserves the actual Telegram message timestamp!
- * 4. ADDED Self-Keep-Alive Ping (`RENDER_EXTERNAL_URL`) every 4 minutes + SSE 20s heartbeat comments
- *    so Render.com Free Tier stays warm and active.
- * 5. DECOUPLED SSE & `/recent` from Firestore quota: Even if Firebase hits `RESOURCE_EXHAUSTED`,
- *    `savedTrxMemory` stays locked and `/events` (SSE) + `/recent` continue serving 100% of payments!
+ * 1. STRICT FAIL-CLOSED CHAT ID WHITELIST:
+ *    - Previously, `if (allowedChatIds.length === 0) return true` and `if (!stripped) return true`
+ *      caused the listener to scan and save ABA PayWay messages from ALL Telegram groups the user
+ *      belonged to (e.g. "-5207801009", "-5433742888") even when those shops had NOT enabled
+ *      ABA PayWay Auto-Verification!
+ *    - Now dynamically syncs the `shops` collection from Firestore and ONLY allows Chat IDs
+ *      belonging to shops where `khqrConfig.paywayVerifyEnabled !== false` and `khqrConfig.paywayChatId`
+ *      is explicitly configured (plus any explicit `PAYWAY_CHAT_ID` env var).
+ *    - Fails closed (`return false`) if `chatId` is missing or not in the active whitelist!
+ * 2. REMOVED `prewarmFirestoreChannel()` 45-second heartbeat write to protect Firebase Free Tier quota.
+ * 3. FIXED URL parsing (`const urlObj = new URL(req.url, ...)`) for `/recent?scan=1`.
+ * 4. PRESERVES actual Telegram message timestamp on wake-up / boot.
  */
 import http from "node:http";
 import https from "node:https";
@@ -47,7 +47,70 @@ db.settings({ ignoreUndefinedProperties: true, preferRest: false });
 // Quota Circuit Breaker for Firestore Writes (Prevents retry storms if daily free quota is exhausted)
 let firestoreQuotaExhaustedUntil = 0;
 
-// 2. In-Memory Ring Buffer & SSE Clients for 0ms Direct-to-POS Delivery
+// 2. Strict Whitelist of Configured & Enabled Shop PayWay Chat IDs
+const normalizeChatId = (rawId) =>
+  String(rawId || "")
+    .trim()
+    .replace(/^-100/, "")
+    .replace(/^-/, "")
+    .trim();
+
+const rawTargetChats = String(process.env.PAYWAY_CHAT_ID || "").trim();
+const envAllowedChatIds = rawTargetChats
+  .split(/[\s,|;]+/)
+  .map((id) => normalizeChatId(id))
+  .filter(Boolean);
+
+let dynamicFirestoreChatIds = new Set();
+
+async function refreshConfiguredShopChatIds() {
+  try {
+    const snap = await db.collection("shops").get();
+    const activeIds = new Set();
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+      const cfg = data.khqrConfig;
+      // Strictly include ONLY shops where PayWay Auto-Verification is enabled AND paywayChatId is set
+      if (cfg && cfg.paywayVerifyEnabled !== false && cfg.paywayChatId) {
+        String(cfg.paywayChatId)
+          .split(/[\s,|;]+/)
+          .map((id) => normalizeChatId(id))
+          .filter(Boolean)
+          .forEach((id) => activeIds.add(id));
+      }
+    });
+    dynamicFirestoreChatIds = activeIds;
+    console.log(
+      `🔒 Active Shop PayWay Chat ID Whitelist Synced:`,
+      Array.from(getEffectiveAllowedChatIds())
+    );
+  } catch (err) {
+    console.warn("Could not refresh shop Chat IDs from Firestore (using env whitelist):", err.message);
+  }
+}
+
+function getEffectiveAllowedChatIds() {
+  // If Firestore shops have configured Chat IDs, strictly use those; otherwise fall back to env var
+  if (dynamicFirestoreChatIds.size > 0) {
+    return dynamicFirestoreChatIds;
+  }
+  return new Set(envAllowedChatIds);
+}
+
+// FAIL-CLOSED CHAT ID CHECK: Never save unconfigured Chat IDs or empty Chat IDs
+const isChatAllowed = (chatIdStr) => {
+  const stripped = normalizeChatId(chatIdStr);
+  if (!stripped) return false;
+  const allowedSet = getEffectiveAllowedChatIds();
+  if (allowedSet.size === 0) return false;
+  return allowedSet.has(stripped);
+};
+
+// Initial load + refresh every 5 minutes
+await refreshConfiguredShopChatIds();
+setInterval(refreshConfiguredShopChatIds, 5 * 60 * 1000);
+
+// 3. In-Memory Ring Buffer & SSE Clients for 0ms Direct-to-POS Delivery
 const recentPaymentsBuffer = [];
 const savedTrxMemory = new Set();
 const sseClients = new Set();
@@ -74,7 +137,7 @@ setInterval(() => {
   }
 }, 20000);
 
-// 3. HTTP Health-Check + Query-Safe `/recent`, `/events` (SSE), and `/claim` Server
+// 4. HTTP Health-Check + Query-Safe `/recent`, `/events` (SSE), and `/claim` Server
 const port = Number(process.env.PORT || 10000);
 http
   .createServer(async (req, res) => {
@@ -97,6 +160,8 @@ http
       syncRecentGroupHistory(false).catch(() => {});
     }
 
+    const allowedPayments = recentPaymentsBuffer.filter((p) => isChatAllowed(p.chatId));
+
     // Endpoint A: Server-Sent Events (`/events`, `/stream`, `/sse`)
     if (pathname === "/events" || pathname === "/stream" || pathname === "/sse") {
       res.writeHead(200, {
@@ -105,12 +170,11 @@ http
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
       });
-      // Immediately send the connected event AND the recent payments buffer so POS gets instant history
       res.write(
         `data: ${JSON.stringify({
           type: "CONNECTED",
           ts: Date.now(),
-          payments: recentPaymentsBuffer.slice(0, 35),
+          payments: allowedPayments.slice(0, 35),
         })}\n\n`
       );
       sseClients.add(res);
@@ -142,26 +206,28 @@ http
         JSON.stringify({
           ok: true,
           status: "ok",
-          service: "solaris-aba-listener-v3",
+          service: "solaris-aba-listener-v4-strict",
           uptimeSeconds: Math.round(process.uptime()),
+          allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
           firestoreQuotaPaused: Date.now() < firestoreQuotaExhaustedUntil,
-          payments: recentPaymentsBuffer.slice(0, 50),
+          payments: allowedPayments.slice(0, 50),
         })
       );
       return;
     }
 
-    // Default Root Health Check (`/`) — Also includes recent payments so any ping hydrates the POS!
+    // Default Root Health Check (`/`)
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(
       JSON.stringify({
         ok: true,
         status: "ok",
-        service: "solaris-aba-listener-v3",
+        service: "solaris-aba-listener-v4-strict",
         uptimeSeconds: Math.round(process.uptime()),
-        cachedPayments: recentPaymentsBuffer.length,
+        allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
+        cachedPayments: allowedPayments.length,
         firestoreQuotaPaused: Date.now() < firestoreQuotaExhaustedUntil,
-        payments: recentPaymentsBuffer.slice(0, 50),
+        payments: allowedPayments.slice(0, 50),
       })
     );
   })
@@ -171,7 +237,7 @@ http
 
 // Self-Keep-Alive Ping every 4 minutes to prevent Render Free Tier 15-minute inactivity spin-down
 const selfExternalUrl =
-  process.env.RENDER_EXTERNAL_URL || "https://po-listener.onrender.com";
+  process.env.RENDER_EXTERNAL_URL || "https://pos-payway.onrender.com";
 setInterval(() => {
   try {
     https
@@ -182,7 +248,7 @@ setInterval(() => {
   } catch (e) {}
 }, 4 * 60 * 1000);
 
-// 4. Minute-Granularity Timestamp Alignment Helper
+// 5. Minute-Granularity Timestamp Alignment Helper
 function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   if (!paidAtStr || typeof paidAtStr !== "string") return referenceMs;
   const clean = paidAtStr.trim();
@@ -221,7 +287,7 @@ function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   return referenceMs;
 }
 
-// 5. Unified Indoor ABA PAY + Outdoor Bank KHQR Parser (Supports All ABA Bot Formats)
+// 6. Unified Indoor ABA PAY + Outdoor Bank KHQR Parser (Supports All ABA Bot Formats)
 function parseABAPayWay(raw, msgDateMs = Date.now()) {
   if (!raw || typeof raw !== "string") return null;
   const t = raw.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -309,39 +375,28 @@ const apiId = Number(process.env.TG_API_ID);
 const apiHash = String(process.env.TG_API_HASH || "").trim();
 const sessionStr = String(process.env.TG_SESSION || "").trim();
 
-const rawTargetChats = String(process.env.PAYWAY_CHAT_ID || "").trim();
-const allowedChatIds = rawTargetChats
-  .split(/[\s,|;]+/)
-  .map((id) => id.replace(/^-100/, "").replace(/^-/, "").trim())
-  .filter(Boolean);
-
-const isChatAllowed = (chatIdStr) => {
-  if (allowedChatIds.length === 0) return true;
-  const stripped = String(chatIdStr || "").replace(/^-100/, "").replace(/^-/, "").trim();
-  if (!stripped) return true;
-  return allowedChatIds.includes(stripped);
-};
-
 if (!apiId || !apiHash || !sessionStr) {
   console.error("Missing TG_API_ID, TG_API_HASH, or TG_SESSION in environment variables.");
   process.exit(1);
 }
 
-// 6. Quota-Safe Single-Write + 0ms SSE & Ring-Buffer Broadcast
+// 7. Quota-Safe Single-Write + Strict Chat ID Guard + 0ms SSE Broadcast
 async function saveParsedPaymentToFirestore(parsed, chatIdStr, messageTimestampMs = null) {
   if (!parsed || !parsed.trxId) return false;
-  const trxId = String(parsed.trxId).trim();
 
+  const cleanChatId = String(chatIdStr || "").trim();
+  // STRICT GUARD: Never save a payment if its Chat ID is not in the active shop whitelist!
+  if (!isChatAllowed(cleanChatId)) {
+    return false;
+  }
+
+  const trxId = String(parsed.trxId).trim();
   if (savedTrxMemory.has(trxId)) return false;
   savedTrxMemory.add(trxId);
 
   const writeStartMs = performance.now();
   const effectiveReceivedAt =
     Number(messageTimestampMs) > 0 ? Number(messageTimestampMs) : Date.now();
-
-  // Never store a comma-separated list in chatId; store the specific group's chatId
-  const singleDefaultChatId = rawTargetChats.split(/[\s,|;]+/)[0] || "";
-  const cleanChatId = String(chatIdStr || singleDefaultChatId).trim();
 
   const docPayload = {
     ...parsed,
@@ -359,24 +414,22 @@ async function saveParsedPaymentToFirestore(parsed, chatIdStr, messageTimestampM
   // 2. Write to Firestore ONLY if daily quota is not currently exhausted
   if (Date.now() < firestoreQuotaExhaustedUntil) {
     console.log(
-      `⚡ [ABA VERIFIED -> SSE/MEMORY (Firestore Quota Paused)] Trx: ${trxId} | ${parsed.currency} ${parsed.amount} | ${parsed.payerName} | APV: ${parsed.apv}`
+      `⚡ [ABA VERIFIED -> SSE/MEMORY (Firestore Quota Paused)] Chat: ${cleanChatId} | Trx: ${trxId} | ${parsed.currency} ${parsed.amount}`
     );
     return true;
   }
 
   try {
-    // Write ONLY to `aba_payments/{trxId}` (cuts Firestore writes in half!)
     await db.collection("aba_payments").doc(trxId).set(docPayload, { merge: true });
 
     const elapsedMs = Math.round(performance.now() - writeStartMs);
     console.log(
-      `⚡ [ABA VERIFIED -> CLOUD+SSE in ${elapsedMs}ms] Trx: ${trxId} | ${parsed.currency} ${parsed.amount} | ${parsed.payerName} (${parsed.maskedAccount}) via ${parsed.paymentChannel} at ${parsed.merchantName} | APV: ${parsed.apv}`
+      `⚡ [ABA VERIFIED -> CLOUD+SSE in ${elapsedMs}ms] Chat: ${cleanChatId} | Trx: ${trxId} | ${parsed.currency} ${parsed.amount} | ${parsed.payerName} (${parsed.maskedAccount}) | APV: ${parsed.apv}`
     );
     return true;
   } catch (e) {
     const errMsg = String(e?.message || e || "");
     if (e?.code === 8 || /RESOURCE_EXHAUSTED|Quota exceeded/i.test(errMsg)) {
-      // Pause Firestore writes for 10 minutes so we don't spam errors; SSE & /recent still work 100%!
       firestoreQuotaExhaustedUntil = Date.now() + 10 * 60 * 1000;
       console.warn(
         "⚠️ Firestore Daily Quota Exhausted — Serving payments directly via Render SSE (/events) & HTTP (/recent)!"
@@ -388,7 +441,7 @@ async function saveParsedPaymentToFirestore(parsed, chatIdStr, messageTimestampM
   }
 }
 
-// 7. Native TCP Transport in Node.js
+// 8. Native TCP Transport in Node.js
 const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
   connectionRetries: 10,
   retryDelay: 1000,
@@ -400,25 +453,24 @@ client.setLogLevel("error");
 
 await client.connect();
 console.log("==================================================================");
-console.log("⚡ Connected to Telegram MTProto (Ultra-Fast TCP Push Mode)!");
+console.log("⚡ Connected to Telegram MTProto (Strict Shop Whitelist Mode)!");
 console.log(
-  "   Target Chat ID Filter:",
-  allowedChatIds.length > 0 ? rawTargetChats : "ALL GROUPS (Multi-Shop Mode)"
+  "   Allowed Shop Chat IDs:",
+  Array.from(getEffectiveAllowedChatIds())
 );
 console.log("==================================================================");
 
-// 8A. REAL-TIME EVENT LISTENER
+// 9A. REAL-TIME EVENT LISTENER
 client.addEventHandler(async (ev) => {
   try {
     const rawMessage = ev.message?.message || ev.message?.text || "";
     if (!rawMessage) return;
 
+    const peer = ev.message?.peerId;
     const incomingChatId = String(
       ev.chatId ||
         ev.message?.chatId ||
-        ev.message?.peerId?.channelId ||
-        ev.message?.peerId?.chatId ||
-        ""
+        (peer?.channelId ? `-100${peer.channelId}` : peer?.chatId ? `-${peer.chatId}` : "")
     );
     if (!isChatAllowed(incomingChatId)) return;
 
@@ -430,7 +482,7 @@ client.addEventHandler(async (ev) => {
   } catch (err) {}
 }, new NewMessage({}));
 
-// 8B. RAW MTPROTO UPDATE FALLBACK
+// 9B. RAW MTPROTO UPDATE FALLBACK
 client.addEventHandler(async (update) => {
   try {
     const msgObj = update?.message || update?.newMessage?.message;
@@ -454,13 +506,14 @@ client.addEventHandler(async (update) => {
   } catch (err) {}
 });
 
-// 9. FAST PARALLEL TARGET-GROUP SWEEP (Every 3.5 Seconds)
+// 10. FAST PARALLEL TARGET-GROUP SWEEP (Strictly Whitelisted Dialogs Only)
 let cachedTargetDialogs = [];
 let lastDialogRefreshMs = 0;
 let isSweeping = false;
 
 async function syncRecentGroupHistory(isInitialBoot = false) {
   if (isSweeping) return;
+  if (getEffectiveAllowedChatIds().size === 0) return;
   isSweeping = true;
   try {
     const now = Date.now();
@@ -477,12 +530,12 @@ async function syncRecentGroupHistory(isInitialBoot = false) {
       cachedTargetDialogs.map(async (d) => {
         try {
           const dialogIdStr = String(d.id || "");
+          if (!isChatAllowed(dialogIdStr)) return;
           const messages = await client.getMessages(d.entity, { limit: isInitialBoot ? 15 : 5 });
           for (const msg of messages) {
             const text = msg?.message || msg?.text || "";
             if (!text) continue;
             const msgServerMs = msg.date ? Number(msg.date) * 1000 : Date.now();
-            // Preserve exact Telegram server timestamp for historical messages on boot/wake-up!
             const effectiveMs =
               !isInitialBoot && Math.abs(Date.now() - msgServerMs) < 90000
                 ? Date.now()
