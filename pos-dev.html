@@ -2494,18 +2494,6 @@
             } catch (e) {}
         },
 
-        saveLocalAbaCache() {
-            try {
-                const paymentsArr = Array.from(this.inMemoryAbaPayments.values())
-                    .sort((a, b) => (Number(b.date) || 0) - (Number(a.date) || 0))
-                    .slice(0, 150);
-                localStorage.setItem('solaris_aba_payments_cache_v1', JSON.stringify(paymentsArr));
-
-                const claimedArr = Array.from(this.processedTrxIdsMemory).slice(-300);
-                localStorage.setItem('solaris_aba_claimed_trx_v1', JSON.stringify(claimedArr));
-            } catch (e) {}
-        },
-
         async broadcastCustomerDisplaySession(shopId, sessionPayload = null) {
             if (!shopId || shopId === 'All') return;
             try {
@@ -3413,7 +3401,8 @@
             const date = new Date(timestamp);
             return isNaN(date) ? null : date;
         }
-        if (timestamp.seconds) return new Date(timestamp.seconds * 1000);
+        if (typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
+        if (typeof timestamp._seconds === 'number') return new Date(timestamp._seconds * 1000);
         // Handle un-resolved firebase.firestore.FieldValue.serverTimestamp() sentinel objects stored in local cache
         if (typeof timestamp === 'object' && timestamp._methodName === 'FieldValue.serverTimestamp') {
             return new Date();
@@ -3425,6 +3414,12 @@
     const safeFormatDateTime = (timestamp, fallback = '-') => {
         const d = safeToDate(timestamp);
         return d ? d.toLocaleString() : fallback;
+    };
+
+    // Safely formats any timestamp into a short time string (HH:MM) without ever throwing on null
+    const safeFormatTime = (timestamp, fallback = 'Just now') => {
+        const d = safeToDate(timestamp);
+        return d ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : fallback;
     };
 
     // Formats a date object or compatible string into DD-MM-YYYY format
@@ -7868,7 +7863,7 @@
                                             {ticket.items.length} items • Total: <span className="text-white font-bold">៛{new Intl.NumberFormat('en-US').format(ticket.totalAmount)}</span>
                                         </p>
                                         <p className="text-xs text-slate-500 mt-1">
-                                            Saved: {ticket.savedAt ? safeToDate(ticket.savedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : 'N/A'} by {ticket.savedBy}
+                                            Saved: {safeFormatTime(ticket.savedAt, 'N/A')} by {ticket.savedBy}
                                         </p>
                                     </div>
                                     <div className="flex gap-2">
@@ -7899,39 +7894,33 @@
     };
 
     // --- NEW: Shift Management Modal ---
-    const ShiftManagementModal = ({ currentShift, shopId, userProfile, onClose, deviceId, todaySales = [], onShiftStateChange }) => { // <-- Accept deviceId & optimistic callbacks
-        const { shops, devices } = useData(); // <-- Get devices
+    const ShiftManagementModal = ({ currentShift, shopId, userProfile, onClose, deviceId, todaySales = [], onShiftStateChange }) => {
+        const { shops, devices } = useData();
+        const shopObj = useMemo(() => shops.find(s => s.id === shopId), [shops, shopId]);
+        const shopName = shopObj?.name || 'Unknown Shop';
+        const currentDeviceName = currentShift?.deviceName || devices.find(d => d.id === deviceId)?.name || 'Current Terminal';
+        const currentRate = Math.max(100, Number(shopObj?.khqrConfig?.exchangeRate) || 4000);
+
         // Open Shift State
         const [startCash, setStartCash] = useState('');
         const [shiftName, setShiftName] = useState('AM');
-        
+
         // Close Shift / Cash Drop State
         const [actualCashKHR, setActualCashKHR] = useState('');
         const [actualCashUSD, setActualCashUSD] = useState('');
         const [actualBankKHR, setActualBankKHR] = useState('');
         const [actualBankUSD, setActualBankUSD] = useState('');
-        const [exchangeRate, setExchangeRate] = useState('4000');
         const [closingFloatCash, setClosingFloatCash] = useState('');
         const [note, setNote] = useState('');
-        
+
         const [loading, setLoading] = useState(false);
         const [error, setError] = useState('');
-        
-        // FIX: Add state to track if we are currently opening a shift to prevent UI flash
-        const [isOpening, setIsOpening] = useState(false);
-        const [isClosing, setIsClosing] = useState(false);
-
-        // --- NEW: Bill Counter State ---
-        const [showBillCounter, setShowBillCounter] = useState(null); // 'KHR' or 'USD' or null
-        
-        // --- NEW: Shift Stats & Success Summary State ---
-        const [shiftSalesStats, setShiftSalesStats] = useState({ gross: 0, discount: 0, net: 0, cost: 0, margin: 0, voidCount: 0, voidAmount: 0 });
+        const [showBillCounter, setShowBillCounter] = useState(null); // 'KHR' | 'USD' | null
         const [closedShiftData, setClosedShiftData] = useState(null);
 
         const shiftSummaryRef = useRef(null);
         const [isSavingImage, setIsSavingImage] = useState(false);
 
-        // Helper to format input as KHR currency (1,234,567)
         const formatNumber = useCallback((value) => {
             if (!value && value !== 0) return '';
             const raw = String(value).replace(/[^0-9.]/g, '');
@@ -7941,21 +7930,10 @@
             return parts.join('.');
         }, []);
 
-        // Initialize start cash from shop's float cash configuration
-        useEffect(() => {
-            if (!currentShift && !startCash) {
-                const shopObj = shops.find(s => s.id === shopId);
-                if (shopObj?.floatCash) {
-                    setStartCash(formatNumber(shopObj.floatCash));
-                }
-            }
-        }, [currentShift, shopId, shops, startCash, formatNumber]);
-
-        // Helper to parse formatted string back to float
-        const parseNumber = (value) => {
+        const parseNumber = useCallback((value) => {
             if (!value) return 0;
             return parseFloat(String(value).replace(/,/g, '')) || 0;
-        };
+        }, []);
 
         const handleCurrencyInput = (setter) => (e) => {
             const val = e.target.value;
@@ -7964,46 +7942,99 @@
             }
         };
 
-        // --- NEW: Fetch Sales for current shift to calculate Gross, Discount, and Margin (With Local Fallback if Quota Exceeded) ---
+        // Initialize start cash from shop's float cash configuration when opening a new shift
         useEffect(() => {
-            if (currentShift && currentShift.id && !isOpening) {
-                const computeStatsFromDocs = (docsArray) => {
-                    let gross = 0, discount = 0, net = 0, cost = 0, voidCount = 0, voidAmount = 0;
-                    docsArray.forEach(d => {
-                        if (d.status === 'void') {
-                            voidCount++;
-                            voidAmount += (d.grandTotal || 0);
-                            return;
-                        }
-                        gross += (d.subtotal || (d.grandTotal + (d.discount || 0)));
-                        discount += (d.discount || 0);
-                        net += (d.grandTotal || 0);
-                        cost += (d.totalCost || 0);
-                    });
-                    const margin = net > 0 ? ((net - cost) / net) * 100 : 0;
-                    setShiftSalesStats({ gross, discount, net, cost, margin, voidCount, voidAmount });
-                };
-
-                // Immediately compute from in-memory todaySales first
-                const localShiftSales = (todaySales || []).filter(s => s.shiftId === currentShift.id);
-                if (localShiftSales.length > 0) {
-                    computeStatsFromDocs(localShiftSales);
-                }
-
-                if (!window.SolarisPayWayVerifier?.isQuotaExceeded) {
-                    db.collection('sales').where('shiftId', '==', currentShift.id).get().then(snap => {
-                        const cloudDocs = snap.docs.map(doc => doc.data());
-                        if (cloudDocs.length >= localShiftSales.length) {
-                            computeStatsFromDocs(cloudDocs);
-                        }
-                    }).catch(err => {
-                        console.warn("Using local shift sales stats (Quota/Offline):", err?.code || err?.message);
-                    });
-                }
+            if (!currentShift && !startCash && shopObj?.floatCash) {
+                setStartCash(formatNumber(shopObj.floatCash));
             }
-        }, [currentShift, isOpening, todaySales]);
+        }, [currentShift, shopObj, startCash, formatNumber]);
 
-        // --- NEW: Apply Bill Counter Total ---
+        // Unified Shift Sales Statistics (Computed directly from todaySales + fallback cloud fetch only if needed)
+        const [cloudShiftSales, setCloudShiftSales] = useState(null);
+        useEffect(() => {
+            if (!currentShift?.id) return;
+            const localMatches = (todaySales || []).filter(s => s.shiftId === currentShift.id);
+            if (localMatches.length === 0 && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
+                db.collection('sales').where('shiftId', '==', currentShift.id).get()
+                    .then(snap => {
+                        if (!snap.empty) {
+                            setCloudShiftSales(snap.docs.map(doc => doc.data()));
+                        }
+                    })
+                    .catch(() => {});
+            }
+        }, [currentShift?.id, todaySales]);
+
+        const shiftSalesStats = useMemo(() => {
+            if (!currentShift?.id) {
+                return { gross: 0, discount: 0, net: 0, cost: 0, margin: 0, voidCount: 0, voidAmount: 0 };
+            }
+            const localMatches = (todaySales || []).filter(s => s.shiftId === currentShift.id);
+            const sourceSales = (cloudShiftSales && cloudShiftSales.length > localMatches.length)
+                ? cloudShiftSales
+                : localMatches;
+
+            let gross = 0, discount = 0, net = 0, cost = 0, voidCount = 0, voidAmount = 0;
+            sourceSales.forEach(d => {
+                if (d.status === 'void') {
+                    voidCount++;
+                    voidAmount += (Number(d.grandTotal) || 0);
+                    return;
+                }
+                const rev = Number(d.grandTotal) || 0;
+                const disc = Number(d.discount) || 0;
+                gross += (Number(d.subtotal) || (rev + disc));
+                discount += disc;
+                net += rev;
+                cost += (Number(d.totalCost) || 0);
+            });
+            const margin = net > 0 ? ((net - cost) / net) * 100 : 0;
+            return { gross, discount, net, cost, margin, voidCount, voidAmount };
+        }, [currentShift?.id, todaySales, cloudShiftSales]);
+
+        // Single Source of Truth for Live & Submitted Reconciliation Math
+        const reconciliation = useMemo(() => {
+            const expectedFloat = parseFloat(currentShift?.startCash) || 0;
+            const enteredFloat = parseNumber(closingFloatCash);
+            const isFloatMatched = closingFloatCash !== '' && enteredFloat === expectedFloat;
+
+            const cashKHR = parseNumber(actualCashKHR);
+            const cashUSD = parseNumber(actualCashUSD);
+            const bankKHR = parseNumber(actualBankKHR);
+            const bankUSD = parseNumber(actualBankUSD);
+
+            const actualCashTotal = cashKHR + (cashUSD * currentRate);
+            const actualBankTotal = bankKHR + (bankUSD * currentRate);
+            const actualCombinedTotal = actualCashTotal + actualBankTotal;
+
+            const expectedCashTotal = parseFloat(currentShift?.totalCashSales) || 0;
+            const expectedBankTotal = parseFloat(currentShift?.totalKHQRSales) || 0;
+            const sysGrandTotal = parseFloat(currentShift?.totalSales) || (expectedCashTotal + expectedBankTotal);
+
+            const cashVariance = actualCashTotal - expectedCashTotal;
+            const bankVariance = actualBankTotal - expectedBankTotal;
+            const totalVariance = cashVariance + bankVariance;
+
+            return {
+                expectedFloat,
+                enteredFloat,
+                isFloatMatched,
+                cashKHR,
+                cashUSD,
+                bankKHR,
+                bankUSD,
+                actualCashTotal,
+                actualBankTotal,
+                actualCombinedTotal,
+                expectedCashTotal,
+                expectedBankTotal,
+                sysGrandTotal,
+                cashVariance,
+                bankVariance,
+                totalVariance
+            };
+        }, [currentShift, closingFloatCash, actualCashKHR, actualCashUSD, actualBankKHR, actualBankUSD, currentRate, parseNumber]);
+
         const handleApplyBillCount = (total) => {
             if (showBillCounter === 'KHR') {
                 setActualCashKHR(formatNumber(total));
@@ -8033,18 +8064,16 @@
         };
 
         const handleOpenShift = async () => {
-            if (!startCash && startCash !== '0') { 
-                setError("Please enter starting cash (enter 0 if empty)."); 
-                return; 
+            if (!startCash && startCash !== '0') {
+                setError("Please enter starting cash (enter 0 if empty).");
+                return;
             }
-            
-            setIsOpening(true);
-            setLoading(true); 
+            setLoading(true);
             setError('');
-            
-            const currentDevice = devices.find(d => d.id === deviceId);
+
             const shiftRef = db.collection('shifts').doc();
             const nowIso = new Date().toISOString();
+            const parsedStartCash = parseNumber(startCash);
 
             const optimisticShift = {
                 id: shiftRef.id,
@@ -8052,20 +8081,18 @@
                 cashierId: userProfile.uid,
                 cashierName: userProfile.name || 'Staff',
                 shiftName,
-                deviceId: deviceId,
-                deviceName: currentDevice?.name || 'Unknown Device',
+                deviceId,
+                deviceName: currentDeviceName,
                 startTime: nowIso,
-                startCash: parseNumber(startCash),
+                startCash: parsedStartCash,
                 totalSales: 0,
                 totalCashSales: 0,
                 totalKHQRSales: 0,
                 transactionCount: 0,
                 status: 'open',
-                createdAt: nowIso,
-                isLocalQuotaFallback: true
+                createdAt: nowIso
             };
 
-            // 1. Optimistic 0ms Shift Activation & Local Shift Cache Persistence
             if (typeof onShiftStateChange === 'function') {
                 onShiftStateChange(optimisticShift);
             }
@@ -8075,21 +8102,9 @@
                 localStorage.setItem('solaris_shifts_report_cache_v1', JSON.stringify(nextCached));
             } catch (e) {}
 
-            // 2. ALWAYS write the new Shift document to Firestore / IndexedDB (Never skip core POS shift creation!)
             shiftRef.set({
-                shopId, 
-                cashierId: userProfile.uid, 
-                cashierName: userProfile.name || 'Staff', 
-                shiftName,
-                deviceId: deviceId,
-                deviceName: currentDevice?.name || 'Unknown Device',
+                ...optimisticShift,
                 startTime: firebase.firestore.FieldValue.serverTimestamp(),
-                startCash: parseNumber(startCash),
-                totalSales: 0,
-                totalCashSales: 0,
-                totalKHQRSales: 0,
-                transactionCount: 0,
-                status: 'open',
                 createdAt: firebase.firestore.FieldValue.serverTimestamp()
             }, { merge: true }).catch(err => {
                 console.warn("Open shift write queued in IndexedDB:", err?.code || err?.message);
@@ -8101,72 +8116,39 @@
 
         const handleCloseShift = async () => {
             setError('');
-            
             if (!currentShift) {
                 setError("No active shift found.");
                 return;
             }
 
-            const expectedFloat = parseFloat(currentShift.startCash) || 0;
-            const enteredFloat = parseNumber(closingFloatCash);
-            if (enteredFloat !== expectedFloat) {
-                setError(`Closing floating cash (៛${khrFormatter.format(enteredFloat)}) does not match starting float (៛${khrFormatter.format(expectedFloat)}).`);
+            if (reconciliation.enteredFloat !== reconciliation.expectedFloat) {
+                setError(`Closing floating cash (៛${khrFormatter.format(reconciliation.enteredFloat)}) must match starting float (៛${khrFormatter.format(reconciliation.expectedFloat)}).`);
                 return;
             }
 
-            setIsClosing(true);
             setLoading(true);
             try {
-                // 1. Parse Inputs
-                const cashKHR = parseNumber(actualCashKHR);
-                const cashUSD = parseNumber(actualCashUSD);
-                const bankKHR = parseNumber(actualBankKHR);
-                const bankUSD = parseNumber(actualBankUSD);
-                const rate = parseNumber(exchangeRate) || 4000;
-
-                // 2. Calculate Total Actuals in KHR
-                const totalActualCash = cashKHR + (cashUSD * rate);
-                const totalActualBank = bankKHR + (bankUSD * rate);
-
-                // 3. Get Expected Values (System)
-                const sysCashSales = parseFloat(currentShift.totalCashSales) || 0;
-                const sysBankSales = parseFloat(currentShift.totalKHQRSales) || 0; 
-                
-                const expectedCash = sysCashSales; // Float is separated out into the strict match upfront
-                const expectedBank = sysBankSales;
-                
-                // 4. Calculate Variances
-                const diffCash = totalActualCash - expectedCash;
-                const diffBank = totalActualBank - expectedBank;
-                const totalDiff = diffCash + diffBank;
-                
                 const endTimeMs = Date.now();
                 const endTimeIso = new Date(endTimeMs).toISOString();
 
                 const shiftUpdate = {
                     endTime: firebase.firestore.FieldValue.serverTimestamp(),
-                    
-                    // Detailed Inputs (Save Raw)
-                    closeInputCashKHR: cashKHR, closeInputCashUSD: cashUSD,
-                    closeInputBankKHR: bankKHR, closeInputBankUSD: bankUSD,
-                    closeExchangeRate: rate,
-                    closeFloatingCash: enteredFloat,
-                    closeNote: note,
-
-                    // Summary Logic (Save Calculated)
-                    actualCash: totalActualCash,
-                    expectedCash: expectedCash,
-                    differenceCash: diffCash,
-                    
-                    actualKHQR: totalActualBank,
-                    expectedKHQR: expectedBank,
-                    differenceKHQR: diffBank,
-
-                    difference: totalDiff,
+                    closeInputCashKHR: reconciliation.cashKHR,
+                    closeInputCashUSD: reconciliation.cashUSD,
+                    closeInputBankKHR: reconciliation.bankKHR,
+                    closeInputBankUSD: reconciliation.bankUSD,
+                    closeExchangeRate: currentRate,
+                    closeFloatingCash: reconciliation.enteredFloat,
+                    closeNote: note.trim(),
+                    actualCash: reconciliation.actualCashTotal,
+                    expectedCash: reconciliation.expectedCashTotal,
+                    differenceCash: reconciliation.cashVariance,
+                    actualKHQR: reconciliation.actualBankTotal,
+                    expectedKHQR: reconciliation.expectedBankTotal,
+                    differenceKHQR: reconciliation.bankVariance,
+                    difference: reconciliation.totalVariance,
                     status: 'closed',
                     closedBy: userProfile?.name || 'Staff',
-                    
-                    // Save Shift Sales Stats for Cash Drop Report
                     statsGross: shiftSalesStats.gross || 0,
                     statsDiscount: shiftSalesStats.discount || 0,
                     statsNet: shiftSalesStats.net || 0,
@@ -8176,7 +8158,6 @@
                     statsVoidAmount: shiftSalesStats.voidAmount || 0
                 };
 
-                // 1. Save closed shift into local report cache immediately so Shift Report & Cash Drop Report reflect it in 0ms
                 try {
                     const cleanStartTimeIso = safeToDate(currentShift.startTime)?.toISOString() || endTimeIso;
                     const localClosedShift = { ...currentShift, ...shiftUpdate, startTime: cleanStartTimeIso, endTime: endTimeIso };
@@ -8192,115 +8173,74 @@
                     localStorage.setItem('solaris_edited_shifts_v1', JSON.stringify(existingEdits));
                 } catch (e) {}
 
-                // 2. ALWAYS persist closed shift to Firestore / IndexedDB using .set(..., { merge: true }) so it never fails if doc wasn't created yet
                 db.collection('shifts').doc(currentShift.id).set(shiftUpdate, { merge: true }).catch(err => {
                     console.warn("Close shift write queued in IndexedDB:", err?.code || err?.message);
+                });
+
+                setClosedShiftData({
+                    ...currentShift,
+                    ...shiftUpdate,
+                    endTimeMs,
+                    stats: shiftSalesStats
                 });
 
                 if (typeof onShiftStateChange === 'function') {
                     onShiftStateChange(null);
                 }
-                
-                // 3. Show Successful Closed Shift Summary immediately
-                setClosedShiftData({
-                    ...currentShift,
-                    ...shiftUpdate,
-                    endTimeMs: endTimeMs,
-                    stats: shiftSalesStats
-                });
-                
-            } catch (err) { 
-                console.error("Close Shift Error:", err); 
-                setError("System Error: " + err.message); 
-                setIsClosing(false);
-            } finally { 
-                setLoading(false); 
+            } catch (err) {
+                console.error("Close Shift Error:", err);
+                setError("System Error: " + err.message);
+            } finally {
+                setLoading(false);
             }
         };
 
-        // --- REAL-TIME CALCULATION LOGIC FOR UI ---
-        const shopName = shops.find(s => s.id === shopId)?.name || 'Unknown Shop';
-        const currentDeviceName = currentShift?.deviceName || (devices.find(d => d.id === deviceId)?.name) || 'Current Device'; // Get Name
-        const startTime = currentShift ? safeToDate(currentShift.startTime) : new Date();
-        
-        const pad = (n) => String(n).padStart(2, '0');
-        const startAmPm = startTime ? (startTime.getHours() >= 12 ? 'PM' : 'AM') : '';
-        const formattedStartTime = startTime ? `${pad(startTime.getDate())}-${pad(startTime.getMonth() + 1)}-${String(startTime.getFullYear()).slice(-2)} ${pad(startTime.getHours() % 12 || 12)}:${pad(startTime.getMinutes())} ${startAmPm}` : '';
-        
-        const nowTime = new Date();
-        const closeAmPm = nowTime.getHours() >= 12 ? 'PM' : 'AM';
-        const formattedCloseTime = `${pad(nowTime.getDate())}-${pad(nowTime.getMonth() + 1)}-${String(nowTime.getFullYear()).slice(-2)} ${pad(nowTime.getHours() % 12 || 12)}:${pad(nowTime.getMinutes())} ${closeAmPm}`;
-        
-        // System Totals
-        const startFund = currentShift ? (currentShift.startCash || 0) : 0;
-        const sysTotal = currentShift ? (currentShift.totalSales || 0) : 0; // FIXED: Added sysTotal definition
-        const sysCash = currentShift ? (currentShift.totalCashSales || 0) : 0; // Renamed for consistency
-        const sysBank = currentShift ? (currentShift.totalKHQRSales || 0) : 0; // Renamed for consistency
-        const currentRate = parseNumber(exchangeRate) || 4000;
+        const formattedStartTime = currentShift ? safeFormatDateTime(currentShift.startTime || currentShift.createdAt, 'Just now') : '-';
+        const getVarColor = (val) => (val === 0 ? 'text-slate-300' : val > 0 ? 'text-emerald-400' : 'text-rose-400');
 
-        // Calculated Expectations
-        const expectedCashTotal = sysCash; // Excludes float fund from variance math
-        const expectedBankTotal = sysBank;
-
-        // Calculated Actuals (Live from Inputs)
-        const actualCashTotal = parseNumber(actualCashKHR) + (parseNumber(actualCashUSD) * currentRate);
-        const actualBankTotal = parseNumber(actualBankKHR) + (parseNumber(actualBankUSD) * currentRate);
-
-        // Calculated Variances
-        const cashVariance = actualCashTotal - expectedCashTotal;
-        const bankVariance = actualBankTotal - expectedBankTotal;
-        const totalVariance = cashVariance + bankVariance;
-
-        // Helper for Variance Color
-        const getVarColor = (val) => {
-            if (val === 0) return 'text-slate-400';
-            if (val > 0) return 'text-green-400';
-            return 'text-red-400';
-        };
-
-        const showOpenUI = (!currentShift && !isClosing && !closedShiftData) || isOpening;
-
-        // --- NEW: Successful Closed Shift Modal View ---
+        // 1. COMPLETED SHIFT SUMMARY VIEW
         if (closedShiftData) {
-            const closeTimeStr = new Date(closedShiftData.endTimeMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const closeTimeStr = safeFormatDateTime(closedShiftData.endTimeMs);
             return (
                 <Modal show={true} onClose={onClose} maxWidth="max-w-md">
                     <ModalHeader title="Shift Closed Successfully" onClose={onClose} />
                     <ModalBody>
                         <div ref={shiftSummaryRef} className="space-y-4 p-5 bg-[#0f172a] rounded-xl relative">
-                            <div className="text-center mb-6 mt-2">
-                                <div className="w-16 h-16 bg-green-500/20 text-green-500 rounded-full flex items-center justify-center mx-auto mb-3 border border-green-500/30">
-                                    <i className="fas fa-check-double text-3xl"></i>
+                            <div className="text-center mb-4">
+                                <div className="w-14 h-14 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-2.5 border border-emerald-500/30">
+                                    <i className="fas fa-check-double text-2xl"></i>
                                 </div>
-                                <h2 className="text-xl font-bold text-white">Shift Closed</h2>
-                                <p className="text-slate-400 text-sm mt-1">Summary of your completed shift</p>
+                                <h2 className="text-lg font-bold text-white">Shift Handover Complete</h2>
+                                <p className="text-slate-400 text-xs mt-0.5">{shopName} • {currentDeviceName}</p>
                             </div>
-                            
-                            <div className="bg-[#1e293b] rounded-xl p-5 border border-slate-700 space-y-3 text-sm shadow-inner">
+
+                            <div className="bg-[#1e293b] rounded-xl p-4 border border-slate-700 space-y-2.5 text-xs sm:text-sm shadow-inner">
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Cashier:</span> <span className="font-bold text-white">{closedShiftData.closedBy}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Shop:</span> <span className="font-bold text-white">{shopName}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Device:</span> <span className="font-bold text-white">{currentDeviceName}</span></div>
-                                <div className="border-b border-slate-700/60 my-2"></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Opened:</span> <span className="font-bold text-white">{formattedStartTime}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Closed:</span> <span className="font-bold text-white">{closeTimeStr}</span></div>
-                                <div className="border-b border-slate-700/60 my-2"></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Shift:</span> <span className="font-bold text-blue-400">{closedShiftData.shiftName || 'AM'} Shift</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Opened:</span> <span className="font-mono text-slate-200">{formattedStartTime}</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Closed:</span> <span className="font-mono text-slate-200">{closeTimeStr}</span></div>
+                                <div className="border-b border-slate-700/60 my-1.5"></div>
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Total Net Sale:</span> <span className="font-black text-emerald-400 text-base">៛{khrFormatter.format(closedShiftData.stats.net)}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Sale Margin:</span> <span className="font-black text-cyan-400 text-base">{closedShiftData.stats.margin.toFixed(2)}%</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Voided Transactions:</span> <span className="font-bold text-red-400">Trx: {closedShiftData.stats.voidCount || 0} | {khrFormatter.format(closedShiftData.stats.voidAmount || 0)}៛</span></div>
-                                <div className="border-b border-slate-700/60 my-2"></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Cash Drop (KHR):</span> <span className="font-bold text-white">៛{khrFormatter.format(closedShiftData.closeInputCashKHR)}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Cash Drop (USD):</span> <span className="font-bold text-white">${Number(closedShiftData.closeInputCashUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Bank Drop (KHR):</span> <span className="font-bold text-white">៛{khrFormatter.format(closedShiftData.closeInputBankKHR)}</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Bank Drop (USD):</span> <span className="font-bold text-white">${Number(closedShiftData.closeInputBankUSD).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Sale Margin:</span> <span className="font-bold text-cyan-400">{closedShiftData.stats.margin.toFixed(2)}%</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Voided Receipts:</span> <span className="font-bold text-rose-400">{closedShiftData.stats.voidCount || 0} (៛{khrFormatter.format(closedShiftData.stats.voidAmount || 0)})</span></div>
+                                <div className="border-b border-slate-700/60 my-1.5"></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Cash Drop (KHR / USD):</span> <span className="font-bold text-white">៛{khrFormatter.format(closedShiftData.closeInputCashKHR)} / ${Number(closedShiftData.closeInputCashUSD).toFixed(2)}</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Bank Drop (KHR / USD):</span> <span className="font-bold text-white">៛{khrFormatter.format(closedShiftData.closeInputBankKHR)} / ${Number(closedShiftData.closeInputBankUSD).toFixed(2)}</span></div>
+                                <div className="flex justify-between items-center pt-1 border-t border-slate-700/60">
+                                    <span className="text-slate-400 font-bold">Net Variance:</span>
+                                    <span className={`font-black ${getVarColor(closedShiftData.difference)}`}>
+                                        {closedShiftData.difference > 0 ? '+' : ''}៛{khrFormatter.format(closedShiftData.difference || 0)}
+                                    </span>
+                                </div>
                             </div>
                         </div>
                     </ModalBody>
                     <ModalFooter>
                         <div className="w-full flex gap-3">
-                            <button onClick={handleSavePng} disabled={isSavingImage} className="flex-1 bg-slate-700 text-white font-bold py-3.5 rounded-xl hover:bg-slate-600 transition shadow-lg flex items-center justify-center gap-2">
+                            <button onClick={handleSavePng} disabled={isSavingImage} className="flex-1 bg-slate-700 text-white font-bold py-2.5 rounded-xl hover:bg-slate-600 transition flex items-center justify-center gap-2 text-sm">
                                 {isSavingImage ? <div className="loader w-4 h-4 border-white/30 border-t-white"></div> : <i className="fas fa-image"></i>} Save PNG
                             </button>
-                            <button onClick={onClose} className="flex-1 bg-blue-600 text-white font-bold py-3.5 rounded-xl hover:bg-blue-700 transition shadow-lg shadow-blue-500/30">
+                            <button onClick={onClose} className="flex-1 bg-blue-600 text-white font-bold py-2.5 rounded-xl hover:bg-blue-500 transition shadow-lg text-sm">
                                 Done
                             </button>
                         </div>
@@ -8309,253 +8249,424 @@
             );
         }
 
+        // 2. OPEN NEW SHIFT VIEW
+        if (!currentShift) {
+            return (
+                <Modal show={true} onClose={onClose} maxWidth="max-w-md">
+                    <ModalHeader title="Open New Shift" onClose={onClose} />
+                    <ModalBody>
+                        {error && (
+                            <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-xl flex items-center gap-2.5 text-red-200 text-xs">
+                                <i className="fas fa-exclamation-circle text-base shrink-0"></i>
+                                <span>{error}</span>
+                            </div>
+                        )}
+                        <div className="space-y-4">
+                            <div className="bg-slate-900/70 p-3.5 rounded-xl border border-slate-700 grid grid-cols-2 gap-2 text-xs">
+                                <div>
+                                    <span className="text-slate-400 block">Shop Location</span>
+                                    <span className="text-white font-bold">{shopName}</span>
+                                </div>
+                                <div>
+                                    <span className="text-slate-400 block">Terminal</span>
+                                    <span className="text-white font-bold">{currentDeviceName}</span>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">Shift Session</label>
+                                <div className="grid grid-cols-2 gap-2.5">
+                                    {['AM', 'PM'].map(s => (
+                                        <button
+                                            key={s}
+                                            type="button"
+                                            onClick={() => setShiftName(s)}
+                                            className={`py-2.5 rounded-xl font-bold text-sm border transition ${
+                                                shiftName === s
+                                                    ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30'
+                                                    : 'bg-slate-900/60 text-slate-400 border-slate-700 hover:text-white'
+                                            }`}
+                                        >
+                                            <i className={`fas ${s === 'AM' ? 'fa-sun text-amber-400' : 'fa-moon text-indigo-300'} mr-1.5`}></i>
+                                            {s} Shift
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                                    Starting Float Cash in Drawer (KHR)
+                                </label>
+                                <div className="relative">
+                                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl font-bold text-emerald-400">៛</span>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        value={startCash}
+                                        onChange={(e) => setStartCash(formatNumber(e.target.value))}
+                                        className="w-full bg-slate-900 text-white text-2xl font-black pl-10 pr-4 py-3.5 rounded-xl border border-slate-600 focus:border-emerald-500 outline-none text-right font-mono"
+                                        placeholder="0"
+                                        autoFocus
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </ModalBody>
+                    <ModalFooter>
+                        <button type="button" onClick={onClose} className="w-full sm:w-auto bg-slate-600 text-white font-bold py-2.5 px-5 rounded-xl hover:bg-slate-500 transition text-sm">
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleOpenShift}
+                            disabled={loading}
+                            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2.5 px-6 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 transition text-sm disabled:opacity-50"
+                        >
+                            {loading ? <div className="loader w-4 h-4"></div> : <i className="fas fa-play"></i>}
+                            <span>Start Shift</span>
+                        </button>
+                    </ModalFooter>
+                </Modal>
+            );
+        }
+
+        // 3. REDESIGNED CLEAN & PROFESSIONAL CLOSE SHIFT / RECONCILIATION VIEW
         return (
-            <Modal show={true} onClose={onClose} maxWidth={!showOpenUI ? "max-w-7xl" : "max-w-md"}>
-                {/* NEW: Bill Counter Modal Overlay */}
+            <Modal show={true} onClose={onClose} maxWidth="max-w-5xl">
                 {showBillCounter && (
-                    <BillCounterModal 
-                        currency={showBillCounter} 
-                        onClose={() => setShowBillCounter(null)} 
-                        onApply={handleApplyBillCount} 
+                    <BillCounterModal
+                        currency={showBillCounter}
+                        onClose={() => setShowBillCounter(null)}
+                        onApply={handleApplyBillCount}
                     />
                 )}
 
-                <div className="absolute top-4 right-4 z-10">
-                    <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl transition-colors">&times;</button>
-                </div>
-                
+                <ModalHeader
+                    title={`Close Shift & Cash Reconciliation — ${currentShift?.shiftName || 'AM'} Shift`}
+                    onClose={onClose}
+                />
+
                 <ModalBody>
                     {error && (
-                        <div className="mb-4 p-3 bg-red-500/20 border border-red-500/50 rounded-lg flex items-center gap-3 text-red-200 text-sm animate-pulse">
-                            <i className="fas fa-exclamation-circle text-xl"></i><span>{error}</span>
+                        <div className="mb-4 p-3 bg-rose-500/15 border border-rose-500/40 rounded-xl flex items-center gap-3 text-rose-200 text-xs sm:text-sm animate-fade-in-up">
+                            <i className="fas fa-exclamation-triangle text-rose-400 text-lg shrink-0"></i>
+                            <span className="font-medium">{error}</span>
                         </div>
                     )}
 
-                    {showOpenUI ? (
-                        /* --- OPEN SHIFT UI --- */
-                        <div className="space-y-6 pt-6 p-4">
-                            <h2 className="text-2xl font-bold text-white mb-2">Open New Shift</h2>
-                            <div className="bg-slate-700/50 p-3 rounded-lg border border-slate-600 text-sm flex justify-between">
-                                <span className="text-slate-400">Device:</span> <span className="text-white font-bold">{currentDeviceName}</span>
+                    <div className="space-y-4">
+                        {/* Top Shift Metadata & Performance KPI Bar */}
+                        <div className="bg-slate-900/90 border border-slate-700/80 rounded-2xl p-3.5 sm:p-4 space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-800 text-xs">
+                                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                                    <span className="inline-flex items-center gap-1.5 font-bold text-white bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-700">
+                                        <i className="fas fa-store text-orange-400"></i> {shopName}
+                                    </span>
+                                    <span className="inline-flex items-center gap-1.5 font-semibold text-slate-300 bg-slate-800/70 px-2.5 py-1 rounded-lg border border-slate-700/70">
+                                        <i className="fas fa-desktop text-cyan-400"></i> {currentDeviceName}
+                                    </span>
+                                    <span className="inline-flex items-center gap-1.5 font-semibold text-slate-300">
+                                        <i className="fas fa-user-check text-blue-400"></i> {userProfile.name}
+                                    </span>
+                                </div>
+                                <div className="text-slate-400 font-mono text-[11px]">
+                                    <i className="far fa-clock mr-1 text-slate-500"></i>
+                                    Opened: <strong className="text-slate-200">{formattedStartTime}</strong>
+                                </div>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Shift Name</label>
-                                <select value={shiftName} onChange={(e) => setShiftName(e.target.value)} className="w-full bg-slate-700 text-white text-lg font-bold px-4 py-3 rounded-xl border border-slate-600 focus:border-green-500 outline-none text-center">
-                                    <option value="AM">AM Shift</option>
-                                    <option value="PM">PM Shift</option>
-                                </select>
+
+                            {/* 5-Column Shift Sales KPI Strip */}
+                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                                <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Gross Sale</span>
+                                    <span className="text-sm sm:text-base font-black text-white mt-0.5 block">៛{khrFormatter.format(shiftSalesStats.gross)}</span>
+                                </div>
+                                <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Discounts</span>
+                                    <span className="text-sm sm:text-base font-bold text-rose-400 mt-0.5 block">-៛{khrFormatter.format(shiftSalesStats.discount)}</span>
+                                </div>
+                                <div className="bg-emerald-950/25 p-2.5 rounded-xl border border-emerald-500/30">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-300 block">Net Sale ({currentShift.transactionCount || 0} Trx)</span>
+                                    <span className="text-sm sm:text-base font-black text-emerald-400 mt-0.5 block">៛{khrFormatter.format(shiftSalesStats.net)}</span>
+                                </div>
+                                <div className="bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Sale Margin</span>
+                                    <span className="text-sm sm:text-base font-bold text-cyan-400 mt-0.5 block">{shiftSalesStats.margin.toFixed(2)}%</span>
+                                </div>
+                                <div className="col-span-2 sm:col-span-1 bg-slate-800/60 p-2.5 rounded-xl border border-slate-700/60">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Voided ({shiftSalesStats.voidCount})</span>
+                                    <span className="text-sm sm:text-base font-bold text-rose-400 mt-0.5 block">៛{khrFormatter.format(shiftSalesStats.voidAmount)}</span>
+                                </div>
                             </div>
-                            <p className="text-slate-400">Enter the starting cash amount in the drawer.</p>
-                            <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Starting Cash (KHR)</label>
-                                <input type="text" inputMode="numeric" value={startCash} onChange={(e) => setStartCash(formatNumber(e.target.value))} className="w-full bg-slate-700 text-white text-3xl font-bold px-4 py-4 rounded-xl border border-slate-600 focus:border-green-500 outline-none text-center" placeholder="0" autoFocus />
-                            </div>
-                            <button onClick={handleOpenShift} disabled={loading} className="w-full bg-green-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-green-700 flex items-center justify-center gap-2 disabled:bg-green-800 shadow-lg shadow-green-900/20">
-                                {loading && <div className="loader w-4 h-4"></div>} Start Shift
-                            </button>
                         </div>
-                    ) : (
-                        /* --- CLOSE SHIFT / RECONCILIATION UI --- */
-                        <div className="flex flex-col lg:flex-row gap-6 p-2">
-                            
-                            {/* --- LEFT COLUMN: INPUTS --- */}
-                            <div className="flex-1 space-y-6">
-                                <h3 className="text-blue-400 font-bold uppercase tracking-wider text-sm flex items-center gap-2">
-                                    <i className="fas fa-edit"></i> General Information
-                                </h3>
-                                
-                                {/* Info Banner */}
-                                <div className="bg-[#0f172a] border border-slate-800 rounded-lg p-4 grid grid-cols-2 gap-4 text-sm">
-                                    <div><span className="text-slate-500 text-xs block uppercase">Shop</span><span className="text-white font-medium">{shopName}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Shift Name</span><span className="text-white font-medium">{currentShift?.shiftName || 'N/A'}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Device</span><span className="text-white font-medium">{currentDeviceName}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Staff</span><span className="text-white font-medium">{userProfile.name}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Open Shift Time</span><span className="text-white font-medium">{formattedStartTime}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Close Shift Time</span><span className="text-white font-medium">{formattedCloseTime}</span></div>
-                                    <div className="col-span-2 border-t border-slate-800 my-1"></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Total Gross Sale</span><span className="text-white font-medium">៛{khrFormatter.format(shiftSalesStats.gross)}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Discount</span><span className="text-rose-400 font-medium">-៛{khrFormatter.format(shiftSalesStats.discount)}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Total Net Sale</span><span className="text-emerald-400 font-medium">៛{khrFormatter.format(shiftSalesStats.net)}</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Sale Margin</span><span className="text-cyan-400 font-medium">{shiftSalesStats.margin.toFixed(2)}%</span></div>
-                                    <div><span className="text-slate-500 text-xs block uppercase">Voided Transactions</span><span className="text-red-400 font-medium">Trx: {shiftSalesStats.voidCount || 0} | {khrFormatter.format(shiftSalesStats.voidAmount || 0)}៛</span></div>
-                                </div>
 
-                                {/* Closing Floating Cash Check */}
-                                <div className="bg-[#0f172a] border border-slate-800 rounded-lg p-4">
-                                    <label className="text-slate-500 text-xs font-bold uppercase mb-2 flex items-center justify-between">
-                                        <span>Closing Floating Cash (Must Match: ៛{khrFormatter.format(currentShift?.startCash || 0)})</span>
+                        {/* Main 2-Column Workspace: Left = Inputs | Right = Live Reconciliation Ledger */}
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                            {/* LEFT COLUMN: Step-by-Step Cash & Bank Inputs (7 cols) */}
+                            <div className="lg:col-span-7 space-y-4">
+                                {/* Step 1: Closing Floating Cash Verification */}
+                                <div className={`p-4 rounded-2xl border transition-colors ${
+                                    closingFloatCash
+                                        ? (reconciliation.isFloatMatched ? 'bg-emerald-950/15 border-emerald-500/40' : 'bg-rose-950/15 border-rose-500/40')
+                                        : 'bg-slate-900/80 border-slate-700/80'
+                                }`}>
+                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                        <label className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                                            <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-black flex items-center justify-center">1</span>
+                                            <span>Verify Drawer Floating Cash (Must Match: ៛{khrFormatter.format(reconciliation.expectedFloat)})</span>
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() => setClosingFloatCash(formatNumber(reconciliation.expectedFloat))}
+                                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-blue-600 text-blue-300 hover:text-white border border-slate-600 text-[11px] font-bold transition"
+                                            title="Fill exact starting float cash"
+                                        >
+                                            <i className="fas fa-check-double mr-1"></i>Auto-Match Float
+                                        </button>
+                                    </div>
+                                    <div className="relative flex items-center">
+                                        <span className="absolute left-3.5 text-slate-400 font-bold">៛</span>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={closingFloatCash}
+                                            onChange={handleCurrencyInput(setClosingFloatCash)}
+                                            className="w-full bg-slate-800 text-white text-lg font-bold pl-8 pr-10 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none font-mono"
+                                            placeholder="Enter closing float cash..."
+                                        />
                                         {closingFloatCash && (
-                                            parseNumber(closingFloatCash) === parseFloat(currentShift?.startCash || 0)
-                                                ? <i className="fas fa-check-circle text-green-500 text-lg"></i>
-                                                : <i className="fas fa-times-circle text-red-500 text-lg"></i>
+                                            <i className={`fas ${reconciliation.isFloatMatched ? 'fa-check-circle text-emerald-400' : 'fa-times-circle text-rose-400'} absolute right-3.5 text-lg`}></i>
                                         )}
-                                    </label>
-                                    <input 
-                                        type="text" 
-                                        inputMode="numeric" 
-                                        value={closingFloatCash} 
-                                        onChange={(e) => setClosingFloatCash(formatNumber(e.target.value))} 
-                                        className={`w-full bg-[#1e293b] text-white text-xl font-bold px-3 py-3 rounded border outline-none font-mono transition-colors ${closingFloatCash ? (parseNumber(closingFloatCash) === parseFloat(currentShift?.startCash || 0) ? 'border-green-500 focus:border-green-400' : 'border-red-500 focus:border-red-400') : 'border-slate-700 focus:border-blue-500'}`} 
-                                        placeholder="0" 
-                                    />
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    {/* Cash Inputs */}
-                                    <div className="bg-[#0f172a] border border-slate-800 rounded-lg p-4 space-y-3">
-                                        <h4 className="text-green-400 font-bold text-sm uppercase mb-3"><i className="fas fa-money-bill-wave mr-2"></i> Physical Cash</h4>
-                                        <div>
-                                            <label className="text-slate-500 text-xs font-bold uppercase mb-1 block">KHR (Riel)</label>
-                                            <div className="relative flex items-center">
-                                                <input 
-                                                    type="text" 
-                                                    inputMode="numeric" 
-                                                    value={actualCashKHR} 
-                                                    onChange={handleCurrencyInput(setActualCashKHR)} 
-                                                    className="w-full bg-[#1e293b] text-white text-xl font-bold px-3 py-3 rounded-l border border-r-0 border-slate-700 focus:border-green-500 outline-none font-mono" 
-                                                    placeholder="0" 
-                                                />
-                                                <button onClick={() => setShowBillCounter('KHR')} className="bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-700 rounded-r px-4 py-3 transition">
-                                                    <i className="fas fa-list"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <label className="text-slate-500 text-xs font-bold uppercase mb-1 block">USD (Dollar)</label>
-                                            <div className="relative flex items-center">
-                                                <input 
-                                                    type="text" 
-                                                    inputMode="numeric" 
-                                                    value={actualCashUSD} 
-                                                    onChange={handleCurrencyInput(setActualCashUSD)} 
-                                                    className="w-full bg-[#1e293b] text-white text-xl font-bold px-3 py-3 rounded-l border border-r-0 border-slate-700 focus:border-green-500 outline-none font-mono" 
-                                                    placeholder="0.00" 
-                                                />
-                                                <button onClick={() => setShowBillCounter('USD')} className="bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-700 rounded-r px-4 py-3 transition">
-                                                    <i className="fas fa-list"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Bank Inputs */}
-                                    <div className="bg-[#0f172a] border border-slate-800 rounded-lg p-4 space-y-3">
-                                        <h4 className="text-blue-400 font-bold text-sm uppercase mb-3"><i className="fas fa-university mr-2"></i> Bank / KHQR</h4>
-                                        <div>
-                                            <label className="text-slate-500 text-xs font-bold uppercase mb-1 block">KHR (Riel)</label>
-                                            <input 
-                                                type="text" 
-                                                inputMode="numeric" 
-                                                value={actualBankKHR} 
-                                                onChange={handleCurrencyInput(setActualBankKHR)} 
-                                                className="w-full bg-[#1e293b] text-white text-xl font-bold px-3 py-3 rounded border border-slate-700 focus:border-blue-500 outline-none font-mono" 
-                                                placeholder="0" 
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-slate-500 text-xs font-bold uppercase mb-1 block">USD (Dollar)</label>
-                                            <input 
-                                                type="text" 
-                                                inputMode="numeric" 
-                                                value={actualBankUSD} 
-                                                onChange={handleCurrencyInput(setActualBankUSD)} 
-                                                className="w-full bg-[#1e293b] text-white text-xl font-bold px-3 py-3 rounded border border-slate-700 focus:border-blue-500 outline-none font-mono" 
-                                                placeholder="0.00" 
-                                            />
-                                        </div>
                                     </div>
                                 </div>
-                                
-                                <textarea value={note} onChange={e => setNote(e.target.value)} className="w-full bg-[#0f172a] text-white px-4 py-3 rounded-lg border border-slate-800 focus:border-slate-500 outline-none text-sm resize-none" placeholder="Optional notes..." rows="2"></textarea>
-                            </div>
 
-                            {/* --- RIGHT COLUMN: RECONCILIATION SUMMARY --- */}
-                            <div className="w-full lg:w-[420px] flex flex-col gap-4">
-                                <div className="bg-[#0f172a] rounded-[1.5rem] p-6 border border-slate-800 shadow-2xl relative overflow-hidden font-sans flex-1 flex flex-col">
-                                    <h2 className="text-white font-bold text-sm tracking-widest mb-6 opacity-90 border-b border-slate-800 pb-4">SUMMARY</h2>
-
-                                    {/* GRAND TOTAL */}
-                                    <div className="text-center mb-6 relative z-10">
-                                        <p className="text-slate-500 text-[10px] font-bold tracking-[0.2em] uppercase mb-4">GRAND TOTAL (SYSTEM)</p>
-                                        <div className="bg-[#161f32] inline-block px-10 py-5 rounded-2xl border border-slate-800/50 shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)]">
-                                            <span className="text-4xl font-black text-[#ef4444] mr-2 tracking-tight">{khrFormatter.format(sysTotal)}</span>
-                                            <span className="text-2xl text-[#ef4444] font-bold">៛</span>
-                                        </div>
-                                    </div>
-
-                                    {/* SYSTEM EXPECTED SPLIT */}
-                                    <div className="grid grid-cols-2 gap-3 mb-6 relative z-10">
-                                        <div className="bg-[#161f32] border border-slate-800/80 rounded-xl p-3 text-center">
-                                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1 flex items-center justify-center gap-1.5"><i className="fas fa-money-bill-wave text-emerald-500/70"></i> System Cash</div>
-                                            <div className="font-black text-emerald-400 text-base">៛{khrFormatter.format(expectedCashTotal)}</div>
-                                        </div>
-                                        <div className="bg-[#161f32] border border-slate-800/80 rounded-xl p-3 text-center">
-                                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1 flex items-center justify-center gap-1.5"><i className="fas fa-university text-blue-500/70"></i> System Bank</div>
-                                            <div className="font-black text-blue-400 text-base">៛{khrFormatter.format(expectedBankTotal)}</div>
-                                        </div>
-                                    </div>
-
-                                    {/* BREAKDOWN BOXES */}
-                                    <div className="grid grid-cols-2 gap-4 relative z-10">
-                                        {/* KHR Cash */}
-                                        <div className="bg-[#161f32] p-4 rounded-2xl border border-slate-800 flex flex-col">
-                                            <div className="flex justify-between items-center mb-1">
-                                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">KHR Cash (Act)</span>
-                                                <i className="fas fa-money-bill-wave text-green-500/50 text-xs"></i>
-                                            </div>
-                                            <div className="font-bold text-emerald-400 text-xs md:text-sm truncate">{actualCashKHR ? khrFormatter.format(parseNumber(actualCashKHR)) : '0'} ៛</div>
-                                        </div>
-                                        
-                                        {/* USD Cash */}
-                                        <div className="bg-[#161f32] p-4 rounded-2xl border border-slate-800 flex flex-col">
-                                            <div className="flex justify-between items-center mb-1">
-                                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">USD Cash (Act)</span>
-                                                <i className="fas fa-dollar-sign text-green-500/50 text-xs"></i>
-                                            </div>
-                                            <div className="font-bold text-white text-xs md:text-sm truncate">${actualCashUSD ? Number(parseNumber(actualCashUSD)).toFixed(2) : '0.00'}</div>
-                                        </div>
-
-                                        {/* KHR Bank */}
-                                        <div className="bg-[#161f32] p-4 rounded-2xl border border-slate-800 flex flex-col">
-                                            <div className="flex justify-between items-center mb-1">
-                                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">KHR Bank (Act)</span>
-                                                <i className="fas fa-university text-blue-500/50 text-xs"></i>
-                                            </div>
-                                            <div className="font-bold text-blue-400 text-xs md:text-sm truncate">{actualBankKHR ? khrFormatter.format(parseNumber(actualBankKHR)) : '0'} ៛</div>
-                                        </div>
-
-                                        {/* USD Bank */}
-                                        <div className="bg-[#161f32] p-4 rounded-2xl border border-slate-800 flex flex-col">
-                                            <div className="flex justify-between items-center mb-1">
-                                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">USD Bank (Act)</span>
-                                                <i className="fas fa-credit-card text-blue-500/50 text-xs"></i>
-                                            </div>
-                                            <div className="font-bold text-white text-xs md:text-sm truncate">${actualBankUSD ? Number(parseNumber(actualBankUSD)).toFixed(2) : '0.00'}</div>
-                                        </div>
-                                    </div>
-
-                                    {/* NET VARIANCE FOOTER */}
-                                    <div className="mt-auto pt-6 border-t border-slate-800">
-                                        <div className="flex justify-between items-center">
-                                            <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Net Variance</span>
-                                            <span className={`text-lg font-black ${getVarColor(totalVariance)}`}>
-                                                {totalVariance > 0 ? '+' : ''}{khrFormatter.format(totalVariance)} <span className="text-sm">៛</span>
+                                {/* Step 2: Physical Cash & Bank/KHQR Drop Cards */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {/* Physical Cash Drop */}
+                                    <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-4 space-y-3">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                                            <h4 className="text-emerald-400 font-bold text-xs uppercase tracking-wider flex items-center gap-1.5">
+                                                <i className="fas fa-money-bill-wave"></i> 2. Physical Cash Drop
+                                            </h4>
+                                            <span className="text-[11px] font-mono text-slate-400">
+                                                = ៛{khrFormatter.format(reconciliation.actualCashTotal)}
                                             </span>
                                         </div>
+
+                                        <div>
+                                            <label className="text-slate-400 text-[11px] font-bold uppercase mb-1 block">Cash KHR (៛)</label>
+                                            <div className="flex items-stretch">
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={actualCashKHR}
+                                                    onChange={handleCurrencyInput(setActualCashKHR)}
+                                                    className="w-full bg-slate-800 text-white text-base font-bold px-3 py-2.5 rounded-l-xl border border-r-0 border-slate-600 focus:border-emerald-500 outline-none font-mono"
+                                                    placeholder="0"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowBillCounter('KHR')}
+                                                    className="bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white border border-slate-600 rounded-r-xl px-3.5 transition flex items-center justify-center"
+                                                    title="Open KHR Bill Denominations Counter"
+                                                >
+                                                    <i className="fas fa-calculator text-xs"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label className="text-slate-400 text-[11px] font-bold uppercase mb-1 flex justify-between">
+                                                <span>Cash USD ($)</span>
+                                                <span className="text-slate-500 font-normal">1$ = ៛{khrFormatter.format(currentRate)}</span>
+                                            </label>
+                                            <div className="flex items-stretch">
+                                                <input
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    value={actualCashUSD}
+                                                    onChange={handleCurrencyInput(setActualCashUSD)}
+                                                    className="w-full bg-slate-800 text-white text-base font-bold px-3 py-2.5 rounded-l-xl border border-r-0 border-slate-600 focus:border-emerald-500 outline-none font-mono"
+                                                    placeholder="0.00"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowBillCounter('USD')}
+                                                    className="bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white border border-slate-600 rounded-r-xl px-3.5 transition flex items-center justify-center"
+                                                    title="Open USD Bill Denominations Counter"
+                                                >
+                                                    <i className="fas fa-calculator text-xs"></i>
+                                                </button>
+                                            </div>
+                                        </div>
                                     </div>
-                                    
-                                    {/* Decorative Glow */}
-                                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-blue-500/5 rounded-full blur-3xl pointer-events-none"></div>
-                                    <div className="absolute top-20 -left-10 w-32 h-32 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
+
+                                    {/* Bank / KHQR Drop */}
+                                    <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-4 space-y-3">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                                            <h4 className="text-sky-400 font-bold text-xs uppercase tracking-wider flex items-center gap-1.5">
+                                                <i className="fas fa-qrcode"></i> 3. Bank / KHQR Drop
+                                            </h4>
+                                            <span className="text-[11px] font-mono text-slate-400">
+                                                = ៛{khrFormatter.format(reconciliation.actualBankTotal)}
+                                            </span>
+                                        </div>
+
+                                        <div>
+                                            <label className="text-slate-400 text-[11px] font-bold uppercase mb-1 block">Bank KHR (៛)</label>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={actualBankKHR}
+                                                onChange={handleCurrencyInput(setActualBankKHR)}
+                                                className="w-full bg-slate-800 text-white text-base font-bold px-3 py-2.5 rounded-xl border border-slate-600 focus:border-sky-500 outline-none font-mono"
+                                                placeholder="0"
+                                            />
+                                        </div>
+
+                                        <div>
+                                            <label className="text-slate-400 text-[11px] font-bold uppercase mb-1 flex justify-between">
+                                                <span>Bank USD ($)</span>
+                                                <span className="text-slate-500 font-normal">1$ = ៛{khrFormatter.format(currentRate)}</span>
+                                            </label>
+                                            <input
+                                                type="text"
+                                                inputMode="decimal"
+                                                value={actualBankUSD}
+                                                onChange={handleCurrencyInput(setActualBankUSD)}
+                                                className="w-full bg-slate-800 text-white text-base font-bold px-3 py-2.5 rounded-xl border border-slate-600 focus:border-sky-500 outline-none font-mono"
+                                                placeholder="0.00"
+                                            />
+                                        </div>
+                                    </div>
                                 </div>
 
-                                <button onClick={handleCloseShift} disabled={loading} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl hover:bg-blue-700 transition shadow-lg shadow-blue-500/30 flex items-center justify-center gap-3 disabled:bg-slate-700 disabled:cursor-not-allowed">
-                                    {loading ? <div className="loader w-5 h-5 border-white/30 border-t-white"></div> : 'Submit Report'}
-                                </button>
+                                {/* Step 4: Shift Closing Note */}
+                                <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-3.5">
+                                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        <i className="fas fa-comment-alt text-slate-500 mr-1.5"></i>Handover / Variance Note (Optional)
+                                    </label>
+                                    <textarea
+                                        value={note}
+                                        onChange={e => setNote(e.target.value)}
+                                        className="w-full bg-slate-800 text-white px-3.5 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-xs sm:text-sm resize-none"
+                                        placeholder="Add any shift handover remarks or explanation for cash/bank variance..."
+                                        rows="2"
+                                    ></textarea>
+                                </div>
+                            </div>
+
+                            {/* RIGHT COLUMN: Live Reconciliation Ledger Card (5 cols) */}
+                            <div className="lg:col-span-5 bg-slate-900 border border-slate-700/90 rounded-2xl p-4 sm:p-5 shadow-xl space-y-4">
+                                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-300 flex items-center gap-2">
+                                        <i className="fas fa-balance-scale text-blue-400"></i>
+                                        <span>Live Reconciliation</span>
+                                    </h3>
+                                    <span className="text-[11px] font-mono text-slate-400">Rate: ៛{khrFormatter.format(currentRate)}/$</span>
+                                </div>
+
+                                {/* System Expected vs Actual Counted Top Comparison */}
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700 text-center">
+                                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">System Expected</span>
+                                        <span className="text-lg sm:text-xl font-black text-white mt-1 block">
+                                            ៛{khrFormatter.format(reconciliation.sysGrandTotal)}
+                                        </span>
+                                    </div>
+                                    <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700 text-center">
+                                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Actual Counted</span>
+                                        <span className="text-lg sm:text-xl font-black text-blue-400 mt-1 block">
+                                            ៛{khrFormatter.format(reconciliation.actualCombinedTotal)}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {/* Detailed Cash vs Bank Breakdown Table */}
+                                <div className="bg-slate-950/60 rounded-xl border border-slate-800 divide-y divide-slate-800/80 text-xs">
+                                    {/* Cash Row */}
+                                    <div className="p-3 space-y-1.5">
+                                        <div className="flex items-center justify-between font-bold text-emerald-400">
+                                            <span><i className="fas fa-money-bill-wave mr-1.5"></i>Cash Drawer</span>
+                                            <span className={getVarColor(reconciliation.cashVariance)}>
+                                                {reconciliation.cashVariance > 0 ? '+' : ''}៛{khrFormatter.format(reconciliation.cashVariance)}
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between text-slate-400">
+                                            <span>System Cash: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.expectedCashTotal)}</strong></span>
+                                            <span>Counted: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.actualCashTotal)}</strong></span>
+                                        </div>
+                                        <div className="flex justify-between text-[11px] text-slate-500 font-mono pt-0.5">
+                                            <span>KHR: ៛{khrFormatter.format(reconciliation.cashKHR)}</span>
+                                            <span>USD: ${reconciliation.cashUSD.toFixed(2)}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Bank Row */}
+                                    <div className="p-3 space-y-1.5">
+                                        <div className="flex items-center justify-between font-bold text-sky-400">
+                                            <span><i className="fas fa-university mr-1.5"></i>Bank / KHQR</span>
+                                            <span className={getVarColor(reconciliation.bankVariance)}>
+                                                {reconciliation.bankVariance > 0 ? '+' : ''}៛{khrFormatter.format(reconciliation.bankVariance)}
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between text-slate-400">
+                                            <span>System Bank: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.expectedBankTotal)}</strong></span>
+                                            <span>Counted: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.actualBankTotal)}</strong></span>
+                                        </div>
+                                        <div className="flex justify-between text-[11px] text-slate-500 font-mono pt-0.5">
+                                            <span>KHR: ៛{khrFormatter.format(reconciliation.bankKHR)}</span>
+                                            <span>USD: ${reconciliation.bankUSD.toFixed(2)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Net Variance Banner */}
+                                <div className={`p-3.5 rounded-xl border flex items-center justify-between ${
+                                    reconciliation.totalVariance === 0
+                                        ? 'bg-slate-800/70 border-slate-700'
+                                        : reconciliation.totalVariance > 0
+                                            ? 'bg-emerald-950/30 border-emerald-500/40'
+                                            : 'bg-rose-950/30 border-rose-500/40'
+                                }`}>
+                                    <div>
+                                        <span className="text-xs font-bold uppercase tracking-wider text-slate-300 block">Net Shift Variance</span>
+                                        <span className="text-[11px] text-slate-400">
+                                            {reconciliation.totalVariance === 0
+                                                ? 'Balanced with system sales'
+                                                : reconciliation.totalVariance > 0
+                                                    ? 'Surplus (Over)'
+                                                    : 'Shortage (Under)'}
+                                        </span>
+                                    </div>
+                                    <span className={`text-xl font-black font-mono ${getVarColor(reconciliation.totalVariance)}`}>
+                                        {reconciliation.totalVariance > 0 ? '+' : ''}៛{khrFormatter.format(reconciliation.totalVariance)}
+                                    </span>
+                                </div>
                             </div>
                         </div>
-                    )}
+                    </div>
                 </ModalBody>
+
+                <ModalFooter>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold py-2.5 px-5 rounded-xl transition text-sm"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleCloseShift}
+                        disabled={loading}
+                        className="w-full sm:w-auto bg-blue-600 hover:bg-blue-500 text-white font-black py-2.5 px-7 rounded-xl transition shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 text-sm disabled:opacity-50"
+                    >
+                        {loading ? <div className="loader w-4 h-4 border-white/30 border-t-white"></div> : <i className="fas fa-check-circle"></i>}
+                        <span>Submit &amp; Close Shift</span>
+                    </button>
+                </ModalFooter>
             </Modal>
         );
     };
@@ -10913,7 +11024,7 @@
                                                         <i className={`fas fa-chevron-right text-xs text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-400' : ''}`}></i>
                                                     </td>
                                                     <td className="px-4 py-3 text-slate-300">
-                                                        {sale.timestamp ? safeToDate(sale.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : 'Just now'}
+                                                        {safeFormatTime(sale.timestamp || sale.createdAt, 'Just now')}
                                                     </td>
                                                     <td className="px-4 py-3 font-mono text-slate-400">{sale.receiptNo}</td>
                                                     <td className="px-4 py-3 text-slate-300">
@@ -17084,15 +17195,17 @@
             
             // Sort sales by date ascending
             const validSales = salesData.filter(s => s.status !== 'void').sort((a,b) => {
-                const da = safeToDate(a.timestamp);
-                const db = safeToDate(b.timestamp);
+                const da = safeToDate(a.timestamp || a.createdAt) || 0;
+                const db = safeToDate(b.timestamp || b.createdAt) || 0;
                 return da - db;
             });
 
             if (validSales.length === 0) return null;
 
             validSales.forEach(sale => {
-                const dateKey = safeToDate(sale.timestamp).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); // DD MMM
+                const dt = safeToDate(sale.timestamp || sale.createdAt);
+                if (!dt) return;
+                const dateKey = dt.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }); // DD MMM
                 if (!dailyStats[dateKey]) {
                     dailyStats[dateKey] = { profit: 0, revenue: 0 };
                 }
@@ -17198,6 +17311,7 @@
     // --- NEW: Sale Report Page ---
     const SaleReportPage = ({ userProfile }) => {
         const { shops, products } = useData();
+        const canManageSales = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
         const [activeTab, setActiveTab] = useState('summary');
         const [salesData, setSalesData] = useState([]);
         const [loading, setLoading] = useState(false);
@@ -17218,6 +17332,12 @@
         const [linkPaymentData, setLinkPaymentData] = useState(null);
         const [linkReceiptSearch, setLinkReceiptSearch] = useState('');
         const [linkingState, setLinkingState] = useState(false);
+
+        // --- NEW: Edit & Delete Sale Modal State (Admin / Shop Manager) ---
+        const [editingSale, setEditingSale] = useState(null);
+        const [deletingSale, setDeletingSale] = useState(null);
+        const [isSavingSaleEdit, setIsSavingSaleEdit] = useState(false);
+        const [isDeletingSale, setIsDeletingSale] = useState(false);
 
         // --- NEW: Cleared Carts Log State ---
         const [clearedCartsData, setClearedCartsData] = useState([]);
@@ -17490,14 +17610,14 @@
         }, [startDate, endDate, selectedShopId, bankStateSearchTerm]);
         
         // --- FIXED: Bank State (TG Feed) Strict Shop Filter & On-Demand Fetch (0 Automatic Reads) ---
-        const [showAllBranchesBankFeed, setShowAllBranchesBankFeed] = useState(false);
-        const [isSyncingBankFeed, setIsSyncingBankFeed] = useState(false);
         const [hasFetchedBankStateOnce, setHasFetchedBankStateOnce] = useState(false);
         const [secretChatIdsByShop, setSecretChatIdsByShop] = useState({});
         const isRefreshingBankStateRef = useRef(false);
 
         const stripTgChatId = useCallback((rawId) => {
-            return String(rawId || '').trim().replace(/^-100/, '').replace(/^-/, '').trim();
+            return window.SolarisKHQREngine
+                ? window.SolarisKHQREngine.normalizeChatId(rawId)
+                : String(rawId || '').trim().replace(/^-100/, '').replace(/^-/, '').trim();
         }, []);
 
         // Load fallback paywayChatId & accountName from `payway_secrets/{shopId}` only when user fetches Bank State
@@ -17665,11 +17785,6 @@
             return false;
         }, [stripTgChatId, resolveShopForBankPayment, getShopPaywayChatIds, getShopMerchantAliases]);
 
-        // Automatically turn off "Showing All TG Groups" bypass whenever the user changes "Filter by Shop"
-        useEffect(() => {
-            setShowAllBranchesBankFeed(false);
-        }, [selectedShopId]);
-
         const refreshBankStateMultiSource = useCallback(async (forceNetworkPoll = true, showSpinner = true) => {
             // Prevent overlapping refreshes
             if (isRefreshingBankStateRef.current) return;
@@ -17720,8 +17835,7 @@
                     if (recMs < startMs || recMs > endMs) return;
 
                     const cleanDocChatId = String(rawDoc.chatId || '').trim();
-                    // Only include transactions from configured shop Chat IDs unless "Showing All TG Groups" diagnostic mode is toggled on
-                    if (!showAllBranchesBankFeed && window.SolarisKHQREngine && !window.SolarisKHQREngine.isChatIdAllowed(cleanDocChatId)) {
+                    if (window.SolarisKHQREngine && !window.SolarisKHQREngine.isChatIdAllowed(cleanDocChatId)) {
                         return;
                     }
 
@@ -17787,9 +17901,8 @@
             } finally {
                 isRefreshingBankStateRef.current = false;
                 setBankStateLoading(false);
-                setIsSyncingBankFeed(false);
             }
-        }, [startDate, endDate, selectedShopId, shops, ensureSecretChatIdsLoaded, showAllBranchesBankFeed]);
+        }, [startDate, endDate, selectedShopId, shops, ensureSecretChatIdsLoaded]);
 
         // Purge stray / unconfigured Chat ID documents (e.g., -5207801009, -5433742888) from `/aba_payments`
         const handlePurgeUnconfiguredChatIdsFromDb = async () => {
@@ -17901,8 +18014,6 @@
 
         // Reactive Shop Filter + Search Filter for Bank State (Telegram Feed)
         const shopFilteredBankStateData = useMemo(() => {
-            if (showAllBranchesBankFeed) return bankStateData;
-
             const selectedShopObj = (selectedShopId && selectedShopId !== 'All')
                 ? shops.find(s => s.id === selectedShopId)
                 : null;
@@ -17921,7 +18032,7 @@
                 }
                 return true;
             });
-        }, [bankStateData, selectedShopId, shops, userProfile, showAllBranchesBankFeed, matchesShopBankFilter]);
+        }, [bankStateData, selectedShopId, shops, userProfile, matchesShopBankFilter]);
 
         const filteredBankStateData = useMemo(() => {
             if (!bankStateSearchTerm.trim()) return shopFilteredBankStateData;
@@ -18125,21 +18236,52 @@
             }
         };
 
+        // --- Unified Sale Financial Helper (Eliminates duplicate discount/cost/profit/margin math across views & exports) ---
+        const computeSaleFinancials = useCallback((sale) => {
+            const discountVal = Number(sale?.discount) || (Number(sale?.manualDiscount || 0) + Number(sale?.redemptionAmount || 0));
+            const revenueVal = Number(sale?.grandTotal) || 0;
+            const subtotalVal = Number(sale?.subtotal) || (revenueVal + discountVal);
+            const fallbackItemsCost = (sale?.items || []).reduce((sum, i) => {
+                const q = Number(i.quantity) || 0;
+                const c = i.cost !== undefined && i.cost !== null
+                    ? (Number(i.cost) || 0)
+                    : (Number(productMap.get(i.productId)?.cost) || 0);
+                return sum + (q * c);
+            }, 0);
+            const costVal = sale?.totalCost !== undefined && sale?.totalCost !== null
+                ? (Number(sale.totalCost) || 0)
+                : fallbackItemsCost;
+            const profitVal = revenueVal - costVal;
+            const marginPct = revenueVal > 0 ? ((profitVal / revenueVal) * 100) : 0;
+            return { discountVal, subtotalVal, revenueVal, costVal, profitVal, marginPct };
+        }, [productMap]);
+
+        // Memoized Receipt Search List for Manual Link Payment Modal
+        const matchingLinkReceipts = useMemo(() => {
+            const q = linkReceiptSearch.trim().toLowerCase();
+            if (!q) return [];
+            return salesData.filter(s => (s.receiptNo || '').toLowerCase().includes(q));
+        }, [salesData, linkReceiptSearch]);
+
         // --- Aggregation Logic ---
         const summaryStats = useMemo(() => {
             const validSales = salesData.filter(s => s.status !== 'void');
-            const totalRevenue = validSales.reduce((sum, s) => sum + s.grandTotal, 0);
-            const totalTransactions = validSales.length;
-            const avgTicket = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
-            const totalProfit = validSales.reduce((sum, s) => sum + (s.grandTotal - (s.totalCost || 0)), 0);
-            
+            let totalRevenue = 0;
+            let totalProfit = 0;
             const paymentMethods = {};
+
             validSales.forEach(s => {
-                paymentMethods[s.paymentMethod] = (paymentMethods[s.paymentMethod] || 0) + s.grandTotal;
+                const fin = computeSaleFinancials(s);
+                totalRevenue += fin.revenueVal;
+                totalProfit += fin.profitVal;
+                paymentMethods[s.paymentMethod] = (paymentMethods[s.paymentMethod] || 0) + fin.revenueVal;
             });
 
+            const totalTransactions = validSales.length;
+            const avgTicket = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
+
             return { totalRevenue, totalTransactions, avgTicket, totalProfit, paymentMethods };
-        }, [salesData]);
+        }, [salesData, computeSaleFinancials]);
 
         const productStats = useMemo(() => {
             const prodStats = {};
@@ -18234,7 +18376,7 @@
             const items = [];
             const q = detailSearchTerm.trim().toLowerCase();
             sortedDetailSales.forEach(sale => {
-                const discountAmt = Number(sale.discount) || (Number(sale.manualDiscount || 0) + Number(sale.redemptionAmount || 0));
+                const { discountVal } = computeSaleFinancials(sale);
                 (sale.items || []).forEach((item, index) => {
                     if (q) {
                         const matchReceipt = (sale.receiptNo || '').toLowerCase().includes(q);
@@ -18273,13 +18415,13 @@
                         totalCost: lineCost,
                         profit: lineProfit,
                         marginPct: lineMarginPct,
-                        receiptDiscount: discountAmt,
+                        receiptDiscount: discountVal,
                         receiptGrandTotal: sale.grandTotal
                     });
                 });
             });
             return items;
-        }, [sortedDetailSales, detailSearchTerm, productMap]);
+        }, [sortedDetailSales, detailSearchTerm, productMap, computeSaleFinancials]);
 
         // --- NEW: Handle Export Logic ---
         const handleExport = () => {
@@ -18323,8 +18465,7 @@
                 // Export both Receipt-level and Item-level sheets in the workbook
                 const itemData = [];
                 sortedDetailSales.forEach(s => {
-                    const discountVal = Number(s.discount) || (Number(s.manualDiscount || 0) + Number(s.redemptionAmount || 0));
-                    const subtotalVal = Number(s.subtotal) || (Number(s.grandTotal || 0) + discountVal);
+                    const { discountVal, subtotalVal } = computeSaleFinancials(s);
                     const payMethod = s.paymentMethod === 'KHQR' || s.paymentMethod === 'KHQR (ABA)' ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash');
                     (s.items || []).forEach(item => {
                         const qty = Number(item.quantity) || 0;
@@ -18339,7 +18480,7 @@
                         const lineMargin = lineRev > 0 ? parseFloat(((lineProfit / lineRev) * 100).toFixed(2)) : 0;
 
                         itemData.push({
-                            'Date/Time': s.timestamp ? safeToDate(s.timestamp).toLocaleString() : '',
+                            'Date/Time': safeFormatDateTime(s.timestamp || s.createdAt, ''),
                             'Receipt #': s.receiptNo,
                             'Shop': s.shopName,
                             'Cashier': s.cashierName,
@@ -18365,20 +18506,10 @@
                 ws['!cols'] = [{wch:20}, {wch:16}, {wch:16}, {wch:15}, {wch:16}, {wch:15}, {wch:28}, {wch:14}, {wch:18}, {wch:8}, {wch:15}, {wch:15}, {wch:18}, {wch:16}, {wch:14}, {wch:18}, {wch:18}, {wch:20}, {wch:10}];
 
                 const receiptData = sortedDetailSales.map(s => {
-                    const discountVal = Number(s.discount) || (Number(s.manualDiscount || 0) + Number(s.redemptionAmount || 0));
-                    const subtotalVal = Number(s.subtotal) || (Number(s.grandTotal || 0) + discountVal);
-                    const receiptRevenue = Number(s.grandTotal) || 0;
-                    const computedItemsCost = (s.items || []).reduce((sum, i) => {
-                        const q = Number(i.quantity) || 0;
-                        const c = i.cost !== undefined && i.cost !== null ? (Number(i.cost) || 0) : (Number(productMap.get(i.productId)?.cost) || 0);
-                        return sum + (q * c);
-                    }, 0);
-                    const receiptCost = s.totalCost !== undefined && s.totalCost !== null ? (Number(s.totalCost) || 0) : computedItemsCost;
-                    const receiptProfit = receiptRevenue - receiptCost;
-                    const receiptMargin = receiptRevenue > 0 ? parseFloat(((receiptProfit / receiptRevenue) * 100).toFixed(2)) : 0;
+                    const { discountVal, subtotalVal, revenueVal, costVal, profitVal, marginPct } = computeSaleFinancials(s);
                     const itemSummary = (s.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ');
                     return {
-                        'Date/Time': s.timestamp ? safeToDate(s.timestamp).toLocaleString() : '',
+                        'Date/Time': safeFormatDateTime(s.timestamp || s.createdAt, ''),
                         'Receipt #': s.receiptNo,
                         'Shop': s.shopName,
                         'Cashier': s.cashierName,
@@ -18387,10 +18518,10 @@
                         'Payment Method': s.paymentMethod === 'KHQR' ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash'),
                         'Subtotal (KHR)': subtotalVal,
                         'Discount (KHR)': discountVal,
-                        'Total (KHR)': receiptRevenue,
-                        'Total Cost (KHR)': receiptCost,
-                        'Profit (KHR)': receiptProfit,
-                        'Margin (%)': receiptMargin,
+                        'Total (KHR)': revenueVal,
+                        'Total Cost (KHR)': costVal,
+                        'Profit (KHR)': profitVal,
+                        'Margin (%)': parseFloat(marginPct.toFixed(2)),
                         'Status': s.status === 'void' ? 'VOID' : 'PAID'
                     };
                 });
@@ -18479,6 +18610,231 @@
             }
         };
 
+        // --- NEW: Admin / Shop Manager Edit & Delete Sale Handlers ---
+        const handleOpenEditSale = (sale) => {
+            if (!sale || !canManageSales) return;
+            const { discountVal } = computeSaleFinancials(sale);
+            setEditingSale({
+                ...sale,
+                editPaymentMethod: (sale.paymentMethod === 'KHQR' || sale.paymentMethod === 'KHQR (ABA)' || sale.paymentMethod === 'Bank') ? 'KHQR' : 'Cash',
+                editStatus: sale.status === 'void' ? 'void' : 'paid',
+                editManualDiscount: sale.manualDiscount !== undefined ? Number(sale.manualDiscount) : discountVal,
+                editCustomerName: sale.customerName || 'Walk-in',
+                editItems: (sale.items || []).map(item => ({
+                    ...item,
+                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
+                    price: Math.max(0, parseFloat(item.price) || 0),
+                    cost: parseFloat(item.cost) || 0,
+                    note: item.note || ''
+                }))
+            });
+        };
+
+        const handleSaveSaleEdit = async (e) => {
+            e.preventDefault();
+            if (!editingSale || isSavingSaleEdit) return;
+            setIsSavingSaleEdit(true);
+
+            try {
+                const origSale = salesData.find(s => s.id === editingSale.id) || editingSale;
+                const sanitizedItems = (editingSale.editItems || []).filter(i => (parseInt(i.quantity, 10) || 0) > 0).map(item => ({
+                    ...item,
+                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
+                    price: Math.max(0, parseFloat(item.price) || 0),
+                    cost: parseFloat(item.cost) || 0,
+                    note: item.note || ''
+                }));
+
+                if (sanitizedItems.length === 0) {
+                    setModal({ type: 'message', data: { title: 'Validation Error', message: 'A sale receipt must have at least 1 item. Use Delete if you wish to remove the entire receipt.', isError: true } });
+                    setIsSavingSaleEdit(false);
+                    return;
+                }
+
+                const newSubtotal = sanitizedItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
+                const newTotalCost = sanitizedItems.reduce((sum, i) => sum + (i.cost * i.quantity), 0);
+                const redemptionAmt = Number(origSale.redemptionAmount) || 0;
+                const manualDisc = Math.max(0, parseFloat(editingSale.editManualDiscount) || 0);
+                const newDiscount = Math.min(newSubtotal, manualDisc + redemptionAmt);
+                const newGrandTotal = Math.max(0, newSubtotal - newDiscount);
+                const newStatus = editingSale.editStatus === 'void' ? 'void' : 'paid';
+                const newPaymentMethod = editingSale.editPaymentMethod || 'Cash';
+
+                const updatedFields = {
+                    items: sanitizedItems,
+                    subtotal: newSubtotal,
+                    totalCost: newTotalCost,
+                    manualDiscount: manualDisc,
+                    discount: newDiscount,
+                    grandTotal: newGrandTotal,
+                    paymentMethod: newPaymentMethod,
+                    customerName: (editingSale.editCustomerName || 'Walk-in').trim(),
+                    status: newStatus,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    editedBy: userProfile?.name || 'Admin'
+                };
+
+                // 1. Update Local Sales Store & UI state immediately (0ms)
+                const mergedSaleForLocal = {
+                    ...origSale,
+                    ...updatedFields,
+                    updatedAt: new Date().toISOString()
+                };
+                if (window.SolarisLocalSalesStore) {
+                    window.SolarisLocalSalesStore.recordSale(mergedSaleForLocal);
+                }
+                setSalesData(prev => prev.map(s => s.id === origSale.id ? mergedSaleForLocal : s));
+
+                // 2. Sync Stock & Shift differences in Firestore Batch
+                const batch = db.batch();
+                const saleRef = db.collection('sales').doc(origSale.id);
+                batch.set(saleRef, updatedFields, { merge: true });
+
+                const targetShop = shops.find(s => s.id === origSale.shopId);
+                if (targetShop?.manageStock !== false && origSale.shopId) {
+                    const oldWasActive = origSale.status !== 'void';
+                    const newIsActive = newStatus !== 'void';
+                    const qtyDiffByProduct = {};
+
+                    if (oldWasActive) {
+                        (origSale.items || []).forEach(i => {
+                            if (i.productId) qtyDiffByProduct[i.productId] = (qtyDiffByProduct[i.productId] || 0) + (Number(i.quantity) || 0);
+                        });
+                    }
+                    if (newIsActive) {
+                        sanitizedItems.forEach(i => {
+                            if (i.productId) qtyDiffByProduct[i.productId] = (qtyDiffByProduct[i.productId] || 0) - (Number(i.quantity) || 0);
+                        });
+                    }
+
+                    Object.entries(qtyDiffByProduct).forEach(([prodId, stockDelta]) => {
+                        if (stockDelta !== 0) {
+                            const prodRef = db.collection('products').doc(prodId);
+                            batch.update(prodRef, {
+                                [`stockByShop.${origSale.shopId}`]: firebase.firestore.FieldValue.increment(stockDelta)
+                            });
+                        }
+                    });
+                }
+
+                // Adjust shift totals if linked to a shift
+                if (origSale.shiftId) {
+                    const oldActiveTotal = origSale.status !== 'void' ? (Number(origSale.grandTotal) || 0) : 0;
+                    const newActiveTotal = newStatus !== 'void' ? newGrandTotal : 0;
+                    const oldIsCash = origSale.paymentMethod === 'Cash';
+                    const newIsCash = newPaymentMethod === 'Cash';
+
+                    const oldCashAmt = oldIsCash ? oldActiveTotal : 0;
+                    const newCashAmt = newIsCash ? newActiveTotal : 0;
+                    const oldBankAmt = !oldIsCash ? oldActiveTotal : 0;
+                    const newBankAmt = !newIsCash ? newActiveTotal : 0;
+
+                    const totalDiff = newActiveTotal - oldActiveTotal;
+                    const cashDiff = newCashAmt - oldCashAmt;
+                    const bankDiff = newBankAmt - oldBankAmt;
+
+                    if (totalDiff !== 0 || cashDiff !== 0 || bankDiff !== 0) {
+                        const shiftRef = db.collection('shifts').doc(origSale.shiftId);
+                        batch.set(shiftRef, {
+                            totalSales: firebase.firestore.FieldValue.increment(totalDiff),
+                            totalCashSales: firebase.firestore.FieldValue.increment(cashDiff),
+                            totalKHQRSales: firebase.firestore.FieldValue.increment(bankDiff)
+                        }, { merge: true });
+                    }
+                }
+
+                await batch.commit().catch(err => {
+                    console.warn("Sale edit cloud sync warning:", err?.code || err?.message);
+                });
+
+                setEditingSale(null);
+                setModal({ type: 'message', data: { title: 'Receipt Updated', message: `Receipt #${origSale.receiptNo} has been updated successfully.` } });
+            } catch (err) {
+                console.error("Failed to update sale:", err);
+                setModal({ type: 'message', data: { title: 'Update Error', message: err.message || 'Failed to update receipt.', isError: true } });
+            } finally {
+                setIsSavingSaleEdit(false);
+            }
+        };
+
+        const handleConfirmDeleteSale = async () => {
+            if (!deletingSale || isDeletingSale) return;
+            setIsDeletingSale(true);
+            const targetSale = deletingSale;
+
+            try {
+                // 1. Remove from Local Sales Store & UI state immediately
+                if (window.SolarisLocalSalesStore) {
+                    try {
+                        const list = window.SolarisLocalSalesStore.getSales().filter(s => s && s.id !== targetSale.id);
+                        localStorage.setItem(window.SolarisLocalSalesStore.SALES_KEY, JSON.stringify(list));
+                        window.SolarisLocalSalesStore.notify();
+                    } catch (e) {}
+                }
+                setSalesData(prev => prev.filter(s => s.id !== targetSale.id));
+                setDeletingSale(null);
+
+                // 2. Restore Stock, Shift Totals, and Customer Points in Firestore if the sale was not already voided
+                const batch = db.batch();
+                const saleRef = db.collection('sales').doc(targetSale.id);
+                batch.delete(saleRef);
+
+                if (targetSale.status !== 'void') {
+                    const targetShop = shops.find(s => s.id === targetSale.shopId);
+                    if (targetShop?.manageStock !== false && targetSale.shopId) {
+                        (targetSale.items || []).forEach(item => {
+                            if (!item.productId) return;
+                            const qty = Number(item.quantity) || 0;
+                            if (qty > 0) {
+                                const prodRef = db.collection('products').doc(item.productId);
+                                batch.update(prodRef, {
+                                    [`stockByShop.${targetSale.shopId}`]: firebase.firestore.FieldValue.increment(qty)
+                                });
+                            }
+                        });
+                    }
+
+                    if (targetSale.shiftId) {
+                        const grandTotal = Number(targetSale.grandTotal) || 0;
+                        const isCash = targetSale.paymentMethod === 'Cash';
+                        const shiftRef = db.collection('shifts').doc(targetSale.shiftId);
+                        batch.set(shiftRef, {
+                            totalSales: firebase.firestore.FieldValue.increment(-grandTotal),
+                            transactionCount: firebase.firestore.FieldValue.increment(-1),
+                            totalCashSales: isCash ? firebase.firestore.FieldValue.increment(-grandTotal) : firebase.firestore.FieldValue.increment(0),
+                            totalKHQRSales: !isCash ? firebase.firestore.FieldValue.increment(-grandTotal) : firebase.firestore.FieldValue.increment(0)
+                        }, { merge: true });
+                    }
+
+                    if (targetSale.customerId) {
+                        const pointsEarned = Number(targetSale.pointsEarned) || 0;
+                        const pointsRedeemed = Number(targetSale.pointsRedeemed ?? targetSale.redemptionAmount) || 0;
+                        const netReversal = pointsRedeemed - pointsEarned;
+                        const custRef = db.collection('customers').doc(targetSale.customerId);
+                        const custUpdate = {
+                            totalSpent: firebase.firestore.FieldValue.increment(-(Number(targetSale.grandTotal) || 0)),
+                            visitCount: firebase.firestore.FieldValue.increment(-1)
+                        };
+                        if (netReversal !== 0) {
+                            custUpdate.points = firebase.firestore.FieldValue.increment(netReversal);
+                        }
+                        batch.update(custRef, custUpdate);
+                    }
+                }
+
+                await batch.commit().catch(err => {
+                    console.warn("Sale delete cloud sync warning:", err?.code || err?.message);
+                });
+
+                setModal({ type: 'message', data: { title: 'Receipt Deleted', message: `Receipt #${targetSale.receiptNo} was deleted and stock/shift totals were adjusted.` } });
+            } catch (err) {
+                console.error("Failed to delete sale:", err);
+                setModal({ type: 'message', data: { title: 'Delete Error', message: err.message || 'Failed to delete receipt.', isError: true } });
+            } finally {
+                setIsDeletingSale(false);
+            }
+        };
+
         // State for Receipt View Modal
         const [viewReceipt, setViewReceipt] = useState(null);
 
@@ -18490,6 +18846,171 @@
                         onClose={() => setViewReceipt(null)} 
                     />
                 )}
+
+                {/* Edit Sale Receipt Modal (Admin / Shop Manager) */}
+                {editingSale && (
+                    <Modal show={true} onClose={() => setEditingSale(null)} maxWidth="max-w-3xl">
+                        <ModalHeader title={`Edit Receipt: ${editingSale.receiptNo}`} onClose={() => setEditingSale(null)} />
+                        <form onSubmit={handleSaveSaleEdit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+                            <ModalBody>
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-900/60 p-3.5 rounded-xl border border-slate-700">
+                                        <div>
+                                            <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Payment Method</label>
+                                            <select
+                                                value={editingSale.editPaymentMethod}
+                                                onChange={e => setEditingSale(prev => ({ ...prev, editPaymentMethod: e.target.value }))}
+                                                className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-sm font-bold"
+                                            >
+                                                <option value="Cash">Cash</option>
+                                                <option value="KHQR">BANK (KHQR)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Receipt Status</label>
+                                            <select
+                                                value={editingSale.editStatus}
+                                                onChange={e => setEditingSale(prev => ({ ...prev, editStatus: e.target.value }))}
+                                                className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-sm font-bold"
+                                            >
+                                                <option value="paid">PAID</option>
+                                                <option value="void">VOID</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold uppercase text-slate-400 mb-1">Manual Discount (៛)</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                value={editingSale.editManualDiscount}
+                                                onChange={e => setEditingSale(prev => ({ ...prev, editManualDiscount: e.target.value }))}
+                                                className="w-full bg-slate-800 text-rose-400 font-bold px-3 py-2 rounded-lg border border-slate-600 focus:border-rose-500 outline-none text-sm"
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                                                Line Items ({editingSale.editItems?.length || 0})
+                                            </label>
+                                            <span className="text-[11px] text-slate-400">Adjust quantity, unit price, or remove items</span>
+                                        </div>
+                                        <div className="border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
+                                            <table className="min-w-full divide-y divide-slate-700 text-xs sm:text-sm">
+                                                <thead className="bg-slate-900/80 text-slate-400 text-[11px] uppercase">
+                                                    <tr>
+                                                        <th className="px-3 py-2.5 text-left">Product</th>
+                                                        <th className="px-3 py-2.5 text-center w-24">Qty</th>
+                                                        <th className="px-3 py-2.5 text-right w-32">Unit Price (៛)</th>
+                                                        <th className="px-3 py-2.5 text-right w-32">Subtotal</th>
+                                                        <th className="px-3 py-2.5 text-center w-12"></th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700/60">
+                                                    {(editingSale.editItems || []).map((item, idx) => {
+                                                        const lineTotal = (Number(item.quantity) || 0) * (Number(item.price) || 0);
+                                                        return (
+                                                            <tr key={idx} className="hover:bg-slate-800/50">
+                                                                <td className="px-3 py-2">
+                                                                    <div className="font-bold text-slate-200">{item.name}</div>
+                                                                    <div className="text-[10px] text-slate-500 font-mono">{item.code || '-'}</div>
+                                                                </td>
+                                                                <td className="px-3 py-2 text-center">
+                                                                    <input
+                                                                        type="number"
+                                                                        min="1"
+                                                                        value={item.quantity}
+                                                                        onChange={e => {
+                                                                            const val = e.target.value;
+                                                                            setEditingSale(prev => ({
+                                                                                ...prev,
+                                                                                editItems: prev.editItems.map((it, i) => i === idx ? { ...it, quantity: val } : it)
+                                                                            }));
+                                                                        }}
+                                                                        className="w-16 bg-slate-800 text-white text-center font-bold px-2 py-1 rounded border border-slate-600 focus:border-blue-500 outline-none"
+                                                                    />
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right">
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        value={item.price}
+                                                                        onChange={e => {
+                                                                            const val = e.target.value;
+                                                                            setEditingSale(prev => ({
+                                                                                ...prev,
+                                                                                editItems: prev.editItems.map((it, i) => i === idx ? { ...it, price: val } : it)
+                                                                            }));
+                                                                        }}
+                                                                        className="w-24 bg-slate-800 text-emerald-400 text-right font-bold px-2 py-1 rounded border border-slate-600 focus:border-emerald-500 outline-none"
+                                                                    />
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right font-bold text-slate-200 whitespace-nowrap">
+                                                                    ៛{khrFormatter.format(lineTotal)}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-center">
+                                                                    {editingSale.editItems.length > 1 && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => setEditingSale(prev => ({
+                                                                                ...prev,
+                                                                                editItems: prev.editItems.filter((_, i) => i !== idx)
+                                                                            }))}
+                                                                            className="text-red-400 hover:text-red-300 p-1"
+                                                                            title="Remove Item"
+                                                                        >
+                                                                            <i className="fas fa-times"></i>
+                                                                        </button>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {(() => {
+                                        const sub = (editingSale.editItems || []).reduce((sum, i) => sum + ((Number(i.quantity) || 0) * (Number(i.price) || 0)), 0);
+                                        const disc = Math.min(sub, (parseFloat(editingSale.editManualDiscount) || 0) + (Number(editingSale.redemptionAmount) || 0));
+                                        const net = Math.max(0, sub - disc);
+                                        return (
+                                            <div className="flex flex-wrap justify-between items-center bg-slate-900 p-3.5 rounded-xl border border-slate-700 text-sm">
+                                                <div className="text-slate-400">
+                                                    Subtotal: <strong className="text-slate-200">៛{khrFormatter.format(sub)}</strong>
+                                                    {disc > 0 && <span className="ml-3 text-rose-400">Discount: <strong>-៛{khrFormatter.format(disc)}</strong></span>}
+                                                </div>
+                                                <div className="text-base font-black text-emerald-400">
+                                                    Updated Total: ៛{khrFormatter.format(net)}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            </ModalBody>
+                            <ModalFooter>
+                                <button type="button" onClick={() => setEditingSale(null)} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-xl hover:bg-slate-500 transition text-sm">
+                                    Cancel
+                                </button>
+                                <button type="submit" disabled={isSavingSaleEdit} className="bg-blue-600 text-white font-bold py-2 px-6 rounded-xl hover:bg-blue-500 transition flex items-center gap-2 text-sm shadow-lg">
+                                    {isSavingSaleEdit ? <div className="loader w-4 h-4"></div> : <i className="fas fa-save"></i>}
+                                    <span>Save Changes</span>
+                                </button>
+                            </ModalFooter>
+                        </form>
+                    </Modal>
+                )}
+
+                {/* Delete Sale Receipt Confirmation Modal (Admin / Shop Manager) */}
+                <ConfirmationModal
+                    show={!!deletingSale}
+                    title="Delete Sale Receipt"
+                    message={`Are you sure you want to permanently delete Receipt #${deletingSale?.receiptNo || ''} (៛${khrFormatter.format(deletingSale?.grandTotal || 0)})? This will restore item stock and adjust shift totals.`}
+                    onConfirm={handleConfirmDeleteSale}
+                    onCancel={() => setDeletingSale(null)}
+                />
                 
                 {linkPaymentData && (
                     <Modal show={true} onClose={() => { setLinkPaymentData(null); setLinkReceiptSearch(''); }} maxWidth="max-w-xl">
@@ -18520,7 +19041,7 @@
                                 </div>
 
                                 <div className="max-h-64 overflow-y-auto border border-slate-700 rounded-xl divide-y divide-slate-700 bg-slate-900/30">
-                                    {salesData.filter(s => linkReceiptSearch && s.receiptNo.toLowerCase().includes(linkReceiptSearch.toLowerCase())).map(sale => {
+                                    {matchingLinkReceipts.map(sale => {
                                         const expectedAmt = sale.grandTotal;
                                         const isMatchAmount = linkPaymentData.currency === 'KHR' 
                                             ? Math.abs(expectedAmt - linkPaymentData.amount) < 100 
@@ -18530,7 +19051,7 @@
                                             <div key={sale.id} className="p-3.5 hover:bg-slate-700/50 flex justify-between items-center transition">
                                                 <div>
                                                     <div className="text-blue-400 font-bold font-mono text-sm">{sale.receiptNo}</div>
-                                                    <div className="text-xs text-slate-400 mt-0.5">{sale.shopName} | <i className="far fa-clock"></i> {safeToDate(sale.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                                    <div className="text-xs text-slate-400 mt-0.5">{sale.shopName} | <i className="far fa-clock"></i> {safeFormatTime(sale.timestamp || sale.createdAt, '-')}</div>
                                                     <div className={`text-xs font-bold mt-0.5 ${isMatchAmount ? 'text-emerald-400' : 'text-amber-400'}`}>
                                                         Expected Total: ៛{khrFormatter.format(sale.grandTotal)}
                                                     </div>
@@ -18546,7 +19067,7 @@
                                             </div>
                                         );
                                     })}
-                                    {linkReceiptSearch && salesData.filter(s => s.receiptNo.toLowerCase().includes(linkReceiptSearch.toLowerCase())).length === 0 && (
+                                    {linkReceiptSearch && matchingLinkReceipts.length === 0 && (
                                         <div className="p-6 text-center text-slate-400 text-sm">
                                             <i className="fas fa-receipt text-3xl mb-2 opacity-50 block"></i>
                                             No matching receipt found.
@@ -18943,27 +19464,12 @@
                                                     </td>
                                                 </tr>
                                             ) : sortedDetailSales.map(sale => {
-                                                const discountAmt = Number(sale.discount) || (Number(sale.manualDiscount || 0) + Number(sale.redemptionAmount || 0));
+                                                const { discountVal: discountAmt, costVal: receiptCost, profitVal: receiptProfit, marginPct: receiptMarginPct } = computeSaleFinancials(sale);
                                                 const isBank = sale.paymentMethod === 'KHQR' || sale.paymentMethod === 'Bank' || sale.paymentMethod === 'KHQR (ABA)';
                                                 const isExpanded = !!expandedReceiptIds[sale.id];
                                                 const totalQty = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
                                                 const firstItemName = sale.items?.[0]?.name || 'No items';
                                                 const extraItemsCount = Math.max(0, (sale.items?.length || 0) - 1);
-
-                                                // Per-Receipt Sale Margin Calculation
-                                                const receiptRevenue = Number(sale.grandTotal) || 0;
-                                                const fallbackItemsCost = (sale.items || []).reduce((sum, i) => {
-                                                    const q = Number(i.quantity) || 0;
-                                                    const c = i.cost !== undefined && i.cost !== null
-                                                        ? (Number(i.cost) || 0)
-                                                        : (Number(productMap.get(i.productId)?.cost) || 0);
-                                                    return sum + (q * c);
-                                                }, 0);
-                                                const receiptCost = sale.totalCost !== undefined && sale.totalCost !== null
-                                                    ? (Number(sale.totalCost) || 0)
-                                                    : fallbackItemsCost;
-                                                const receiptProfit = receiptRevenue - receiptCost;
-                                                const receiptMarginPct = receiptRevenue > 0 ? ((receiptProfit / receiptRevenue) * 100) : 0;
 
                                                 return (
                                                     <React.Fragment key={sale.id}>
@@ -19033,9 +19539,21 @@
                                                                 }
                                                             </td>
                                                             <td className="px-4 py-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                                                                <button onClick={() => setViewReceipt(sale)} className="text-blue-400 hover:text-blue-300 px-2 py-1" title="View / Print Receipt">
-                                                                    <i className="fas fa-print"></i>
-                                                                </button>
+                                                                <div className="flex items-center justify-center gap-2">
+                                                                    <button onClick={() => setViewReceipt(sale)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View / Print Receipt">
+                                                                        <i className="fas fa-print"></i>
+                                                                    </button>
+                                                                    {canManageSales && (
+                                                                        <>
+                                                                            <button onClick={() => handleOpenEditSale(sale)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                                <i className="fas fa-edit"></i>
+                                                                            </button>
+                                                                            <button onClick={() => setDeletingSale(sale)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
+                                                                                <i className="fas fa-trash"></i>
+                                                                            </button>
+                                                                        </>
+                                                                    )}
+                                                                </div>
                                                             </td>
                                                         </tr>
 
@@ -19114,16 +19632,13 @@
                                         </tbody>
                                         {sortedDetailSales.length > 0 && (() => {
                                             const validSalesList = sortedDetailSales.filter(s => s.status !== 'void');
-                                            const totalDisc = validSalesList.reduce((sum, s) => sum + (Number(s.discount) || (Number(s.manualDiscount || 0) + Number(s.redemptionAmount || 0))), 0);
-                                            const totalRev = validSalesList.reduce((sum, s) => sum + (Number(s.grandTotal) || 0), 0);
-                                            const totalCost = validSalesList.reduce((sum, s) => {
-                                                const fallbackCost = (s.items || []).reduce((cSum, i) => {
-                                                    const q = Number(i.quantity) || 0;
-                                                    const c = i.cost !== undefined && i.cost !== null ? (Number(i.cost) || 0) : (Number(productMap.get(i.productId)?.cost) || 0);
-                                                    return cSum + (q * c);
-                                                }, 0);
-                                                return sum + (s.totalCost !== undefined && s.totalCost !== null ? (Number(s.totalCost) || 0) : fallbackCost);
-                                            }, 0);
+                                            let totalDisc = 0, totalRev = 0, totalCost = 0;
+                                            validSalesList.forEach(s => {
+                                                const fin = computeSaleFinancials(s);
+                                                totalDisc += fin.discountVal;
+                                                totalRev += fin.revenueVal;
+                                                totalCost += fin.costVal;
+                                            });
                                             const totalProf = totalRev - totalCost;
                                             const overallMarginPct = totalRev > 0 ? ((totalProf / totalRev) * 100) : 0;
 
@@ -19227,9 +19742,21 @@
                                                             }
                                                         </td>
                                                         <td className="px-4 py-3 text-center whitespace-nowrap">
-                                                            <button onClick={() => setViewReceipt(item.saleObj)} className="text-blue-400 hover:text-blue-300" title="View Receipt">
-                                                                <i className="fas fa-eye"></i>
-                                                            </button>
+                                                            <div className="flex items-center justify-center gap-2">
+                                                                <button onClick={() => setViewReceipt(item.saleObj)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View Receipt">
+                                                                    <i className="fas fa-eye"></i>
+                                                                </button>
+                                                                {canManageSales && (
+                                                                    <>
+                                                                        <button onClick={() => handleOpenEditSale(item.saleObj)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                            <i className="fas fa-edit"></i>
+                                                                        </button>
+                                                                        <button onClick={() => setDeletingSale(item.saleObj)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
+                                                                            <i className="fas fa-trash"></i>
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                     </tr>
                                                 );
@@ -19403,7 +19930,7 @@
                                         )}
                                     </div>
 
-                                    {/* On-Demand Fetch Controls & All-Chats Diagnostic Toggle */}
+                                    {/* On-Demand Fetch Controls */}
                                     <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
                                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs">
                                             <span className={`w-2 h-2 rounded-full ${window.SolarisRenderBridge?.isConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
@@ -19424,16 +19951,13 @@
 
                                         <button
                                             type="button"
-                                            disabled={isSyncingBankFeed || bankStateLoading}
-                                            onClick={() => {
-                                                setIsSyncingBankFeed(true);
-                                                refreshBankStateMultiSource(true, true);
-                                            }}
+                                            disabled={bankStateLoading}
+                                            onClick={() => refreshBankStateMultiSource(true, true)}
                                             className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-emerald-900/30 disabled:opacity-50"
                                             title="Fetch Bank Feed for Selected Shop and Date Range"
                                         >
-                                            <i className={`fas ${(isSyncingBankFeed || bankStateLoading) ? 'fa-spinner fa-spin' : 'fa-cloud-download-alt'}`}></i>
-                                            <span>{(isSyncingBankFeed || bankStateLoading) ? 'Fetching Bank Feed...' : 'Fetch Bank Feed'}</span>
+                                            <i className={`fas ${bankStateLoading ? 'fa-spinner fa-spin' : 'fa-cloud-download-alt'}`}></i>
+                                            <span>{bankStateLoading ? 'Fetching Bank Feed...' : 'Fetch Bank Feed'}</span>
                                         </button>
                                     </div>
                                 </div>
@@ -19455,10 +19979,7 @@
                                         </div>
                                         <button
                                             type="button"
-                                            onClick={() => {
-                                                setIsSyncingBankFeed(true);
-                                                refreshBankStateMultiSource(true, true);
-                                            }}
+                                            onClick={() => refreshBankStateMultiSource(true, true)}
                                             className="mt-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-black inline-flex items-center gap-2 shadow-lg shadow-emerald-900/40 transition active:scale-95"
                                         >
                                             <i className="fas fa-cloud-download-alt"></i>
@@ -19470,10 +19991,7 @@
                                         <p>No bank transactions found for the selected shop and date range.</p>
                                         <button
                                             type="button"
-                                            onClick={() => {
-                                                setIsSyncingBankFeed(true);
-                                                refreshBankStateMultiSource(true, true);
-                                            }}
+                                            onClick={() => refreshBankStateMultiSource(true, true)}
                                             className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold inline-flex items-center gap-1.5 transition"
                                         >
                                             <i className="fas fa-sync-alt"></i>
