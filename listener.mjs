@@ -1,18 +1,14 @@
 /**
- * ABA PayWay Telegram Group Listener Bridge — Deep Historical Backfill & Strict Whitelist Edition (listener.mjs)
+ * ABA PayWay Telegram Group Listener Bridge — Smart Firebase Bypass & Deep History Edition (listener.mjs)
  *
- * BUGS FIXED & OPTIMIZATIONS IN THIS VERSION:
- * 1. NEW `/history` & `/sync-config` ENDPOINTS (Deep Past/Any-Time Telegram History Fetch):
- *    - Supports `GET /history?chatId=-100...&startMs=...&endMs=...&limit=500`
- *    - Uses Telegram MTProto `offsetDate` pagination to jump directly to `endMs` and walk backwards
- *      to `startMs`, extracting 100% of historical ABA PayWay transactions from the Telegram Group Chat ID
- *      for any past date, week, month, or custom date range!
- * 2. DIRECT PEER RESOLUTION + `payway_secrets` FALLBACK:
- *    - Reads allowed Chat IDs from BOTH `shops` AND `payway_secrets` (so backup configs are never missed).
- *    - Resolves Telegram group peers directly by Chat ID (`-100...` / `-...`) if a group is older than the top 100 dialogs.
- * 3. SAFE FIRESTORE BATCH BACKFILL (NEVER OVERWRITES `claimedByOrderId`):
- *    - Live/Historical writes no longer overwrite `claimedByOrderId: null` on already-verified receipts in Firestore.
- * 4. EXPANDED IN-MEMORY RING BUFFER (500 transactions) & Instant Date-Range Filtering on `/recent`.
+ * NEW IN THIS VERSION (Phase B-1):
+ * 1. SMART FIREBASE DATABASE BYPASS (`bypassFirebaseDb` Default ON):
+ *    - When `bypassFirebaseDb !== false` (Default ON), `listener.mjs` completely skips writing to
+ *      Firestore `aba_payments` (0 Firebase Writes!) and serves 1,000+ daily transactions directly
+ *      from its 2,000-item in-memory ring buffer via SSE (`/events`), `/recent`, and `/history`.
+ *    - When `bypassFirebaseDb === false` (OFF), it saves all transactions to Firestore `aba_payments`.
+ * 2. UPGRADED RENDER URL DEFAULT (`https://pos-payway.onrender.com`) & 2,000-ITEM MEMORY VAULT.
+ * 3. DEEP HISTORICAL BACKFILL (`/history?chatId=...&startMs=...&endMs=...&limit=1000`).
  */
 import http from "node:http";
 import https from "node:https";
@@ -46,7 +42,7 @@ db.settings({ ignoreUndefinedProperties: true, preferRest: false });
 // Quota Circuit Breaker for Firestore Writes
 let firestoreQuotaExhaustedUntil = 0;
 
-// 2. Strict Whitelist of Configured & Enabled Shop PayWay Chat IDs
+// 2. Strict Whitelist of Configured & Enabled Shop PayWay Chat IDs + Per-Chat Bypass DB Flag
 const normalizeChatId = (rawId) =>
   String(rawId || "")
     .trim()
@@ -60,9 +56,15 @@ const envAllowedChatIds = rawTargetChats
   .map((id) => normalizeChatId(id))
   .filter(Boolean);
 
+// Default to ON (true) unless env explicitly sets BYPASS_FIREBASE_DB=false
+const envBypassDefault =
+  String(process.env.BYPASS_FIREBASE_DB || "true").toLowerCase() !== "false";
+
 let dynamicFirestoreChatIds = new Set();
-// Map of normalizedChatId -> raw configured chatId string (e.g. "-1001987654321" or "-5433015912")
+// Map of normalizedChatId -> raw configured chatId string
 const configuredRawChatIdMap = new Map();
+// Map of normalizedChatId -> boolean (true = Bypass Firebase DB, false = Save to Firebase DB)
+const bypassDbByChatIdMap = new Map();
 
 async function refreshConfiguredShopChatIds() {
   try {
@@ -73,7 +75,7 @@ async function refreshConfiguredShopChatIds() {
 
     const activeIds = new Set();
 
-    const registerRawChatIds = (rawStr) => {
+    const registerRawChatIds = (rawStr, bypassDbFlag = true) => {
       String(rawStr || "")
         .split(/[\s,|;]+/)
         .map((s) => s.trim())
@@ -85,16 +87,27 @@ async function refreshConfiguredShopChatIds() {
             if (!configuredRawChatIdMap.has(norm) || raw.startsWith("-")) {
               configuredRawChatIdMap.set(norm, raw);
             }
+            // If any shop sharing this Chat ID explicitly sets bypassFirebaseDb === false, allow DB writes
+            if (bypassDbByChatIdMap.has(norm)) {
+              const prev = bypassDbByChatIdMap.get(norm);
+              bypassDbByChatIdMap.set(norm, prev && bypassDbFlag);
+            } else {
+              bypassDbByChatIdMap.set(norm, bypassDbFlag);
+            }
           }
         });
     };
+
+    bypassDbByChatIdMap.clear();
 
     if (shopsSnap) {
       shopsSnap.forEach((doc) => {
         const data = doc.data() || {};
         const cfg = data.khqrConfig;
         if (cfg && cfg.paywayVerifyEnabled !== false && cfg.paywayChatId) {
-          registerRawChatIds(cfg.paywayChatId);
+          // Default ON (true) when undefined
+          const bypassDb = cfg.bypassFirebaseDb !== false;
+          registerRawChatIds(cfg.paywayChatId, bypassDb);
         }
       });
     }
@@ -104,17 +117,29 @@ async function refreshConfiguredShopChatIds() {
         const sec = doc.data() || {};
         const backupCfg = sec.khqrConfigBackup || {};
         if (backupCfg.paywayVerifyEnabled !== false) {
-          registerRawChatIds(sec.paywayChatId || backupCfg.paywayChatId);
+          const bypassDb =
+            sec.bypassFirebaseDb !== undefined
+              ? sec.bypassFirebaseDb !== false
+              : backupCfg.bypassFirebaseDb !== false;
+          registerRawChatIds(sec.paywayChatId || backupCfg.paywayChatId, bypassDb);
         }
       });
     }
 
-    envAllowedChatIds.forEach((id) => activeIds.add(id));
+    envAllowedChatIds.forEach((id) => {
+      activeIds.add(id);
+      if (!bypassDbByChatIdMap.has(id)) {
+        bypassDbByChatIdMap.set(id, envBypassDefault);
+      }
+    });
+
     dynamicFirestoreChatIds = activeIds;
 
     console.log(
       `🔒 Active Shop PayWay Chat ID Whitelist Synced:`,
-      Array.from(getEffectiveAllowedChatIds())
+      Array.from(getEffectiveAllowedChatIds()),
+      `| Bypass Firebase DB Map:`,
+      Object.fromEntries(bypassDbByChatIdMap)
     );
   } catch (err) {
     console.warn(
@@ -131,7 +156,6 @@ function getEffectiveAllowedChatIds() {
   return new Set(envAllowedChatIds);
 }
 
-// FAIL-CLOSED CHAT ID CHECK: Never save unconfigured Chat IDs or empty Chat IDs
 const isChatAllowed = (chatIdStr, explicitFilterChatId = "") => {
   const stripped = normalizeChatId(chatIdStr);
   if (!stripped) return false;
@@ -153,10 +177,21 @@ const isChatAllowed = (chatIdStr, explicitFilterChatId = "") => {
   return allowedSet.has(stripped);
 };
 
-await refreshConfiguredShopChatIds();
-setInterval(refreshConfiguredShopChatIds, 3 * 60 * 1000);
+const shouldBypassFirestoreForChat = (chatIdStr) => {
+  const stripped = normalizeChatId(chatIdStr);
+  if (!stripped) return true;
+  if (bypassDbByChatIdMap.has(stripped)) {
+    return bypassDbByChatIdMap.get(stripped);
+  }
+  return envBypassDefault;
+};
 
-// 3. In-Memory Ring Buffer (Up to 500 items) & SSE Clients for 0ms Direct-to-POS Delivery
+await refreshConfiguredShopChatIds();
+// Refresh config every 10 minutes (or immediately via /sync-config) to minimize Firestore reads
+setInterval(refreshConfiguredShopChatIds, 10 * 60 * 1000);
+
+// 3. In-Memory Ring Buffer (Up to 2,000 items for 1,000+ daily transactions) & SSE Clients
+const MAX_BUFFER_SIZE = 2000;
 const recentPaymentsBuffer = [];
 const recentPaymentsMap = new Map(); // trxId -> paymentObj
 const savedTrxMemory = new Set();
@@ -182,8 +217,8 @@ function upsertMemoryBuffer(docPayload) {
   }
 
   recentPaymentsBuffer.sort((a, b) => (Number(b.receivedAt) || 0) - (Number(a.receivedAt) || 0));
-  if (recentPaymentsBuffer.length > 500) {
-    const removed = recentPaymentsBuffer.splice(500);
+  if (recentPaymentsBuffer.length > MAX_BUFFER_SIZE) {
+    const removed = recentPaymentsBuffer.splice(MAX_BUFFER_SIZE);
     removed.forEach((r) => recentPaymentsMap.delete(String(r.trxId)));
   }
   return merged;
@@ -210,7 +245,7 @@ setInterval(() => {
   }
 }, 20000);
 
-// 4. Minute-Granularity Timestamp Alignment Helper (Supports Past Years & Historical Dates)
+// 4. Minute-Granularity Timestamp Alignment Helper
 function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   if (!paidAtStr || typeof paidAtStr !== "string") return referenceMs;
   const clean = paidAtStr.trim();
@@ -237,7 +272,6 @@ function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
 
       const constructed = new Date(year, mIdx, day, hours, mins, secs, 0);
       if (!isNaN(constructed.getTime())) {
-        // Year-boundary rollover protection (e.g., Dec 31 message viewed in Jan)
         if (!match[3] && constructed.getTime() - referenceMs > 60 * 24 * 60 * 60 * 1000) {
           constructed.setFullYear(year - 1);
         }
@@ -253,7 +287,7 @@ function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   return referenceMs;
 }
 
-// 5. Unified Indoor ABA PAY + Outdoor Bank KHQR Parser (Supports All ABA Bot Formats)
+// 5. Unified Indoor ABA PAY + Outdoor Bank KHQR Parser
 function parseABAPayWay(raw, msgDateMs = Date.now()) {
   if (!raw || typeof raw !== "string") return null;
   const t = raw.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -300,7 +334,6 @@ function parseABAPayWay(raw, msgDateMs = Date.now()) {
     };
   }
 
-  // Fallback Flexible Matcher
   const amtMatch = t.match(/(?:(៛|\$|KHR|USD)\s*([0-9,]+(?:\.[0-9]{1,2})?))\s*(?:paid by|received from)/i);
   const trxMatch = t.match(/Trx\.?\s*ID\s*[:#]?\s*([0-9A-Za-z]+)/i);
   const apvMatch = t.match(/APV\s*[:#]?\s*([0-9A-Za-z]+)/i);
@@ -346,7 +379,7 @@ if (!apiId || !apiHash || !sessionStr) {
   process.exit(1);
 }
 
-// 6. Quota-Safe Single-Write + Strict Chat ID Guard + Safe Merge (Never Overwrites claimedByOrderId)
+// 6. Smart Payment Processor (Respects `bypassFirebaseDb`: ON = 0 Firebase Writes, OFF = Save to Firestore)
 async function saveParsedPaymentToFirestore(
   parsed,
   chatIdStr,
@@ -364,7 +397,6 @@ async function saveParsedPaymentToFirestore(
   const effectiveReceivedAt =
     Number(messageTimestampMs) > 0 ? Number(messageTimestampMs) : Date.now();
 
-  // Do not include `claimedByOrderId: null` in the Firestore merge payload so we NEVER wipe an existing claim!
   const docPayload = {
     ...parsed,
     chatId: cleanChatId,
@@ -380,6 +412,16 @@ async function saveParsedPaymentToFirestore(
 
   if (broadcastLive) {
     broadcastToSseClients(mergedInMemory);
+  }
+
+  // SMART BYPASS CHECK: When Bypass Firebase DB is ON (default), do NOT write to Firestore!
+  if (shouldBypassFirestoreForChat(cleanChatId)) {
+    if (broadcastLive) {
+      console.log(
+        `⚡ [ABA DIRECT RENDER->SSE (0 Firebase Writes)] Chat: ${cleanChatId} | Trx: ${trxId} | ${parsed.currency} ${parsed.amount} | ${parsed.payerName} | APV: ${parsed.apv}`
+      );
+    }
+    return mergedInMemory;
   }
 
   if (Date.now() < firestoreQuotaExhaustedUntil) {
@@ -421,7 +463,7 @@ client.setLogLevel("error");
 
 await client.connect();
 console.log("==================================================================");
-console.log("⚡ Connected to Telegram MTProto (Deep History + Strict Whitelist)!");
+console.log("⚡ Connected to Telegram MTProto (Smart Bypass + Deep History)!");
 console.log("   Allowed Shop Chat IDs:", Array.from(getEffectiveAllowedChatIds()));
 console.log("==================================================================");
 
@@ -458,7 +500,6 @@ async function resolveWhitelistedPeers(forceRefresh = false, targetChatIdFilter 
       }
     }
 
-    // Fallback: Direct peer resolution for any configured Chat ID not in the top 100 dialogs
     for (const normId of getEffectiveAllowedChatIds()) {
       if (!resolvedPeerByNormId.has(normId)) {
         const rawHint = configuredRawChatIdMap.get(normId) || `-${normId}`;
@@ -494,12 +535,11 @@ async function resolveWhitelistedPeers(forceRefresh = false, targetChatIdFilter 
 }
 
 // 9. DEEP HISTORICAL TELEGRAM BACKFILL ENGINE (`/history`)
-// Fetches messages from Telegram Group Chat IDs across any historical date range (`startMs` .. `endMs`)
 async function fetchHistoricalGroupMessages({
   chatId = "",
   startMs = 0,
   endMs = Date.now(),
-  maxMessagesPerChat = 600,
+  maxMessagesPerChat = 800,
 } = {}) {
   const peers = await resolveWhitelistedPeers(false, chatId);
   if (!peers || peers.length === 0) {
@@ -510,7 +550,7 @@ async function fetchHistoricalGroupMessages({
   const extractedResults = [];
   const safeEndSec = Math.floor((Number(endMs) || Date.now()) / 1000) + 120;
   const safeStartMs = Number(startMs) > 0 ? Number(startMs) - 120000 : 0;
-  const cap = Math.min(1500, Math.max(50, Number(maxMessagesPerChat) || 600));
+  const cap = Math.min(2000, Math.max(50, Number(maxMessagesPerChat) || 800));
 
   for (const peerObj of activePeers) {
     if (!isChatAllowed(peerObj.chatId, chatId)) continue;
@@ -578,7 +618,7 @@ async function fetchHistoricalGroupMessages({
   return extractedResults;
 }
 
-// 10. HTTP Health-Check + `/recent`, `/history`, `/sync-config`, `/events` (SSE), `/claim`, and `/delete`
+// 10. HTTP Server (`/recent`, `/history`, `/sync-config`, `/events`, `/claim`, `/delete`)
 const port = Number(process.env.PORT || 10000);
 http
   .createServer(async (req, res) => {
@@ -605,18 +645,19 @@ http
         JSON.stringify({
           ok: true,
           allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
+          bypassFirebaseDbMap: Object.fromEntries(bypassDbByChatIdMap),
         })
       );
       return;
     }
 
-    // Endpoint A: Deep Historical Backfill (`/history?chatId=...&startMs=...&endMs=...&limit=600`)
+    // Endpoint A: Deep Historical Backfill (`/history?chatId=...&startMs=...&endMs=...&limit=800`)
     if (pathname === "/history") {
       try {
         const chatId = String(urlObj.searchParams.get("chatId") || "").trim();
         const startMs = Number(urlObj.searchParams.get("startMs")) || 0;
         const endMs = Number(urlObj.searchParams.get("endMs")) || Date.now();
-        const limit = Number(urlObj.searchParams.get("limit")) || 600;
+        const limit = Number(urlObj.searchParams.get("limit")) || 800;
 
         const historicalPayments = await fetchHistoricalGroupMessages({
           chatId,
@@ -671,7 +712,7 @@ http
         `data: ${JSON.stringify({
           type: "CONNECTED",
           ts: Date.now(),
-          payments: allowedPayments.slice(0, 60),
+          payments: allowedPayments.slice(0, 120),
         })}\n\n`
       );
       sseClients.add(res);
@@ -725,15 +766,16 @@ http
     }
 
     // Endpoint E: JSON Payment Feed (`/recent`, `/payments`, or root `/?scan=1`)
-    const limitParam = Math.min(500, Math.max(50, Number(urlObj.searchParams.get("limit")) || 150));
+    const limitParam = Math.min(2000, Math.max(50, Number(urlObj.searchParams.get("limit")) || 300));
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(
       JSON.stringify({
         ok: true,
         status: "ok",
-        service: "solaris-aba-listener-v5-history",
+        service: "solaris-aba-listener-v6-bypass",
         uptimeSeconds: Math.round(process.uptime()),
         allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
+        bypassFirebaseDbMap: Object.fromEntries(bypassDbByChatIdMap),
         cachedPayments: allowedPayments.length,
         firestoreQuotaPaused: Date.now() < firestoreQuotaExhaustedUntil,
         payments: allowedPayments.slice(0, limitParam),
@@ -744,9 +786,9 @@ http
     console.log(`🌐 Listener HTTP, History & SSE server active on port ${port}`);
   });
 
-// Self-Keep-Alive Ping every 4 minutes
+// Self-Keep-Alive Ping every 4 minutes (Defaults to https://pos-payway.onrender.com)
 const selfExternalUrl =
-  process.env.RENDER_EXTERNAL_URL || "https://po-listener.onrender.com";
+  process.env.RENDER_EXTERNAL_URL || "https://pos-payway.onrender.com";
 setInterval(() => {
   try {
     https
@@ -816,9 +858,8 @@ async function syncRecentGroupHistory(isInitialBoot = false) {
       peers.map(async (d) => {
         try {
           if (!isChatAllowed(d.chatId)) return;
-          // On initial boot, pull the last 100 messages per shop group so recent history is immediately ready!
           const messages = await client.getMessages(d.entity, {
-            limit: isInitialBoot ? 100 : 8,
+            limit: isInitialBoot ? 120 : 8,
           });
           for (const msg of messages) {
             const text = msg?.message || msg?.text || "";
