@@ -6963,51 +6963,38 @@
                         {/* All + Vendor Dropdown, Quick Access Custom Product Groups (+), & Universal Grid/Table Switcher */}
                         <div className="px-2.5 sm:px-3 py-2 bg-slate-800/90 border-b border-slate-700/80 flex items-center justify-between gap-2">
                             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 flex-1 min-w-0">
-                                {/* 1. "All" Reset Pill */}
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setSelectedTab('All');
-                                        setActiveQuickGroupId('');
-                                        refocusSearchInput();
-                                    }}
-                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all shrink-0 border flex items-center gap-1.5 ${
-                                        selectedTab === 'All' && !activeQuickGroupId
-                                            ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
-                                            : 'bg-slate-900/70 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-white'
-                                    }`}
-                                    title="Show All Products"
-                                >
-                                    <i className="fas fa-layer-group text-[10px]"></i>
-                                    <span>All</span>
-                                </button>
-
-                                {/* 2. Vendor Droplist */}
+                                {/* 1. Unified "All / All Vendors (n)" Droplist */}
                                 <div className="relative shrink-0">
                                     <select
                                         value={selectedTab}
                                         onChange={(e) => {
-                                            setSelectedTab(e.target.value);
+                                            const val = e.target.value;
+                                            setSelectedTab(val);
+                                            if (val === 'All') {
+                                                setActiveQuickGroupId('');
+                                            }
                                             refocusSearchInput();
                                         }}
-                                        className={`appearance-none pl-2.5 pr-7 py-1.5 rounded-xl text-xs font-bold border outline-none cursor-pointer transition-all max-w-[140px] sm:max-w-[180px] truncate ${
+                                        className={`appearance-none pl-3 pr-7 py-1.5 rounded-xl text-xs font-bold border outline-none cursor-pointer transition-all max-w-[160px] sm:max-w-[200px] truncate ${
                                             selectedTab !== 'All'
                                                 ? 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-900/40'
-                                                : 'bg-slate-900/70 text-slate-300 border-slate-700 hover:border-slate-500'
+                                                : !activeQuickGroupId
+                                                    ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
+                                                    : 'bg-slate-900/70 text-slate-300 border-slate-700 hover:border-slate-500'
                                         }`}
-                                        title="Filter by Vendor"
+                                        title="Filter by All or Vendor"
                                     >
                                         <option value="All" className="bg-slate-900 text-slate-200">All Vendors ({filterTabs.length - 1})</option>
                                         {filterTabs.filter(t => t !== 'All').map(tabName => (
                                             <option key={tabName} value={tabName} className="bg-slate-900 text-white">{tabName}</option>
                                         ))}
                                     </select>
-                                    <i className={`fas fa-chevron-down absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] pointer-events-none ${selectedTab !== 'All' ? 'text-white' : 'text-slate-400'}`}></i>
+                                    <i className={`fas fa-chevron-down absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] pointer-events-none ${selectedTab !== 'All' || !activeQuickGroupId ? 'text-white' : 'text-slate-400'}`}></i>
                                 </div>
 
                                 <div className="h-4 w-px bg-slate-700 mx-0.5 shrink-0"></div>
 
-                                {/* 3. Quick Access Custom Product Groups */}
+                                {/* 2. Quick Access Custom Product Groups */}
                                 {quickGroups.map(grp => {
                                     const isGrpActive = activeQuickGroupId === grp.id;
                                     return (
@@ -7097,8 +7084,8 @@
                         {/* Product Catalog Viewport (Adapts to Grid or List across Mobile, Tablet, and Desktop) */}
                         <div className="flex-1 overflow-y-auto bg-slate-800/60 relative scroll-smooth min-h-0">
                             {catalogViewMode === 'grid' ? (
-                                /* RESPONSIVE TOUCH CARD GRID (2 cols Mobile, 3 cols Small Tablet, 3-4 cols Desktop, 5 cols Wide) */
-                                <div className="p-2.5 sm:p-3 pb-28 md:pb-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 sm:gap-3">
+                                /* PROFESSIONAL MARKETING RETAIL TOUCH CARD GRID */
+                                <div className="p-2.5 sm:p-3.5 pb-28 md:pb-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 sm:gap-3.5">
                                     {filteredProducts.slice(0, RENDER_LIMIT).map((product, index) => {
                                         const stock = product.stockByShop?.[selectedShopId] || 0;
                                         const inCartQty = cartQtyMap.get(product.id) || 0;
@@ -7109,49 +7096,66 @@
                                             <div
                                                 key={product.id}
                                                 onClick={() => addToCart(product)}
-                                                className={`group relative rounded-2xl p-3 flex flex-col justify-between min-h-[124px] sm:min-h-[136px] cursor-pointer transition-all duration-150 active:scale-[0.97] border ${
+                                                className={`group relative overflow-hidden rounded-2xl p-3 sm:p-3.5 flex flex-col justify-between min-h-[126px] sm:min-h-[136px] cursor-pointer transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] border ${
                                                     inCartQty > 0
-                                                        ? 'bg-blue-950/40 border-blue-500/70 shadow-md shadow-blue-950/40'
+                                                        ? 'bg-gradient-to-br from-blue-950/90 via-slate-900 to-indigo-950/80 border-blue-500/80 shadow-lg shadow-blue-950/50 ring-1 ring-blue-400/30'
                                                         : isHighlighted
-                                                            ? 'bg-slate-700/80 border-blue-400 ring-2 ring-blue-500/30'
-                                                            : 'bg-slate-900/60 hover:bg-slate-700/60 border-slate-700/80 hover:border-slate-500'
+                                                            ? 'bg-gradient-to-br from-slate-800 to-slate-900 border-blue-400 ring-2 ring-blue-500/30 shadow-md'
+                                                            : 'bg-gradient-to-br from-slate-800/95 via-slate-900/95 to-slate-950/95 hover:from-slate-800 hover:to-slate-900 border-slate-700/80 hover:border-blue-500/50 shadow-md hover:shadow-xl hover:shadow-blue-950/20'
                                                 }`}
                                             >
+                                                {/* Top Marketing Accent Gradient Bar */}
+                                                <div className={`absolute top-0 inset-x-0 h-1 transition-all duration-200 ${
+                                                    inCartQty > 0
+                                                        ? 'bg-gradient-to-r from-blue-400 via-cyan-400 to-emerald-400'
+                                                        : isNoOrNegativeStock
+                                                            ? 'bg-gradient-to-r from-rose-500/80 to-amber-500/80'
+                                                            : 'bg-gradient-to-r from-blue-500/40 via-indigo-500/40 to-emerald-500/40 opacity-60 group-hover:opacity-100'
+                                                }`}></div>
+
+                                                {/* Subtle Decorative Glow Orb */}
+                                                <div className="absolute -right-6 -top-6 w-20 h-20 rounded-full bg-blue-500/5 group-hover:bg-emerald-500/10 blur-xl pointer-events-none transition-all duration-300"></div>
+
                                                 {/* In-Cart Quantity Badge Overlay */}
                                                 {inCartQty > 0 && (
-                                                    <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs font-black min-w-[26px] h-[26px] px-1.5 rounded-full flex items-center justify-center shadow-lg border-2 border-slate-900 z-10 animate-fade-in-up">
-                                                        {inCartQty}
+                                                    <div className="absolute top-2 right-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11px] font-black min-w-[26px] h-[24px] px-2 rounded-full flex items-center justify-center gap-1 shadow-lg shadow-blue-950/80 border border-blue-300/40 z-10 animate-fade-in-up">
+                                                        <i className="fas fa-shopping-bag text-[9px]"></i>
+                                                        <span>{inCartQty}</span>
                                                     </div>
                                                 )}
 
-                                                {/* Top Row: Code */}
-                                                <div className="flex justify-between items-center gap-1 mb-1.5">
-                                                    <span className="text-[10px] font-mono text-slate-400 bg-slate-800/90 px-1.5 py-0.5 rounded border border-slate-700 truncate max-w-full">
-                                                        {product.code}
-                                                    </span>
+                                                {/* 1st Line: Product Name */}
+                                                <div className={`flex items-start justify-between gap-1.5 mt-0.5 ${inCartQty > 0 ? 'pr-12' : ''}`}>
+                                                    <h4 className="text-slate-100 font-extrabold text-xs sm:text-[13.5px] line-clamp-2 leading-snug tracking-tight group-hover:text-white transition-colors">
+                                                        {product.name}
+                                                    </h4>
+                                                    {isNoOrNegativeStock && (
+                                                        <span
+                                                            className="inline-block w-2 h-2 rounded-full bg-rose-500 mt-1 shrink-0 ring-4 ring-rose-500/20 shadow-sm shadow-rose-500"
+                                                            title="Out of Stock / Low Stock"
+                                                        ></span>
+                                                    )}
                                                 </div>
 
-                                                {/* Middle: Product Name */}
-                                                <h4 className="text-slate-100 font-bold text-xs sm:text-sm line-clamp-2 leading-snug my-auto py-1 group-hover:text-white">
-                                                    <span>{product.name}</span>
-                                                    {isNoOrNegativeStock && (
-                                                        <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-1.5 align-middle shadow-sm shadow-red-500/60 shrink-0"></span>
-                                                    )}
-                                                </h4>
-
-                                                {/* Bottom Row: Price & Quick Add Button */}
-                                                <div className="flex items-end justify-between mt-2 pt-1.5 border-t border-slate-700/40">
-                                                    <div>
-                                                        <div className="text-emerald-400 font-black text-sm sm:text-base leading-none">
-                                                            ៛{khrFormatter.format(product.price)}
-                                                        </div>
+                                                {/* 2nd Line: Barcode */}
+                                                <div className="my-2 flex items-center">
+                                                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950/60 border border-slate-800/90 text-[10px] sm:text-[11px] font-mono text-slate-400 group-hover:text-slate-300 group-hover:border-slate-700 max-w-full truncate transition-colors">
+                                                        <i className="fas fa-barcode text-[10px] text-indigo-400/80 shrink-0"></i>
+                                                        <span className="truncate tracking-wider">{product.barcode || 'NO-BARCODE'}</span>
                                                     </div>
-                                                    <div className={`w-7 h-7 sm:w-8 sm:h-8 rounded-xl flex items-center justify-center transition-all shadow-sm ${
-                                                        inCartQty > 0
-                                                            ? 'bg-blue-600 text-white'
-                                                            : 'bg-slate-800 text-slate-300 group-hover:bg-blue-600 group-hover:text-white border border-slate-700'
-                                                    }`}>
-                                                        <i className="fas fa-plus text-xs"></i>
+                                                </div>
+
+                                                {/* 3rd Line: 2-Column Grid - Product Code | Price */}
+                                                <div className="grid grid-cols-2 items-center gap-1.5 pt-2 border-t border-slate-700/50">
+                                                    <div className="min-w-0 flex items-center">
+                                                        <span className="text-[10px] sm:text-[11px] font-mono font-bold text-sky-300/90 bg-sky-950/40 px-2 py-1 rounded-lg border border-sky-500/25 truncate">
+                                                            {product.code}
+                                                        </span>
+                                                    </div>
+                                                    <div className="text-right flex items-center justify-end">
+                                                        <span className="inline-flex items-baseline px-2.5 py-1 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/15 border border-emerald-500/40 group-hover:from-emerald-500 group-hover:to-teal-500 text-emerald-300 group-hover:text-slate-950 font-black text-xs sm:text-sm leading-none shadow-sm transition-all duration-200 truncate">
+                                                            ៛{khrFormatter.format(product.price)}
+                                                        </span>
                                                     </div>
                                                 </div>
                                             </div>
@@ -20377,9 +20381,9 @@
                                         <option value="details">🧾 Sale Detail Report</option>
                                         <option value="products">📦 Sale By Product</option>
                                         <option value="cashier">👤 Sale By Cashier</option>
-                                        <option value="shifts">⏰ Shift Report</option>
+                                                    <option value="shifts">⏰ Shift Report</option>
                                         <option value="cash-drop">💰 Cash Drop Close Report</option>
-                                        <option value="bank-state">🏦 Bank State (TG Feed)</option>
+                                        <option value="bank-state">🏦 Bank Statement (TG Feed)</option>
                                         <option value="cleared-carts">🗑️ Cleared Carts Log</option>
                                     </select>
                                     <div className="absolute inset-y-0 right-0 flex items-center px-2.5 pointer-events-none text-slate-400">
@@ -20511,444 +20515,476 @@
 
                         {/* MERGED: Unified Sale Detail Report (Combines Receipts & Sale Details by Item) */}
                         {activeTab === 'details' && (
-                            <TableCard title="Sale Detail Report">
-                                {/* Toolbar: Search, View Mode Switcher & Expand/Collapse Controls */}
-                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-3">
-                                    <div className="relative flex-1 max-w-md">
-                                        <input
-                                            type="text"
-                                            value={detailSearchTerm}
-                                            onChange={e => setDetailSearchTerm(e.target.value)}
-                                            placeholder="Search receipt #, product name, code, cashier, customer..."
-                                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 rounded-lg border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
-                                        />
-                                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-                                        {detailSearchTerm && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setDetailSearchTerm('')}
-                                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                                            >
-                                                <i className="fas fa-times-circle text-xs"></i>
-                                            </button>
-                                        )}
-                                    </div>
+                            <div className="space-y-4">
+                                {/* 1. Dedicated Sale Detail Report Title & Single-Line Icon Toolbar Card */}
+                                <Card className="p-3 sm:p-4">
+                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+                                        <div className="flex items-center justify-between md:justify-start gap-2 shrink-0">
+                                            <h4 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
+                                                <i className="fas fa-file-invoice-dollar text-blue-400"></i>
+                                                <span>Sale Detail Report</span>
+                                            </h4>
+                                            <span className="px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                                {detailViewMode === 'receipts' ? `${sortedDetailSales.length} Rcpt` : `${saleByItems.length} Items`}
+                                            </span>
+                                        </div>
 
-                                    <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2">
-                                        {detailViewMode === 'receipts' && sortedDetailSales.length > 0 && (
-                                            <div className="flex items-center gap-1.5">
+                                        {/* Search Box + All Controls as Icons on the Same Line */}
+                                        <div className="flex items-center gap-1.5 sm:gap-2 flex-1 md:max-w-xl justify-end min-w-0">
+                                            <div className="relative flex-1 min-w-0">
+                                                <input
+                                                    type="text"
+                                                    value={detailSearchTerm}
+                                                    onChange={e => setDetailSearchTerm(e.target.value)}
+                                                    placeholder="Search receipt #, product, code, cashier..."
+                                                    className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm h-[38px]"
+                                                />
+                                                <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                                {detailSearchTerm && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setDetailSearchTerm('')}
+                                                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                                        title="Clear Search"
+                                                    >
+                                                        <i className="fas fa-times-circle text-xs"></i>
+                                                    </button>
+                                                )}
+                                            </div>
+
+                                            {detailViewMode === 'receipts' && sortedDetailSales.length > 0 && (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={expandAllReceipts}
+                                                        className="w-[38px] h-[38px] rounded-xl bg-slate-700 hover:bg-slate-600 text-blue-400 hover:text-white border border-slate-600 transition flex items-center justify-center shrink-0"
+                                                        title="Expand All Receipts"
+                                                    >
+                                                        <i className="fas fa-angle-double-down text-xs"></i>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={collapseAllReceipts}
+                                                        className="w-[38px] h-[38px] rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white border border-slate-600 transition flex items-center justify-center shrink-0"
+                                                        title="Collapse All Receipts"
+                                                    >
+                                                        <i className="fas fa-angle-double-up text-xs"></i>
+                                                    </button>
+                                                </>
+                                            )}
+
+                                            {/* Icon-Only View Switcher: By Receipt vs. All Line Items */}
+                                            <div className="flex bg-slate-900/90 p-0.5 rounded-xl border border-slate-700 shrink-0 h-[38px] items-center">
                                                 <button
                                                     type="button"
-                                                    onClick={expandAllReceipts}
-                                                    className="px-2.5 py-1.5 text-xs font-semibold bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg border border-slate-600 transition flex items-center gap-1"
-                                                    title="Expand all receipts to show their items"
+                                                    onClick={() => setDetailViewMode('receipts')}
+                                                    className={`w-9 h-[32px] rounded-lg transition flex items-center justify-center ${
+                                                        detailViewMode === 'receipts'
+                                                            ? 'bg-blue-600 text-white shadow'
+                                                            : 'text-slate-400 hover:text-slate-200'
+                                                    }`}
+                                                    title={`View By Receipt (${sortedDetailSales.length})`}
                                                 >
-                                                    <i className="fas fa-angle-double-down text-blue-400"></i> Expand All Items
+                                                    <i className="fas fa-receipt text-xs"></i>
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    onClick={collapseAllReceipts}
-                                                    className="px-2.5 py-1.5 text-xs font-semibold bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg border border-slate-600 transition flex items-center gap-1"
-                                                    title="Collapse all item rows"
+                                                    onClick={() => setDetailViewMode('items')}
+                                                    className={`w-9 h-[32px] rounded-lg transition flex items-center justify-center ${
+                                                        detailViewMode === 'items'
+                                                            ? 'bg-blue-600 text-white shadow'
+                                                            : 'text-slate-400 hover:text-slate-200'
+                                                    }`}
+                                                    title={`View All Line Items (${saleByItems.length})`}
                                                 >
-                                                    <i className="fas fa-angle-double-up text-slate-400"></i> Collapse All
+                                                    <i className="fas fa-list-ul text-xs"></i>
                                                 </button>
                                             </div>
-                                        )}
-
-                                        {/* View Switcher: Grouped by Receipt vs. Flat Itemized List */}
-                                        <div className="flex bg-slate-900/80 p-1 rounded-lg border border-slate-700 text-xs font-bold">
-                                            <button
-                                                type="button"
-                                                onClick={() => setDetailViewMode('receipts')}
-                                                className={`px-3 py-1.5 rounded-md transition flex items-center gap-1.5 ${
-                                                    detailViewMode === 'receipts'
-                                                        ? 'bg-blue-600 text-white shadow'
-                                                        : 'text-slate-400 hover:text-slate-200'
-                                                }`}
-                                            >
-                                                <i className="fas fa-receipt"></i>
-                                                <span>By Receipt ({sortedDetailSales.length})</span>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => setDetailViewMode('items')}
-                                                className={`px-3 py-1.5 rounded-md transition flex items-center gap-1.5 ${
-                                                    detailViewMode === 'items'
-                                                        ? 'bg-blue-600 text-white shadow'
-                                                        : 'text-slate-400 hover:text-slate-200'
-                                                }`}
-                                            >
-                                                <i className="fas fa-list-ul"></i>
-                                                <span>All Line Items ({saleByItems.length})</span>
-                                            </button>
                                         </div>
                                     </div>
-                                </div>
+                                </Card>
 
-                                {detailViewMode === 'receipts' ? (
-                                    /* MODE 1: Master-Detail Receipts Table with Expandable Item Breakdown */
-                                    <table className="min-w-full divide-y divide-slate-700">
-                                        <thead className="bg-slate-900/50">
-                                            <tr>
-                                                <th className="px-3 py-3 w-10 text-center text-xs font-semibold text-slate-400 uppercase">Items</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date/Time</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Receipt No</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Items Summary</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payment</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Discount</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Amount</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-700">
-                                            {sortedDetailSales.length === 0 ? (
-                                                <tr>
-                                                    <td colSpan="12" className="px-4 py-8 text-center text-slate-500">
-                                                        No sales found matching the current filters.
-                                                    </td>
-                                                </tr>
-                                            ) : sortedDetailSales.map(sale => {
-                                                const { discountVal: discountAmt, costVal: receiptCost, profitVal: receiptProfit, marginPct: receiptMarginPct } = computeSaleFinancials(sale);
-                                                const isBank = sale.paymentMethod === 'KHQR' || sale.paymentMethod === 'Bank' || sale.paymentMethod === 'KHQR (ABA)';
-                                                const isExpanded = !!expandedReceiptIds[sale.id];
-                                                const totalQty = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
-                                                const firstItemName = sale.items?.[0]?.name || 'No items';
-                                                const extraItemsCount = Math.max(0, (sale.items?.length || 0) - 1);
-
-                                                return (
-                                                    <React.Fragment key={sale.id}>
-                                                        <tr
-                                                            onClick={() => toggleReceiptExpand(sale.id)}
-                                                            className={`hover:bg-slate-700/50 cursor-pointer transition-colors ${sale.status === 'void' ? 'opacity-50' : ''} ${isExpanded ? 'bg-slate-700/30' : ''}`}
-                                                        >
-                                                            <td className="px-3 py-3 text-center">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={(e) => { e.stopPropagation(); toggleReceiptExpand(sale.id); }}
-                                                                    className="w-6 h-6 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center mx-auto border border-slate-600"
-                                                                    title={isExpanded ? 'Hide items' : 'Show items'}
-                                                                >
-                                                                    <i className={`fas fa-chevron-right text-[10px] transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-400' : ''}`}></i>
-                                                                </button>
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">
-                                                                {safeFormatDateTime(sale.timestamp || sale.createdAt, 'N/A')}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-slate-200 font-mono font-semibold whitespace-nowrap">{sale.receiptNo}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-400">{sale.shopName}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-400">{sale.cashierName}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-300">
-                                                                <div className="flex items-center gap-2">
-                                                                    <span className="px-2 py-0.5 text-xs font-bold rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap">
-                                                                        {totalQty} qty
-                                                                    </span>
-                                                                    <span className="truncate max-w-[180px]" title={(sale.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ')}>
-                                                                        {firstItemName}
-                                                                        {extraItemsCount > 0 && <span className="text-xs text-slate-400 ml-1">(+{extraItemsCount} more)</span>}
-                                                                    </span>
-                                                                </div>
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm whitespace-nowrap">
-                                                                <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
-                                                                    isBank
-                                                                        ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
-                                                                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                                                }`}>
-                                                                    <i className={`fas ${isBank ? 'fa-qrcode' : 'fa-money-bill-wave'} text-[10px]`}></i>
-                                                                    {isBank ? 'BANK (KHQR)' : (sale.paymentMethod || 'Cash')}
-                                                                </span>
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right font-semibold whitespace-nowrap">
-                                                                {discountAmt > 0 ? (
-                                                                    <span className="text-rose-400">-៛{khrFormatter.format(discountAmt)}</span>
-                                                                ) : (
-                                                                    <span className="text-slate-500">៛0</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold whitespace-nowrap">៛{khrFormatter.format(sale.grandTotal)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
-                                                                <div className="flex flex-col items-end leading-tight">
-                                                                    <span className={`font-bold ${receiptMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                                                                        {receiptMarginPct.toFixed(1)}%
-                                                                    </span>
-                                                                    <span className={`text-[11px] font-mono ${receiptProfit >= 0 ? 'text-yellow-400/90' : 'text-red-400/90'}`} title={`Cost: ៛${khrFormatter.format(receiptCost)}`}>
-                                                                        {receiptProfit >= 0 ? '+' : ''}៛{khrFormatter.format(receiptProfit)}
-                                                                    </span>
-                                                                </div>
-                                                            </td>
-                                                            <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
-                                                                {sale.status === 'void' 
-                                                                    ? <span className="bg-red-900/50 text-red-300 px-2 py-1 rounded text-xs font-bold">VOID</span>
-                                                                    : <span className="bg-green-900/50 text-green-300 px-2 py-1 rounded text-xs font-bold">PAID</span>
-                                                                }
-                                                            </td>
-                                                            <td className="px-4 py-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                                                                <div className="flex items-center justify-center gap-2">
-                                                                    <button onClick={() => setViewReceipt(sale)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View / Print Receipt">
-                                                                        <i className="fas fa-print"></i>
-                                                                    </button>
-                                                                    {canManageSales && (
-                                                                        <>
-                                                                            <button onClick={() => handleOpenEditSale(sale)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
-                                                                                <i className="fas fa-edit"></i>
-                                                                            </button>
-                                                                            <button onClick={() => setDeletingSale(sale)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
-                                                                                <i className="fas fa-trash"></i>
-                                                                            </button>
-                                                                        </>
-                                                                    )}
-                                                                </div>
+                                {/* 2. Dedicated Sale Detail Report Body Table Card */}
+                                <Card className="p-0 overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        {detailViewMode === 'receipts' ? (
+                                            /* MODE 1: Master-Detail Receipts Table with Dedicated Product, QTY, Discount %, Net Profit & Sale Margin Columns */
+                                            <table className="min-w-full divide-y divide-slate-700">
+                                                <thead className="bg-slate-900/50">
+                                                    <tr>
+                                                        <th className="px-3 py-3 w-10 text-center text-xs font-semibold text-slate-400 uppercase">Items</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date/Time</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Receipt No</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">QTY</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payment</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Discount</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Amount</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Profit</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700">
+                                                    {sortedDetailSales.length === 0 ? (
+                                                        <tr>
+                                                            <td colSpan="14" className="px-4 py-8 text-center text-slate-500">
+                                                                No sales found matching the current filters.
                                                             </td>
                                                         </tr>
+                                                    ) : sortedDetailSales.map(sale => {
+                                                        const { discountVal: discountAmt, subtotalVal, costVal: receiptCost, profitVal: receiptProfit, marginPct: receiptMarginPct } = computeSaleFinancials(sale);
+                                                        const discountPctVal = Number(sale.manualDiscountPct) > 0 && !(Number(sale.redemptionAmount) > 0)
+                                                            ? Number(sale.manualDiscountPct)
+                                                            : (subtotalVal > 0 && discountAmt > 0 ? ((discountAmt / subtotalVal) * 100) : 0);
+                                                        const isBank = sale.paymentMethod === 'KHQR' || sale.paymentMethod === 'Bank' || sale.paymentMethod === 'KHQR (ABA)';
+                                                        const isExpanded = !!expandedReceiptIds[sale.id];
+                                                        const totalQty = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+                                                        const firstItemName = sale.items?.[0]?.name || 'No items';
+                                                        const extraItemsCount = Math.max(0, (sale.items?.length || 0) - 1);
 
-                                                        {/* Expanded Itemized Breakdown Row */}
-                                                        {isExpanded && (
-                                                            <tr className="bg-slate-900/70">
-                                                                <td colSpan="12" className="px-6 py-3 border-l-4 border-l-blue-500">
-                                                                    <div className="bg-slate-800/90 rounded-lg p-3 border border-slate-700">
-                                                                        <div className="flex flex-wrap justify-between items-center mb-2 pb-1.5 border-b border-slate-700 text-xs text-slate-400">
-                                                                            <span className="font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
-                                                                                <i className="fas fa-shopping-basket"></i>
-                                                                                Itemized Breakdown — Receipt #{sale.receiptNo}
-                                                                            </span>
-                                                                            <span>
-                                                                                Customer: <strong className="text-slate-200">{sale.customerName || 'Walk-in'}</strong>
-                                                                                {sale.abaApv && <span className="ml-3 text-sky-400 font-mono">APV: {sale.abaApv}</span>}
-                                                                            </span>
+                                                        return (
+                                                            <React.Fragment key={sale.id}>
+                                                                <tr
+                                                                    onClick={() => toggleReceiptExpand(sale.id)}
+                                                                    className={`hover:bg-slate-700/50 cursor-pointer transition-colors ${sale.status === 'void' ? 'opacity-50' : ''} ${isExpanded ? 'bg-slate-700/30' : ''}`}
+                                                                >
+                                                                    <td className="px-3 py-3 text-center">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => { e.stopPropagation(); toggleReceiptExpand(sale.id); }}
+                                                                            className="w-6 h-6 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center mx-auto border border-slate-600"
+                                                                            title={isExpanded ? 'Hide items' : 'Show items'}
+                                                                        >
+                                                                            <i className={`fas fa-chevron-right text-[10px] transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-400' : ''}`}></i>
+                                                                        </button>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">
+                                                                        {safeFormatDateTime(sale.timestamp || sale.createdAt, 'N/A')}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-200 font-mono font-semibold whitespace-nowrap">{sale.receiptNo}</td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">{sale.shopName}</td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">{sale.cashierName}</td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-200">
+                                                                        <span className="truncate block max-w-[180px] font-medium" title={(sale.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ')}>
+                                                                            {firstItemName}
+                                                                            {extraItemsCount > 0 && <span className="text-xs text-slate-400 ml-1">(+{extraItemsCount} more)</span>}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
+                                                                        <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">
+                                                                            {totalQty}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm whitespace-nowrap">
+                                                                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                                                                            isBank
+                                                                                ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                                                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                                        }`}>
+                                                                            <i className={`fas ${isBank ? 'fa-qrcode' : 'fa-money-bill-wave'} text-[10px]`}></i>
+                                                                            {isBank ? 'BANK (KHQR)' : (sale.paymentMethod || 'Cash')}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-semibold whitespace-nowrap" title={discountAmt > 0 ? `-៛${khrFormatter.format(discountAmt)}` : '0%'}>
+                                                                        {discountPctVal > 0 ? (
+                                                                            <span className="text-rose-400 font-mono">-{ Number.isInteger(discountPctVal) ? discountPctVal : discountPctVal.toFixed(1) }%</span>
+                                                                        ) : (
+                                                                            <span className="text-slate-500 font-mono">0%</span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold whitespace-nowrap">៛{khrFormatter.format(sale.grandTotal)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                                                                        <span className={`font-mono font-bold ${receiptProfit >= 0 ? 'text-yellow-400' : 'text-red-400'}`} title={`Cost: ៛${khrFormatter.format(receiptCost)}`}>
+                                                                            {receiptProfit >= 0 ? '+' : ''}៛{khrFormatter.format(receiptProfit)}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                                                                        <span className={`font-mono font-bold ${receiptMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                                                                            {receiptMarginPct.toFixed(1)}%
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
+                                                                        {sale.status === 'void' 
+                                                                            ? <span className="bg-red-900/50 text-red-300 px-2 py-1 rounded text-xs font-bold">VOID</span>
+                                                                            : <span className="bg-green-900/50 text-green-300 px-2 py-1 rounded text-xs font-bold">PAID</span>
+                                                                        }
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                                                                        <div className="flex items-center justify-center gap-2">
+                                                                            <button onClick={() => setViewReceipt(sale)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View / Print Receipt">
+                                                                                <i className="fas fa-print"></i>
+                                                                            </button>
+                                                                            {canManageSales && (
+                                                                                <>
+                                                                                    <button onClick={() => handleOpenEditSale(sale)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                                        <i className="fas fa-edit"></i>
+                                                                                    </button>
+                                                                                    <button onClick={() => setDeletingSale(sale)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
+                                                                                        <i className="fas fa-trash"></i>
+                                                                                    </button>
+                                                                                </>
+                                                                            )}
                                                                         </div>
-                                                                        <table className="w-full text-xs">
-                                                                            <thead className="text-slate-400 uppercase border-b border-slate-700">
-                                                                                <tr>
-                                                                                    <th className="py-1.5 text-left">Product</th>
-                                                                                    <th className="py-1.5 text-left">Code</th>
-                                                                                    <th className="py-1.5 text-center">Qty</th>
-                                                                                    <th className="py-1.5 text-right">Unit Cost</th>
-                                                                                    <th className="py-1.5 text-right">Unit Price</th>
-                                                                                    <th className="py-1.5 text-right">Line Subtotal</th>
-                                                                                    <th className="py-1.5 text-right">Line Profit</th>
-                                                                                    <th className="py-1.5 text-right">Line Margin</th>
-                                                                                </tr>
-                                                                            </thead>
-                                                                            <tbody className="divide-y divide-slate-700/60">
-                                                                                {(sale.items || []).map((item, idx) => {
-                                                                                    const qty = Number(item.quantity) || 0;
-                                                                                    const price = Number(item.price) || 0;
-                                                                                    const unitCost = item.cost !== undefined && item.cost !== null
-                                                                                        ? (Number(item.cost) || 0)
-                                                                                        : (Number(productMap.get(item.productId)?.cost) || 0);
-                                                                                    const lineRev = qty * price;
-                                                                                    const lineCost = qty * unitCost;
-                                                                                    const lineProfit = lineRev - lineCost;
-                                                                                    const lineMarginPct = lineRev > 0 ? ((lineProfit / lineRev) * 100) : 0;
-                                                                                    return (
-                                                                                        <tr key={idx} className="text-slate-200">
-                                                                                            <td className="py-2 font-medium">
-                                                                                                {item.name}
-                                                                                                {item.note && (
-                                                                                                    <span className="ml-2 text-[10px] italic text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
-                                                                                                        Note: {item.note}
-                                                                                                    </span>
-                                                                                                )}
-                                                                                            </td>
-                                                                                            <td className="py-2 text-slate-400 font-mono">{item.code || '-'}</td>
-                                                                                            <td className="py-2 text-center font-bold">{qty}</td>
-                                                                                            <td className="py-2 text-right text-slate-400">៛{khrFormatter.format(unitCost)}</td>
-                                                                                            <td className="py-2 text-right text-slate-300">៛{khrFormatter.format(price)}</td>
-                                                                                            <td className="py-2 text-right font-bold text-emerald-400">៛{khrFormatter.format(lineRev)}</td>
-                                                                                            <td className={`py-2 text-right font-semibold ${lineProfit >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
-                                                                                                {lineProfit >= 0 ? '+' : ''}៛{khrFormatter.format(lineProfit)}
-                                                                                            </td>
-                                                                                            <td className={`py-2 text-right font-bold ${lineMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                                                                                                {lineMarginPct.toFixed(1)}%
-                                                                                            </td>
+                                                                    </td>
+                                                                </tr>
+
+                                                                {/* Expanded Itemized Breakdown Row */}
+                                                                {isExpanded && (
+                                                                    <tr className="bg-slate-900/70">
+                                                                        <td colSpan="14" className="px-6 py-3 border-l-4 border-l-blue-500">
+                                                                            <div className="bg-slate-800/90 rounded-lg p-3 border border-slate-700">
+                                                                                <div className="flex flex-wrap justify-between items-center mb-2 pb-1.5 border-b border-slate-700 text-xs text-slate-400">
+                                                                                    <span className="font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                                                                                        <i className="fas fa-shopping-basket"></i>
+                                                                                        Itemized Breakdown — Receipt #{sale.receiptNo}
+                                                                                    </span>
+                                                                                    <span>
+                                                                                        Customer: <strong className="text-slate-200">{sale.customerName || 'Walk-in'}</strong>
+                                                                                        {sale.abaApv && <span className="ml-3 text-sky-400 font-mono">APV: {sale.abaApv}</span>}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <table className="w-full text-xs">
+                                                                                    <thead className="text-slate-400 uppercase border-b border-slate-700">
+                                                                                        <tr>
+                                                                                            <th className="py-1.5 text-left">Product</th>
+                                                                                            <th className="py-1.5 text-left">Code</th>
+                                                                                            <th className="py-1.5 text-center">QTY</th>
+                                                                                            <th className="py-1.5 text-right">Unit Cost</th>
+                                                                                            <th className="py-1.5 text-right">Unit Price</th>
+                                                                                            <th className="py-1.5 text-right">Line Subtotal</th>
+                                                                                            <th className="py-1.5 text-right">Net Profit</th>
+                                                                                            <th className="py-1.5 text-right">Sale Margin</th>
                                                                                         </tr>
-                                                                                    );
-                                                                                })}
-                                                                            </tbody>
-                                                                        </table>
+                                                                                    </thead>
+                                                                                    <tbody className="divide-y divide-slate-700/60">
+                                                                                        {(sale.items || []).map((item, idx) => {
+                                                                                            const qty = Number(item.quantity) || 0;
+                                                                                            const price = Number(item.price) || 0;
+                                                                                            const unitCost = item.cost !== undefined && item.cost !== null
+                                                                                                ? (Number(item.cost) || 0)
+                                                                                                : (Number(productMap.get(item.productId)?.cost) || 0);
+                                                                                            const lineRev = qty * price;
+                                                                                            const lineCost = qty * unitCost;
+                                                                                            const lineProfit = lineRev - lineCost;
+                                                                                            const lineMarginPct = lineRev > 0 ? ((lineProfit / lineRev) * 100) : 0;
+                                                                                            return (
+                                                                                                <tr key={idx} className="text-slate-200">
+                                                                                                    <td className="py-2 font-medium">
+                                                                                                        {item.name}
+                                                                                                        {item.note && (
+                                                                                                            <span className="ml-2 text-[10px] italic text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
+                                                                                                                Note: {item.note}
+                                                                                                            </span>
+                                                                                                        )}
+                                                                                                    </td>
+                                                                                                    <td className="py-2 text-slate-400 font-mono">{item.code || '-'}</td>
+                                                                                                    <td className="py-2 text-center font-bold font-mono">{qty}</td>
+                                                                                                    <td className="py-2 text-right text-slate-400">៛{khrFormatter.format(unitCost)}</td>
+                                                                                                    <td className="py-2 text-right text-slate-300">៛{khrFormatter.format(price)}</td>
+                                                                                                    <td className="py-2 text-right font-bold text-emerald-400">៛{khrFormatter.format(lineRev)}</td>
+                                                                                                    <td className={`py-2 text-right font-mono font-semibold ${lineProfit >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                                                                                        {lineProfit >= 0 ? '+' : ''}៛{khrFormatter.format(lineProfit)}
+                                                                                                    </td>
+                                                                                                    <td className={`py-2 text-right font-mono font-bold ${lineMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                                                                                                        {lineMarginPct.toFixed(1)}%
+                                                                                                    </td>
+                                                                                                </tr>
+                                                                                            );
+                                                                                        })}
+                                                                                    </tbody>
+                                                                                </table>
+                                                                            </div>
+                                                                        </td>
+                                                                    </tr>
+                                                                )}
+                                                            </React.Fragment>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                                {sortedDetailSales.length > 0 && (() => {
+                                                    const validSalesList = sortedDetailSales.filter(s => s.status !== 'void');
+                                                    let totalDisc = 0, totalSub = 0, totalRev = 0, totalCost = 0, totalQtySum = 0;
+                                                    validSalesList.forEach(s => {
+                                                        const fin = computeSaleFinancials(s);
+                                                        totalDisc += fin.discountVal;
+                                                        totalSub += fin.subtotalVal;
+                                                        totalRev += fin.revenueVal;
+                                                        totalCost += fin.costVal;
+                                                        totalQtySum += (s.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+                                                    });
+                                                    const totalProf = totalRev - totalCost;
+                                                    const overallMarginPct = totalRev > 0 ? ((totalProf / totalRev) * 100) : 0;
+                                                    const overallDiscPct = totalSub > 0 && totalDisc > 0 ? ((totalDisc / totalSub) * 100) : 0;
+
+                                                    return (
+                                                        <tfoot className="bg-slate-900/60 border-t border-slate-700">
+                                                            <tr>
+                                                                <td colSpan="6" className="px-4 py-3 text-right text-xs font-bold text-slate-400 uppercase">
+                                                                    Total (Excluding Void)
+                                                                </td>
+                                                                <td className="px-4 py-3 text-center text-sm font-bold text-blue-300 font-mono">
+                                                                    {totalQtySum}
+                                                                </td>
+                                                                <td></td>
+                                                                <td className="px-4 py-3 text-right text-sm font-bold text-rose-400 font-mono whitespace-nowrap" title={`-៛${khrFormatter.format(totalDisc)}`}>
+                                                                    {overallDiscPct > 0 ? `-${overallDiscPct.toFixed(1)}%` : '0%'}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right text-sm font-bold text-emerald-400 whitespace-nowrap">
+                                                                    ៛{khrFormatter.format(totalRev)}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                                    <span className={`text-sm font-mono font-bold ${totalProf >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                                                        {totalProf >= 0 ? '+' : ''}៛{khrFormatter.format(totalProf)}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                                    <span className={`text-sm font-mono font-bold ${overallMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                                                                        {overallMarginPct.toFixed(1)}%
+                                                                    </span>
+                                                                </td>
+                                                                <td colSpan="2"></td>
+                                                            </tr>
+                                                        </tfoot>
+                                                    );
+                                                })()}
+                                            </table>
+                                        ) : (
+                                            /* MODE 2: Flat Line-Items Table with Dedicated Product, QTY, Net Profit & Sale Margin Columns */
+                                            <table className="min-w-full divide-y divide-slate-700">
+                                                <thead className="bg-slate-900/50">
+                                                    <tr>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date/Time</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Receipt No</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">QTY</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Unit Cost</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Unit Price</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Line Total</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Profit</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payment</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Receipt</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700">
+                                                    {saleByItems.length === 0 ? (
+                                                        <tr>
+                                                            <td colSpan="14" className="px-4 py-8 text-center text-slate-500">
+                                                                No line items found matching the current filters.
+                                                            </td>
+                                                        </tr>
+                                                    ) : saleByItems.map((item) => {
+                                                        const isBank = item.paymentMethod === 'KHQR' || item.paymentMethod === 'Bank' || item.paymentMethod === 'KHQR (ABA)';
+                                                        return (
+                                                            <tr key={item.uniqueKey} className={`hover:bg-slate-700/50 ${item.status === 'void' ? 'opacity-50' : ''}`}>
+                                                                <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">{safeFormatDateTime(item.date, '-')}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{item.receiptNo}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-400">{item.shopName}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-400">{item.cashierName}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-200">
+                                                                    <div className="font-medium">{item.productName}</div>
+                                                                    <div className="text-xs text-slate-500">
+                                                                        {item.code}
+                                                                        {item.note && <span className="ml-2 text-amber-400 italic">• {item.note}</span>}
+                                                                    </div>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-sm text-center font-bold font-mono text-slate-200">{item.quantity}</td>
+                                                                <td className="px-4 py-3 text-sm text-right text-slate-500 whitespace-nowrap">៛{khrFormatter.format(item.unitCost)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right text-slate-400 whitespace-nowrap">៛{khrFormatter.format(item.price)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold whitespace-nowrap">៛{khrFormatter.format(item.total)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                                                                    <span className={`font-mono font-bold ${item.profit >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                                                        {item.profit >= 0 ? '+' : ''}៛{khrFormatter.format(item.profit)}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                                                                    <span className={`font-mono font-bold ${item.marginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                                                                        {item.marginPct.toFixed(1)}%
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-sm whitespace-nowrap">
+                                                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                                                                        isBank
+                                                                            ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                                                            : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                                    }`}>
+                                                                        {isBank ? 'BANK' : (item.paymentMethod || 'Cash')}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
+                                                                    {item.status === 'void'
+                                                                        ? <span className="bg-red-900/50 text-red-300 px-2 py-0.5 rounded text-xs font-bold">VOID</span>
+                                                                        : <span className="bg-green-900/50 text-green-300 px-2 py-0.5 rounded text-xs font-bold">PAID</span>
+                                                                    }
+                                                                </td>
+                                                                <td className="px-4 py-3 text-center whitespace-nowrap">
+                                                                    <div className="flex items-center justify-center gap-2">
+                                                                        <button onClick={() => setViewReceipt(item.saleObj)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View Receipt">
+                                                                            <i className="fas fa-eye"></i>
+                                                                        </button>
+                                                                        {canManageSales && (
+                                                                            <>
+                                                                                <button onClick={() => handleOpenEditSale(item.saleObj)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                                    <i className="fas fa-edit"></i>
+                                                                                </button>
+                                                                                <button onClick={() => setDeletingSale(item.saleObj)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
+                                                                                    <i className="fas fa-trash"></i>
+                                                                                </button>
+                                                                            </>
+                                                                        )}
                                                                     </div>
                                                                 </td>
                                                             </tr>
-                                                        )}
-                                                    </React.Fragment>
-                                                );
-                                            })}
-                                        </tbody>
-                                        {sortedDetailSales.length > 0 && (() => {
-                                            const validSalesList = sortedDetailSales.filter(s => s.status !== 'void');
-                                            let totalDisc = 0, totalRev = 0, totalCost = 0;
-                                            validSalesList.forEach(s => {
-                                                const fin = computeSaleFinancials(s);
-                                                totalDisc += fin.discountVal;
-                                                totalRev += fin.revenueVal;
-                                                totalCost += fin.costVal;
-                                            });
-                                            const totalProf = totalRev - totalCost;
-                                            const overallMarginPct = totalRev > 0 ? ((totalProf / totalRev) * 100) : 0;
+                                                        );
+                                                    })}
+                                                </tbody>
+                                                {saleByItems.length > 0 && (() => {
+                                                    const validItems = saleByItems.filter(i => i.status !== 'void');
+                                                    const totalQty = validItems.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+                                                    const totalLineRev = validItems.reduce((sum, i) => sum + (Number(i.total) || 0), 0);
+                                                    const totalLineProf = validItems.reduce((sum, i) => sum + (Number(i.profit) || 0), 0);
+                                                    const totalLineMarginPct = totalLineRev > 0 ? ((totalLineProf / totalLineRev) * 100) : 0;
 
-                                            return (
-                                                <tfoot className="bg-slate-900/60 border-t border-slate-700">
-                                                    <tr>
-                                                        <td colSpan="7" className="px-4 py-3 text-right text-xs font-bold text-slate-400 uppercase">
-                                                            Total (Excluding Void)
-                                                        </td>
-                                                        <td className="px-4 py-3 text-right text-sm font-bold text-rose-400 whitespace-nowrap">
-                                                            -៛{khrFormatter.format(totalDisc)}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-right text-sm font-bold text-emerald-400 whitespace-nowrap">
-                                                            ៛{khrFormatter.format(totalRev)}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-right whitespace-nowrap">
-                                                            <div className="flex flex-col items-end leading-tight">
-                                                                <span className={`text-sm font-bold ${overallMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                                                                    {overallMarginPct.toFixed(1)}%
-                                                                </span>
-                                                                <span className={`text-[11px] font-mono font-bold ${totalProf >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
-                                                                    {totalProf >= 0 ? '+' : ''}៛{khrFormatter.format(totalProf)}
-                                                                </span>
-                                                            </div>
-                                                        </td>
-                                                        <td colSpan="2"></td>
-                                                    </tr>
-                                                </tfoot>
-                                            );
-                                        })()}
-                                    </table>
-                                ) : (
-                                    /* MODE 2: Flat Line-Items Table (Every Item Sold with Receipt Context & Reprint Action) */
-                                    <table className="min-w-full divide-y divide-slate-700">
-                                        <thead className="bg-slate-900/50">
-                                            <tr>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date/Time</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Receipt No</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Qty</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Unit Cost</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Unit Price</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Line Total</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payment</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Receipt</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-700">
-                                            {saleByItems.length === 0 ? (
-                                                <tr>
-                                                    <td colSpan="13" className="px-4 py-8 text-center text-slate-500">
-                                                        No line items found matching the current filters.
-                                                    </td>
-                                                </tr>
-                                            ) : saleByItems.map((item) => {
-                                                const isBank = item.paymentMethod === 'KHQR' || item.paymentMethod === 'Bank' || item.paymentMethod === 'KHQR (ABA)';
-                                                return (
-                                                    <tr key={item.uniqueKey} className={`hover:bg-slate-700/50 ${item.status === 'void' ? 'opacity-50' : ''}`}>
-                                                        <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">{safeFormatDateTime(item.date, '-')}</td>
-                                                        <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{item.receiptNo}</td>
-                                                        <td className="px-4 py-3 text-sm text-slate-400">{item.shopName}</td>
-                                                        <td className="px-4 py-3 text-sm text-slate-400">{item.cashierName}</td>
-                                                        <td className="px-4 py-3 text-sm text-slate-200">
-                                                            <div className="font-medium">{item.productName}</div>
-                                                            <div className="text-xs text-slate-500">
-                                                                {item.code}
-                                                                {item.note && <span className="ml-2 text-amber-400 italic">• {item.note}</span>}
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-4 py-3 text-sm text-center font-bold text-slate-200">{item.quantity}</td>
-                                                        <td className="px-4 py-3 text-sm text-right text-slate-500 whitespace-nowrap">៛{khrFormatter.format(item.unitCost)}</td>
-                                                        <td className="px-4 py-3 text-sm text-right text-slate-400 whitespace-nowrap">៛{khrFormatter.format(item.price)}</td>
-                                                        <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold whitespace-nowrap">៛{khrFormatter.format(item.total)}</td>
-                                                        <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
-                                                            <div className="flex flex-col items-end leading-tight">
-                                                                <span className={`font-bold ${item.marginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                                                                    {item.marginPct.toFixed(1)}%
-                                                                </span>
-                                                                <span className={`text-[11px] font-mono ${item.profit >= 0 ? 'text-yellow-400/90' : 'text-red-400/90'}`}>
-                                                                    {item.profit >= 0 ? '+' : ''}៛{khrFormatter.format(item.profit)}
-                                                                </span>
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-4 py-3 text-sm whitespace-nowrap">
-                                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${
-                                                                isBank
-                                                                    ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
-                                                                    : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                                            }`}>
-                                                                {isBank ? 'BANK' : (item.paymentMethod || 'Cash')}
-                                                            </span>
-                                                        </td>
-                                                        <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
-                                                            {item.status === 'void'
-                                                                ? <span className="bg-red-900/50 text-red-300 px-2 py-0.5 rounded text-xs font-bold">VOID</span>
-                                                                : <span className="bg-green-900/50 text-green-300 px-2 py-0.5 rounded text-xs font-bold">PAID</span>
-                                                            }
-                                                        </td>
-                                                        <td className="px-4 py-3 text-center whitespace-nowrap">
-                                                            <div className="flex items-center justify-center gap-2">
-                                                                <button onClick={() => setViewReceipt(item.saleObj)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View Receipt">
-                                                                    <i className="fas fa-eye"></i>
-                                                                </button>
-                                                                {canManageSales && (
-                                                                    <>
-                                                                        <button onClick={() => handleOpenEditSale(item.saleObj)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
-                                                                            <i className="fas fa-edit"></i>
-                                                                        </button>
-                                                                        <button onClick={() => setDeletingSale(item.saleObj)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
-                                                                            <i className="fas fa-trash"></i>
-                                                                        </button>
-                                                                    </>
-                                                                )}
-                                                            </div>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        </tbody>
-                                        {saleByItems.length > 0 && (() => {
-                                            const validItems = saleByItems.filter(i => i.status !== 'void');
-                                            const totalQty = validItems.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
-                                            const totalLineRev = validItems.reduce((sum, i) => sum + (Number(i.total) || 0), 0);
-                                            const totalLineProf = validItems.reduce((sum, i) => sum + (Number(i.profit) || 0), 0);
-                                            const totalLineMarginPct = totalLineRev > 0 ? ((totalLineProf / totalLineRev) * 100) : 0;
-
-                                            return (
-                                                <tfoot className="bg-slate-900/60 border-t border-slate-700">
-                                                    <tr>
-                                                        <td colSpan="5" className="px-4 py-3 text-right text-xs font-bold text-slate-400 uppercase">
-                                                            Line Items Subtotal (Excluding Void)
-                                                        </td>
-                                                        <td className="px-4 py-3 text-center text-sm font-bold text-blue-300">
-                                                            {totalQty}
-                                                        </td>
-                                                        <td colSpan="2"></td>
-                                                        <td className="px-4 py-3 text-right text-sm font-bold text-emerald-400 whitespace-nowrap">
-                                                            ៛{khrFormatter.format(totalLineRev)}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-right whitespace-nowrap">
-                                                            <div className="flex flex-col items-end leading-tight">
-                                                                <span className={`text-sm font-bold ${totalLineMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                                                                    {totalLineMarginPct.toFixed(1)}%
-                                                                </span>
-                                                                <span className={`text-[11px] font-mono font-bold ${totalLineProf >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
-                                                                    {totalLineProf >= 0 ? '+' : ''}៛{khrFormatter.format(totalLineProf)}
-                                                                </span>
-                                                            </div>
-                                                        </td>
-                                                        <td colSpan="3"></td>
-                                                    </tr>
-                                                </tfoot>
-                                            );
-                                        })()}
-                                    </table>
-                                )}
-                            </TableCard>
+                                                    return (
+                                                        <tfoot className="bg-slate-900/60 border-t border-slate-700">
+                                                            <tr>
+                                                                <td colSpan="5" className="px-4 py-3 text-right text-xs font-bold text-slate-400 uppercase">
+                                                                    Line Items Subtotal (Excluding Void)
+                                                                </td>
+                                                                <td className="px-4 py-3 text-center text-sm font-bold font-mono text-blue-300">
+                                                                    {totalQty}
+                                                                </td>
+                                                                <td colSpan="2"></td>
+                                                                <td className="px-4 py-3 text-right text-sm font-bold text-emerald-400 whitespace-nowrap">
+                                                                    ៛{khrFormatter.format(totalLineRev)}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                                    <span className={`text-sm font-mono font-bold ${totalLineProf >= 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                                                        {totalLineProf >= 0 ? '+' : ''}៛{khrFormatter.format(totalLineProf)}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                                    <span className={`text-sm font-mono font-bold ${totalLineMarginPct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                                                                        {totalLineMarginPct.toFixed(1)}%
+                                                                    </span>
+                                                                </td>
+                                                                <td colSpan="3"></td>
+                                                            </tr>
+                                                        </tfoot>
+                                                    );
+                                                })()}
+                                            </table>
+                                        )}
+                                    </div>
+                                </Card>
+                            </div>
                         )}
 
                         {/* Phase 3: Sale By Cashier */}
@@ -21039,100 +21075,105 @@
                             </TableCard>
                         )}
 
-                        {/* NEW: Phase 7 - Bank State (Telegram Feed) */}
+                        {/* NEW: Phase 7 - Bank Statement (Telegram Feed) */}
                         {activeTab === 'bank-state' && (
-                            <TableCard title={`Bank State (Telegram Feed) - ${filteredBankStateData.length} Transactions`}>
-                                {/* Top Search & Mode Status Bar */}
-                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-3">
+                            <Card className="p-3 sm:p-5">
+                                {/* Row 1: Title "Bank Statement - [N] Trx" + Feed Mode on the Same Line */}
+                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-700/80">
+                                    <h4 className="text-base sm:text-xl font-bold text-slate-100 flex items-center gap-2">
+                                        <i className="fas fa-university text-emerald-400 text-sm sm:text-base"></i>
+                                        <span>Bank Statement - {filteredBankStateData.length} Trx</span>
+                                    </h4>
+                                    <span
+                                        className={`px-2.5 sm:px-3 py-1 rounded-xl text-[11px] sm:text-xs font-bold border flex items-center gap-1.5 shrink-0 ${
+                                            effectiveBankStateFeedMode === 'live'
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                                : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                                        }`}
+                                        title="Configured in Settings → KHQR & ABA PayWay Configuration"
+                                    >
+                                        <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
+                                        <span>Mode: {effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
+                                    </span>
+                                </div>
+
+                                {/* Row 2: Search Box + Bypass (Icon) + Clean Stray IDs (Icon) + Smart Live Refresh (Icon) on the Same Line (Desktop & Mobile) */}
+                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-row items-center gap-1.5 sm:gap-2">
                                     {/* 1. Search Box */}
-                                    <div className="relative flex-1 max-w-md">
+                                    <div className="relative flex-1 min-w-0">
                                         <input
                                             type="text"
                                             value={bankStateSearchTerm}
                                             onChange={e => { setBankStateSearchTerm(e.target.value); setBankStateCurrentPage(1); }}
-                                            placeholder="Search payer name, bank name, APV, or invoice no..."
-                                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm h-[40px]"
+                                            placeholder="Search payer, bank, APV, or invoice..."
+                                            className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm h-[38px]"
                                         />
-                                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
                                         {bankStateSearchTerm && (
                                             <button
                                                 type="button"
                                                 onClick={() => { setBankStateSearchTerm(''); setBankStateCurrentPage(1); }}
-                                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                                             >
                                                 <i className="fas fa-times-circle text-xs"></i>
                                             </button>
                                         )}
                                     </div>
 
-                                    {/* 2. Mode Pill + Bypass DB Badge + Purge Unconfigured Button + Smart Refresh Button */}
-                                    <div className="flex flex-wrap items-center justify-end gap-2">
-                                        <span
-                                            className={`px-3 py-2 rounded-xl text-xs font-bold border flex items-center gap-1.5 h-[40px] ${
-                                                isBypassFirebaseDbActive
-                                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                                    : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
-                                            }`}
-                                            title={
-                                                isBypassFirebaseDbActive
-                                                    ? 'Bank State Bypass Firebase Database is ON (Default): 0 Firebase Reads/Writes — Streaming directly from Telegram MTProto → Render.com → Web Local Cache'
-                                                    : 'Bank State Bypass Firebase Database is OFF: All Bank State transactions are saved & queried in Firebase Firestore (/aba_payments)'
-                                            }
-                                        >
-                                            <i className={`fas ${isBypassFirebaseDbActive ? 'fa-bolt text-emerald-400' : 'fa-database text-amber-400'}`}></i>
-                                            <span>{isBypassFirebaseDbActive ? 'Bypass DB: ON (0 Quota)' : 'Firebase DB: ON'}</span>
-                                        </span>
+                                    {/* 2. Bypass DB Status Icon */}
+                                    <span
+                                        className={`w-[38px] h-[38px] rounded-xl border flex items-center justify-center shrink-0 relative ${
+                                            isBypassFirebaseDbActive
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                                : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                                        }`}
+                                        title={
+                                            isBypassFirebaseDbActive
+                                                ? 'Bypass DB: ON (0 Quota) — Streaming directly from Telegram MTProto → Render.com → Web Local Cache'
+                                                : 'Firebase DB: ON — Saving & querying Bank Statement transactions in Firebase Firestore (/aba_payments)'
+                                        }
+                                    >
+                                        <i className={`fas ${isBypassFirebaseDbActive ? 'fa-bolt text-emerald-400' : 'fa-database text-amber-400'} text-xs sm:text-sm`}></i>
+                                        <span className={`w-2 h-2 rounded-full absolute -top-0.5 -right-0.5 border border-slate-900 ${isBypassFirebaseDbActive ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+                                    </span>
 
-                                        <span
-                                            className={`px-3 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 h-[40px] ${
-                                                effectiveBankStateFeedMode === 'live'
-                                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                                    : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
-                                            }`}
-                                            title="Configured in Settings → KHQR & ABA PayWay Configuration"
-                                        >
-                                            <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
-                                            <span>Mode: {effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
-                                        </span>
-
-                                        {userProfile?.role === 'Admin' && (
-                                            <button
-                                                type="button"
-                                                onClick={handlePurgeUnconfiguredChatIdsFromDb}
-                                                disabled={bankStateLoading}
-                                                className="px-3 py-2 h-[40px] rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-xs font-bold transition flex items-center gap-1.5"
-                                                title="Purge stray transactions from unconfigured Telegram Chat IDs"
-                                            >
-                                                <i className="fas fa-broom"></i>
-                                                <span className="hidden sm:inline">Clean Stray IDs</span>
-                                            </button>
-                                        )}
-
-                                        {/* 3. Smart Refresh Bank Feed Icon Button (Active & Smart when Report Mode is set to 'Live Feed' in KHQR Settings) */}
+                                    {/* 3. Clean Stray IDs Icon Button (Admin) */}
+                                    {userProfile?.role === 'Admin' && (
                                         <button
                                             type="button"
-                                            disabled={bankStateLoading || effectiveBankStateFeedMode !== 'live'}
-                                            onClick={handleSmartBankFeedRefresh}
-                                            className={`w-10 h-10 rounded-xl border transition flex items-center justify-center relative shrink-0 ${
-                                                effectiveBankStateFeedMode === 'live'
-                                                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/50 shadow-md shadow-emerald-900/30 active:scale-95 cursor-pointer'
-                                                    : 'bg-slate-800/70 text-slate-500 border-slate-700 opacity-50 cursor-not-allowed'
-                                            }`}
-                                            title={
-                                                effectiveBankStateFeedMode === 'live'
-                                                    ? 'Smart Live Refresh — Force Instant Sync from Telegram MTProto, Render Bridge & Cloud Feed'
-                                                    : 'Smart Refresh Disabled — Switch "Bank State Report Mode" to "Live Feed" in Settings → KHQR & ABA PayWay Configuration to enable'
-                                            }
+                                            onClick={handlePurgeUnconfiguredChatIdsFromDb}
+                                            disabled={bankStateLoading}
+                                            className="w-[38px] h-[38px] rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 transition flex items-center justify-center shrink-0 disabled:opacity-50"
+                                            title="Clean Stray IDs — Purge stray transactions from unconfigured Telegram Chat IDs"
                                         >
-                                            <i className={`fas fa-sync-alt text-sm ${bankStateLoading ? 'fa-spin' : ''}`}></i>
-                                            {effectiveBankStateFeedMode === 'live' && !bankStateLoading && (
-                                                <span className="w-2 h-2 rounded-full bg-amber-300 border border-emerald-800 absolute -top-0.5 -right-0.5"></span>
-                                            )}
+                                            <i className="fas fa-broom text-xs sm:text-sm"></i>
                                         </button>
-                                    </div>
+                                    )}
+
+                                    {/* 4. Smart Live Refresh Icon Button */}
+                                    <button
+                                        type="button"
+                                        disabled={bankStateLoading || effectiveBankStateFeedMode !== 'live'}
+                                        onClick={handleSmartBankFeedRefresh}
+                                        className={`w-[38px] h-[38px] rounded-xl border transition flex items-center justify-center relative shrink-0 ${
+                                            effectiveBankStateFeedMode === 'live'
+                                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/50 shadow-md shadow-emerald-900/30 active:scale-95 cursor-pointer'
+                                                : 'bg-slate-800/70 text-slate-500 border-slate-700 opacity-50 cursor-not-allowed'
+                                        }`}
+                                        title={
+                                            effectiveBankStateFeedMode === 'live'
+                                                ? 'Smart Live Refresh — Force Instant Sync from Telegram MTProto, Render Bridge & Cloud Feed'
+                                                : 'Smart Refresh Disabled — Switch "Bank State Report Mode" to "Live Feed" in Settings → KHQR & ABA PayWay Configuration to enable'
+                                        }
+                                    >
+                                        <i className={`fas fa-sync-alt text-xs sm:text-sm ${bankStateLoading ? 'fa-spin' : ''}`}></i>
+                                        {effectiveBankStateFeedMode === 'live' && !bankStateLoading && (
+                                            <span className="w-2 h-2 rounded-full bg-amber-300 border border-emerald-800 absolute -top-0.5 -right-0.5"></span>
+                                        )}
+                                    </button>
                                 </div>
 
-                                {/* NEW: Live SubTotal Amount Transaction Table by Shop Location */}
+                                {/* Summary by Shop Location - N Shops */}
                                 {bankStateSubtotalsByShop.rows.length > 0 && (
                                     <div className="mb-5 bg-slate-900/70 rounded-xl border border-slate-700/90 overflow-hidden shadow-inner">
                                         <div className="px-4 py-2.5 bg-slate-900 border-b border-slate-700/80 flex flex-wrap items-center justify-between gap-2">
@@ -21140,7 +21181,7 @@
                                                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
                                                 <h5 className="text-xs font-black uppercase tracking-wider text-emerald-300 flex items-center gap-1.5">
                                                     <i className="fas fa-store-alt text-orange-400"></i>
-                                                    <span>Live SubTotal Amount by Shop Location ({bankStateSubtotalsByShop.rows.length} {bankStateSubtotalsByShop.rows.length === 1 ? 'Shop' : 'Shops'})</span>
+                                                    <span>Summary by Shop Location - {bankStateSubtotalsByShop.rows.length} {bankStateSubtotalsByShop.rows.length === 1 ? 'Shop' : 'Shops'}</span>
                                                 </h5>
                                             </div>
                                             <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
@@ -21284,12 +21325,12 @@
                                         <table className="min-w-full divide-y divide-slate-700">
                                             <thead className="bg-slate-900/50">
                                                 <tr>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date & Time</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date &amp; Time</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop / Chat ID</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payer Details</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Amount</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Bank Channel</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reference (APV/Trx)</th>
+                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">APV/Trx</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Invoice Note</th>
                                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
                                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
@@ -21399,7 +21440,7 @@
                                         </div>
                                     </div>
                                 )}
-                            </TableCard>
+                            </Card>
                         )}
 
                         {/* NEW: Cleared Carts Log */}
@@ -23093,7 +23134,7 @@
         const [productModal, setProductModal] = useState({ show: false, product: null, mode: 'edit' });
         const [isGeneratingCode, setIsGeneratingCode] = useState(false);
         
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, stockByShop: {} };
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {} };
 
         // Identify managed shops for calculation
         const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
@@ -23758,11 +23799,63 @@
 
     const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit', fifoInfo = null }) => {
         const { vendors, categories, products, shops } = useData(); 
-        // PHASE 1: Added categoryId & category fields
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, stockByShop: {} };
+        // PHASE 1: Added categoryId, category, and optional 1:1 imageUrl fields
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {} };
         const [formData, setFormData] = useState(initialFormState);
+        const [isProcessingImage, setIsProcessingImage] = useState(false);
+        const photoFileInputRef = useRef(null);
         
         const managedShops = useMemo(() => shops.filter(s => s.manageStock).sort((a,b) => a.name.localeCompare(b.name)), [shops]);
+
+        // Helper: Center-crops any uploaded image into a 1:1 square (320x320) compressed WebP data URL
+        const handleProductPhotoUpload = (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            setIsProcessingImage(true);
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                    try {
+                        const targetSize = 320;
+                        const canvas = document.createElement('canvas');
+                        canvas.width = targetSize;
+                        canvas.height = targetSize;
+                        const ctx = canvas.getContext('2d');
+
+                        // Fill clean white/transparent background
+                        ctx.fillStyle = '#0f172a';
+                        ctx.fillRect(0, 0, targetSize, targetSize);
+
+                        // Center-crop to 1:1 square aspect ratio
+                        const minSide = Math.min(img.width, img.height);
+                        const sx = Math.floor((img.width - minSide) / 2);
+                        const sy = Math.floor((img.height - minSide) / 2);
+
+                        ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
+                        let compressedDataUrl = canvas.toDataURL('image/webp', 0.78);
+                        if (!compressedDataUrl || compressedDataUrl.length < 50) {
+                            compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                        }
+                        setFormData(prev => ({ ...prev, imageUrl: compressedDataUrl }));
+                    } catch (err) {
+                        console.warn('Product photo compression warning:', err);
+                    } finally {
+                        setIsProcessingImage(false);
+                        if (photoFileInputRef.current) photoFileInputRef.current.value = '';
+                    }
+                };
+                img.onerror = () => {
+                    setIsProcessingImage(false);
+                    if (photoFileInputRef.current) photoFileInputRef.current.value = '';
+                };
+                img.src = ev.target.result;
+            };
+            reader.onerror = () => {
+                setIsProcessingImage(false);
+            };
+            reader.readAsDataURL(file);
+        };
 
         // State for vendor search functionality
         const [vendorSearch, setVendorSearch] = useState('');
@@ -23983,6 +24076,102 @@
                             
                             {/* --- Left Column --- */}
                             <div className="flex flex-col gap-y-4">
+                                {/* Optional Product Photo (1:1 Aspect Ratio) */}
+                                <div className="bg-slate-900/50 p-3.5 rounded-xl border border-slate-700/80">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
+                                            <i className="fas fa-camera text-blue-400 mr-1.5"></i>Product Photo (1:1) <span className="text-slate-500 font-normal lowercase">(Optional)</span>
+                                        </label>
+                                        {formData.imageUrl && !isViewMode && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setFormData(prev => ({ ...prev, imageUrl: '' }))}
+                                                className="text-[11px] font-bold text-red-400 hover:text-red-300 flex items-center gap-1 transition"
+                                                title="Remove Product Photo"
+                                            >
+                                                <i className="fas fa-trash-alt text-[10px]"></i> Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-3.5">
+                                        {/* 1:1 Square Preview Box */}
+                                        <div
+                                            onClick={() => {
+                                                if (!isViewMode && photoFileInputRef.current) {
+                                                    photoFileInputRef.current.click();
+                                                }
+                                            }}
+                                            className={`w-24 h-24 aspect-square rounded-xl border-2 overflow-hidden flex flex-col items-center justify-center shrink-0 relative transition-all ${
+                                                formData.imageUrl
+                                                    ? 'border-blue-500/60 bg-slate-950 shadow-md'
+                                                    : 'border-dashed border-slate-600 bg-slate-800/70 hover:border-blue-400'
+                                            } ${!isViewMode ? 'cursor-pointer group' : ''}`}
+                                            title={!isViewMode ? 'Click to upload 1:1 product photo' : 'Product Photo (1:1)'}
+                                        >
+                                            {isProcessingImage ? (
+                                                <div className="loader w-6 h-6"></div>
+                                            ) : formData.imageUrl ? (
+                                                <>
+                                                    <img
+                                                        src={formData.imageUrl}
+                                                        alt={formData.name || 'Product'}
+                                                        className="w-full h-full object-cover aspect-square"
+                                                        onError={(e) => {
+                                                            e.target.onerror = null;
+                                                            e.target.src = 'https://placehold.co/320x320/1e293b/94a3b8?text=1:1+Photo';
+                                                        }}
+                                                    />
+                                                    {!isViewMode && (
+                                                        <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold">
+                                                            <i className="fas fa-camera mr-1"></i> Change
+                                                        </div>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                <div className="text-center p-2 text-slate-400 group-hover:text-blue-400 transition-colors">
+                                                    <i className="fas fa-image text-xl mb-1 block"></i>
+                                                    <span className="text-[10px] font-bold block leading-tight">1:1 Photo</span>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Upload Button & Optional Direct Image URL Input */}
+                                        <div className="flex-1 min-w-0 space-y-2">
+                                            <input
+                                                ref={photoFileInputRef}
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={handleProductPhotoUpload}
+                                                className="hidden"
+                                                disabled={isViewMode}
+                                            />
+                                            {!isViewMode && (
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => photoFileInputRef.current?.click()}
+                                                        disabled={isProcessingImage}
+                                                        className="px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+                                                    >
+                                                        <i className="fas fa-upload text-[11px]"></i>
+                                                        <span>{formData.imageUrl ? 'Replace Photo' : 'Upload Photo (1:1)'}</span>
+                                                    </button>
+                                                    <span className="text-[10px] text-slate-400">Auto-crops to 1:1 square</span>
+                                                </div>
+                                            )}
+                                            <input
+                                                type="text"
+                                                name="imageUrl"
+                                                value={formData.imageUrl && formData.imageUrl.startsWith('data:') ? '' : (formData.imageUrl || '')}
+                                                onChange={handleInputChange}
+                                                placeholder={formData.imageUrl?.startsWith('data:') ? 'Uploaded 1:1 photo active (or paste image URL)...' : 'Or paste image URL (https://...)'}
+                                                readOnly={isViewMode}
+                                                className="w-full bg-slate-800 text-slate-200 px-2.5 py-1.5 text-xs border border-slate-600 rounded-lg focus:border-blue-500 outline-none read-only:bg-slate-800/50 read-only:text-slate-400"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div>
                                     <label className="block text-sm font-medium text-slate-300 mb-1">Product Code</label>
                                     <input type="text" name="code" value={formData.code} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md read-only:bg-slate-800 read-only:text-slate-400" required readOnly={true} />
