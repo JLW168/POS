@@ -199,6 +199,25 @@ http
       return;
     }
 
+    // Endpoint B2: Delete payment(s) from in-memory ring buffer (`/delete?trxIds=123,456`)
+    if (pathname === "/delete") {
+      const rawIds = String(urlObj.searchParams.get("trxIds") || urlObj.searchParams.get("trxId") || "").trim();
+      const idsToDelete = new Set(rawIds.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));
+      let removed = 0;
+      if (idsToDelete.size > 0) {
+        for (let i = recentPaymentsBuffer.length - 1; i >= 0; i--) {
+          const itemTrx = String(recentPaymentsBuffer[i]?.trxId || "").trim();
+          if (idsToDelete.has(itemTrx)) {
+            recentPaymentsBuffer.splice(i, 1);
+            removed++;
+          }
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: true, removed }));
+      return;
+    }
+
     // Endpoint C: JSON Payment Feed (`/recent`, `/payments`, or root `/?scan=1`)
     if (pathname === "/recent" || pathname === "/payments" || shouldScan) {
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -237,7 +256,7 @@ http
 
 // Self-Keep-Alive Ping every 4 minutes to prevent Render Free Tier 15-minute inactivity spin-down
 const selfExternalUrl =
-  process.env.RENDER_EXTERNAL_URL || "https://pos-payway.onrender.com";
+  process.env.RENDER_EXTERNAL_URL || "https://po-listener.onrender.com";
 setInterval(() => {
   try {
     https
