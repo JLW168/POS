@@ -4996,15 +4996,6 @@
                 const existingItem = prevCart.find(item => item.productId === product.id);
                 const currentQty = existingItem ? (parseInt(existingItem.quantity, 10) || 0) : 0;
                 const newQty = currentQty + 1;
-                const availableStock = product.stockByShop?.[selectedShopId] || 0;
-
-                if (currentShopObj?.manageStock !== false) {
-                    if (availableStock <= 0) {
-                        triggerStockWarning(`"${product.name}" is out of stock (${availableStock} available). Selling will result in negative inventory.`);
-                    } else if (newQty > availableStock) {
-                        triggerStockWarning(`Cart quantity (${newQty}) for "${product.name}" exceeds available shop stock (${availableStock}).`);
-                    }
-                }
 
                 if (existingItem) {
                     return prevCart.map(item => item.productId === product.id ? { ...item, quantity: newQty } : item);
@@ -5021,18 +5012,12 @@
                 }];
             });
             refocusSearchInput();
-        }, [currentShift, selectedShopId, currentShopObj, triggerStockWarning, refocusSearchInput]);
+        }, [currentShift, refocusSearchInput]);
 
         const handleApplyLineItemEdit = (productId, updates) => {
             setCart(prev => prev.map(item => {
                 if (item.productId === productId) {
                     const newQty = Math.max(1, parseInt(updates.quantity, 10) || 1);
-                    if (currentShopObj?.manageStock !== false) {
-                        const availableStock = getAvailableStock(productId);
-                        if (newQty > availableStock) {
-                            triggerStockWarning(`Cart quantity (${newQty}) for "${item.name}" exceeds available shop stock (${availableStock}).`);
-                        }
-                    }
                     return {
                         ...item,
                         quantity: newQty,
@@ -5057,12 +5042,6 @@
                 if (item.productId === productId) {
                     const currentQty = parseInt(item.quantity, 10) || 0;
                     const newQty = Math.max(1, currentQty + delta);
-                    if (delta > 0 && currentShopObj?.manageStock !== false) {
-                        const availableStock = getAvailableStock(productId);
-                        if (newQty > availableStock) {
-                            triggerStockWarning(`Cart quantity (${newQty}) for "${item.name}" exceeds available shop stock (${availableStock}).`);
-                        }
-                    }
                     return { ...item, quantity: newQty };
                 }
                 return item;
@@ -6274,6 +6253,7 @@
                                     {filteredProducts.slice(0, RENDER_LIMIT).map((product, index) => {
                                         const stock = product.stockByShop?.[selectedShopId] || 0;
                                         const inCartQty = cartQtyMap.get(product.id) || 0;
+                                        const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
                                         const isHighlighted = index === highlightedIndex;
 
                                         return (
@@ -6304,7 +6284,10 @@
 
                                                 {/* Middle: Product Name */}
                                                 <h4 className="text-slate-100 font-bold text-xs sm:text-sm line-clamp-2 leading-snug my-auto py-1 group-hover:text-white">
-                                                    {product.name}
+                                                    <span>{product.name}</span>
+                                                    {isNoOrNegativeStock && (
+                                                        <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-1.5 align-middle shadow-sm shadow-red-500/60 shrink-0"></span>
+                                                    )}
                                                 </h4>
 
                                                 {/* Bottom Row: Price & Quick Add Button */}
@@ -6346,6 +6329,7 @@
                                             {filteredProducts.slice(0, RENDER_LIMIT).map((product, index) => {
                                                 const stock = product.stockByShop?.[selectedShopId] || 0;
                                                 const inCartQty = cartQtyMap.get(product.id) || 0;
+                                                const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
                                                 const isHighlighted = index === highlightedIndex;
                                                 
                                                 return (
@@ -6362,8 +6346,11 @@
                                                     >
                                                         <td className="py-2.5 px-3 sm:pl-4">
                                                             <div className="flex items-center gap-2">
-                                                                <span className={`font-bold text-xs sm:text-sm md:text-base ${isHighlighted || inCartQty > 0 ? 'text-white' : 'text-slate-200'}`}>
-                                                                    {product.name}
+                                                                <span className={`font-bold text-xs sm:text-sm md:text-base flex items-center ${isHighlighted || inCartQty > 0 ? 'text-white' : 'text-slate-200'}`}>
+                                                                    <span>{product.name}</span>
+                                                                    {isNoOrNegativeStock && (
+                                                                        <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-1.5 shadow-sm shadow-red-500/60 shrink-0"></span>
+                                                                    )}
                                                                 </span>
                                                                 {inCartQty > 0 && (
                                                                     <span className="bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
@@ -6568,6 +6555,8 @@
                             ) : (
                                 cart.map(item => {
                                     const hasCustomPrice = item.originalPrice !== undefined && item.price !== item.originalPrice;
+                                    const itemAvailStock = getAvailableStock(item.productId);
+                                    const isCartItemNoStock = currentShopObj?.manageStock !== false && (itemAvailStock <= 0 || (Number(item.quantity) || 0) > itemAvailStock);
                                     return (
                                     <div key={item.productId} className="bg-slate-700/40 p-2.5 rounded-xl border border-slate-700/60 hover:border-slate-600 transition-colors">
                                         <div className="flex justify-between items-center gap-2">
@@ -6578,6 +6567,9 @@
                                             >
                                                 <div className="text-slate-100 font-bold text-xs sm:text-sm truncate group-hover/item:text-blue-400 transition-colors flex items-center gap-1.5">
                                                     <span className="truncate">{item.name}</span>
+                                                    {isCartItemNoStock && (
+                                                        <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 shadow-sm shadow-red-500/60"></span>
+                                                    )}
                                                     <i className="fas fa-calculator text-[10px] text-slate-500 opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"></i>
                                                 </div>
                                                 <div className="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap mt-0.5">
@@ -20911,81 +20903,99 @@
         );
     };
 
-    // Component for handling product filters
-    const ProductFilters = memo(({ onFilterChange, onClear }) => {
+    // Component for handling product filters (2-Column Grid: Product Search + Merged Category/Vendor Search)
+    const ProductFilters = memo(({ onFilterChange }) => {
         const { vendors, categories, products } = useData();
         const [searchTerm, setSearchTerm] = useState('');
-        const [vendorSearch, setVendorSearch] = useState('');
-        const [vendorSearchResults, setVendorSearchResults] = useState([]);
-        const [selectedVendor, setSelectedVendor] = useState(null);
+        const [catVendorSearch, setCatVendorSearch] = useState('');
+        const [catVendorResults, setCatVendorResults] = useState([]);
+        const [selectedCatVendor, setSelectedCatVendor] = useState(null); // { type: 'category' | 'vendor', id, name }
+        const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
-        const [categorySearch, setCategorySearch] = useState('');
-        const [categorySearchResults, setCategorySearchResults] = useState([]);
-        const [selectedCategory, setSelectedCategory] = useState(null);
+        const combinedCatVendorList = useMemo(() => {
+            const list = [];
+            const seenCats = new Set();
 
-        const availableCategories = useMemo(() => {
-            const map = new Map();
             (categories || []).forEach(c => {
-                if (c.name) map.set(c.name.trim().toLowerCase(), { id: c.id, name: c.name.trim() });
-            });
-            (products || []).forEach(p => {
-                const cName = (p.category || p.categoryName || '').trim();
-                if (cName && !map.has(cName.toLowerCase())) {
-                    map.set(cName.toLowerCase(), { id: cName, name: cName });
+                const clean = (c.name || '').trim();
+                if (clean && !seenCats.has(clean.toLowerCase())) {
+                    seenCats.add(clean.toLowerCase());
+                    list.push({ type: 'category', id: c.id, name: clean });
                 }
             });
-            return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-        }, [categories, products]);
+
+            (products || []).forEach(p => {
+                const cName = (p.category || p.categoryName || '').trim();
+                if (cName && !seenCats.has(cName.toLowerCase())) {
+                    seenCats.add(cName.toLowerCase());
+                    list.push({ type: 'category', id: cName, name: cName });
+                }
+            });
+
+            (vendors || []).forEach(v => {
+                const clean = (v.name || '').trim();
+                if (clean) {
+                    list.push({ type: 'vendor', id: v.id, name: clean });
+                }
+            });
+
+            return list.sort((a, b) => a.name.localeCompare(b.name));
+        }, [categories, products, vendors]);
 
         const debouncedSearchTerm = useDebounce(searchTerm, 300);
-        const debouncedVendorSearch = useDebounce(vendorSearch, 300);
-        const debouncedCategorySearch = useDebounce(categorySearch, 300);
+        const debouncedCatVendor = useDebounce(catVendorSearch, 250);
 
-        const vendorFuse = useMemo(() => new Fuse(vendors || [], { keys: ['name'], threshold: 0.4 }), [vendors]);
-        const categoryFuse = useMemo(() => new Fuse(availableCategories, { keys: ['name'], threshold: 0.4 }), [availableCategories]);
+        const combinedFuse = useMemo(
+            () => new Fuse(combinedCatVendorList, { keys: ['name', 'type'], threshold: 0.35 }),
+            [combinedCatVendorList]
+        );
 
         useEffect(() => {
+            let vendorId = '';
+            let categoryName = '';
+            let catVendorQuery = '';
+
+            if (selectedCatVendor) {
+                if (selectedCatVendor.type === 'vendor') vendorId = selectedCatVendor.id;
+                else if (selectedCatVendor.type === 'category') categoryName = selectedCatVendor.name;
+            } else if (debouncedCatVendor.trim()) {
+                catVendorQuery = debouncedCatVendor.trim();
+            }
+
             onFilterChange({
                 searchTerm: debouncedSearchTerm,
-                vendorId: selectedVendor ? selectedVendor.id : '',
-                categoryName: selectedCategory ? selectedCategory.name : ''
+                vendorId,
+                categoryName,
+                catVendorQuery
             });
-        }, [debouncedSearchTerm, selectedVendor, selectedCategory, onFilterChange]);
+        }, [debouncedSearchTerm, selectedCatVendor, debouncedCatVendor, onFilterChange]);
 
         useEffect(() => {
-            if (debouncedVendorSearch && !selectedVendor) {
-                const results = vendorFuse.search(debouncedVendorSearch);
-                setVendorSearchResults(results.map(r => r.item));
-            } else {
-                setVendorSearchResults([]);
+            if (!isDropdownOpen) {
+                setCatVendorResults([]);
+                return;
             }
-        }, [debouncedVendorSearch, vendorFuse, selectedVendor]);
-
-        useEffect(() => {
-            if (debouncedCategorySearch && !selectedCategory) {
-                const results = categoryFuse.search(debouncedCategorySearch);
-                setCategorySearchResults(results.map(r => r.item));
+            if (debouncedCatVendor.trim() && !selectedCatVendor) {
+                const res = combinedFuse.search(debouncedCatVendor.trim(), { limit: 25 });
+                setCatVendorResults(res.map(r => r.item));
+            } else if (!debouncedCatVendor.trim()) {
+                setCatVendorResults(combinedCatVendorList.slice(0, 25));
             } else {
-                setCategorySearchResults([]);
+                setCatVendorResults([]);
             }
-        }, [debouncedCategorySearch, categoryFuse, selectedCategory]);
+        }, [debouncedCatVendor, combinedFuse, selectedCatVendor, isDropdownOpen, combinedCatVendorList]);
 
-        const selectVendor = (vendor) => {
-            setSelectedVendor(vendor);
-            setVendorSearch(vendor.name);
-            setVendorSearchResults([]);
-        };
-
-        const selectCategory = (cat) => {
-            setSelectedCategory(cat);
-            setCategorySearch(cat.name);
-            setCategorySearchResults([]);
+        const handleSelectOption = (item) => {
+            setSelectedCatVendor(item);
+            setCatVendorSearch(item.name);
+            setCatVendorResults([]);
+            setIsDropdownOpen(false);
         };
 
         return (
-            <div className="mb-4 px-1 space-y-2.5">
-                {/* Search Product Input */}
-                <div className="relative">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 flex-1 min-w-0">
+                {/* 1. Search by Product Name, Code, or Barcode */}
+                <div className="relative min-w-0">
                     <input 
                         type="text" 
                         placeholder="Search by product name, code, or barcode..." 
@@ -20999,84 +21009,81 @@
                             type="button"
                             onClick={() => setSearchTerm('')}
                             className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                            title="Clear Product Search"
                         >
                             <i className="fas fa-times-circle text-xs"></i>
                         </button>
                     )}
                 </div>
 
-                {/* 2-Column Grid: Filter by Category & Filter by Vendor */}
-                <div className="grid grid-cols-2 gap-2.5 sm:gap-4">
-                    <div className="relative min-w-0">
-                        <input
-                            type="text"
-                            placeholder="Search category..."
-                            value={categorySearch}
-                            onChange={(e) => {
-                                setCategorySearch(e.target.value);
-                                setSelectedCategory(null);
-                            }}
-                            className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none h-[40px]"
-                        />
-                        <i className="fas fa-tags absolute left-2.5 top-1/2 -translate-y-1/2 text-emerald-400 text-xs"></i>
-                        {categorySearch && (
-                            <button
-                                type="button"
-                                onClick={() => { setCategorySearch(''); setSelectedCategory(null); setCategorySearchResults([]); }}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                            >
-                                <i className="fas fa-times-circle text-xs"></i>
-                            </button>
-                        )}
-                        {categorySearchResults.length > 0 && (
-                            <div className="absolute z-20 w-full bg-slate-800 border border-slate-600 rounded-xl mt-1 shadow-lg max-h-60 overflow-y-auto">
-                                {categorySearchResults.map(c => (
-                                    <div key={c.id} onClick={() => selectCategory(c)} className="p-2.5 cursor-pointer hover:bg-slate-700 text-xs sm:text-sm font-semibold text-slate-200">
-                                        {c.name}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                {/* 2. Merged Search by Category or Vendor */}
+                <div className="relative min-w-0">
+                    <input
+                        type="text"
+                        placeholder="Search by Category or Vendor..."
+                        value={catVendorSearch}
+                        onFocus={() => setIsDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setIsDropdownOpen(false), 180)}
+                        onChange={(e) => {
+                            setCatVendorSearch(e.target.value);
+                            setSelectedCatVendor(null);
+                            setIsDropdownOpen(true);
+                        }}
+                        className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none h-[40px]"
+                    />
+                    <i className={`fas ${
+                        selectedCatVendor?.type === 'vendor'
+                            ? 'fa-truck text-orange-400'
+                            : selectedCatVendor?.type === 'category'
+                                ? 'fa-tags text-emerald-400'
+                                : 'fa-filter text-emerald-400'
+                    } absolute left-3 top-1/2 -translate-y-1/2 text-xs`}></i>
 
-                    <div className="relative min-w-0">
-                        <input
-                            type="text"
-                            placeholder="Search vendor..."
-                            value={vendorSearch}
-                            onChange={(e) => {
-                                setVendorSearch(e.target.value);
-                                setSelectedVendor(null);
+                    {catVendorSearch && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setCatVendorSearch('');
+                                setSelectedCatVendor(null);
+                                setCatVendorResults([]);
                             }}
-                            className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none h-[40px]"
-                        />
-                        <i className="fas fa-truck absolute left-2.5 top-1/2 -translate-y-1/2 text-orange-400 text-xs"></i>
-                        {vendorSearch && (
-                            <button
-                                type="button"
-                                onClick={() => { setVendorSearch(''); setSelectedVendor(null); setVendorSearchResults([]); }}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                            >
-                                <i className="fas fa-times-circle text-xs"></i>
-                            </button>
-                        )}
-                        {vendorSearchResults.length > 0 && (
-                            <div className="absolute z-20 w-full bg-slate-800 border border-slate-600 rounded-xl mt-1 shadow-lg max-h-60 overflow-y-auto">
-                                {vendorSearchResults.map(v => (
-                                    <div key={v.id} onClick={() => selectVendor(v)} className="p-2.5 cursor-pointer hover:bg-slate-700 text-xs sm:text-sm font-semibold text-slate-200">
-                                        {v.name}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                            title="Clear Category / Vendor Filter"
+                        >
+                            <i className="fas fa-times-circle text-xs"></i>
+                        </button>
+                    )}
+
+                    {isDropdownOpen && catVendorResults.length > 0 && (
+                        <div className="absolute z-30 w-full bg-slate-800 border border-slate-600 rounded-xl mt-1 shadow-2xl max-h-60 overflow-y-auto divide-y divide-slate-700/60">
+                            {catVendorResults.map((item, idx) => (
+                                <div
+                                    key={`${item.type}_${item.id}_${idx}`}
+                                    onMouseDown={() => handleSelectOption(item)}
+                                    className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex items-center justify-between gap-2 text-xs sm:text-sm transition"
+                                >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <i className={`fas ${item.type === 'category' ? 'fa-tag text-emerald-400' : 'fa-truck text-orange-400'} text-xs shrink-0`}></i>
+                                        <span className="font-semibold text-slate-200 truncate">{item.name}</span>
                                     </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase shrink-0 border ${
+                                        item.type === 'category'
+                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                            : 'bg-orange-500/15 text-orange-300 border-orange-500/30'
+                                    }`}>
+                                        {item.type}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             </div>
         );
     });
 
-    // Component for handling the main action buttons
-    const ProductActions = memo(({ onAddNew, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode }) => {
+    // Component for handling the main action buttons (Compact Icon-Only Toolbar + Shop View Droplist)
+    const ProductActions = memo(({ onAddNew, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView }) => {
         const [isImporting, setIsImporting] = useState(false);
         const fileInputRef = useRef(null);
 
@@ -21091,148 +21098,663 @@
         };
 
         return (
-            <div className="mb-4 px-1 flex flex-wrap gap-2 items-center justify-between">
-                <button onClick={onAddNew} disabled={isGeneratingCode} className="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 flex items-center gap-2 disabled:bg-blue-800 disabled:cursor-wait">
-                    {isGeneratingCode ? <div className="loader w-4 h-4 mr-2"></div> : <i className="fas fa-plus"></i>}
-                    {isGeneratingCode ? 'Generating...' : 'Add Product'}
-                </button>
-                <div className="flex flex-wrap gap-2 items-center justify-end">
-                    <button onClick={onTemplate} className="bg-cyan-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-cyan-700 flex items-center gap-2"><i className="fas fa-download"></i> Template</button>
-                    <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} accept=".xlsx, .xls, .csv" />
-                    <button onClick={() => fileInputRef.current.click()} disabled={isImporting} className="bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-indigo-700 flex items-center gap-2 disabled:bg-indigo-800">
-                        {isImporting ? <div className="loader"></div> : <i className="fas fa-upload"></i>} {isImporting ? 'Importing...' : 'Import'}
+            <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 shrink-0">
+                {/* Shop View Droplist (Default: All Shop View + Shop 1, Shop 2, ...) */}
+                {managedShops.length > 0 && (
+                    <div className="relative min-w-[170px] sm:min-w-[195px] flex-1 sm:flex-initial">
+                        <i className="fas fa-store text-cyan-400 absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"></i>
+                        <select
+                            value={focusedShopId}
+                            onChange={(e) => onSelectShopView && onSelectShopView(e.target.value)}
+                            className="w-full bg-slate-900 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-cyan-500 outline-none text-xs font-bold appearance-none cursor-pointer h-[40px]"
+                            title="Select Shop View"
+                        >
+                            <option value="ALL">All Shop View ({managedShops.length})</option>
+                            {managedShops.map((shop) => (
+                                <option key={shop.id} value={shop.id}>
+                                    {shop.name} {Number(shop.saleMargin) > 0 ? `(${shop.saleMargin}%)` : ''}
+                                </option>
+                            ))}
+                        </select>
+                        <i className="fas fa-chevron-down text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
+                    </div>
+                )}
+
+                {/* Compact Icon-Only Action Buttons */}
+                <div className="flex items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={onAddNew}
+                        disabled={isGeneratingCode}
+                        title="Add Product"
+                        className="w-10 h-10 bg-blue-600 hover:bg-blue-500 text-white rounded-xl flex items-center justify-center shadow-md shadow-blue-900/30 transition active:scale-95 disabled:bg-blue-800 disabled:cursor-wait"
+                    >
+                        {isGeneratingCode ? <div className="loader w-4 h-4"></div> : <i className="fas fa-plus text-sm"></i>}
                     </button>
-                    <button onClick={onExport} className="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 flex items-center gap-2"><i className="fas fa-file-excel"></i> Export</button>
-                    {userProfile?.role === 'Admin' && <button onClick={onDeleteAll} className="bg-red-700 text-white font-bold py-2 px-4 rounded-lg hover:bg-red-800 flex items-center gap-2"><i className="fas fa-exclamation-triangle"></i> Delete All</button>}
+
+                    <button
+                        type="button"
+                        onClick={onTemplate}
+                        title="Download Import Template"
+                        className="w-10 h-10 bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/40 rounded-xl flex items-center justify-center transition active:scale-95"
+                    >
+                        <i className="fas fa-download text-sm"></i>
+                    </button>
+
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} accept=".xlsx, .xls, .csv" />
+                    <button
+                        type="button"
+                        onClick={() => fileInputRef.current.click()}
+                        disabled={isImporting}
+                        title="Import Products from Excel"
+                        className="w-10 h-10 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl flex items-center justify-center transition active:scale-95 disabled:opacity-50"
+                    >
+                        {isImporting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-upload text-sm"></i>}
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={onExport}
+                        title="Export Products to Excel"
+                        className="w-10 h-10 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 rounded-xl flex items-center justify-center transition active:scale-95"
+                    >
+                        <i className="fas fa-file-excel text-sm"></i>
+                    </button>
+
+                    {userProfile?.role === 'Admin' && (
+                        <button
+                            type="button"
+                            onClick={onDeleteAll}
+                            title="Delete All Products"
+                            className="w-10 h-10 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/40 rounded-xl flex items-center justify-center transition active:scale-95"
+                        >
+                            <i className="fas fa-trash-alt text-sm"></i>
+                        </button>
+                    )}
                 </div>
             </div>
         );
     });
 
-    // Component for rendering the product table
-    const ProductTable = memo(({ products, onAction, userProfile }) => {
+    // Component for rendering the product table (Single-Row Auto-Accordion Expand/Hide & Multi-Shop Matrix)
+    const ProductTable = memo(({ products, onAction, userProfile, fifoValuationMap, onApplySuggestedPrice, focusedShopId = 'ALL' }) => {
         const { shops } = useData();
         const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
+        // Single active expanded product ID: expanding 1 product automatically hides any previously expanded product
+        const [activeExpandedProductId, setActiveExpandedProductId] = useState(null);
+
+        const focusedShopObj = useMemo(
+            () => managedShops.find(s => s.id === focusedShopId) || null,
+            [managedShops, focusedShopId]
+        );
+
+        const toggleExpandRow = useCallback((productId) => {
+            setActiveExpandedProductId(prev => (prev === productId ? null : productId));
+        }, []);
+
+        const getShortShopCode = (name = '') => {
+            const clean = String(name).trim();
+            if (clean.length <= 8) return clean;
+            const parts = clean.split(/[\s\-_]+/);
+            if (parts.length >= 2) {
+                return (parts[0].slice(0, 4) + ' ' + parts[parts.length - 1].slice(-3)).toUpperCase();
+            }
+            return clean.slice(0, 7) + '…';
+        };
 
         return (
-            <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-900/50">
-                    <tr>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Code</th>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Barcode</th>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Category</th>
-                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor</th>
-                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Min Stock</th>
-                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cost</th>
-                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Price</th>
-                        {managedShops.map(shop => <th key={shop.id} className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">{shop.name}</th>)}
-                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Actions</th>
-                    </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-700">
-                    {products.map(p => {
-                         // Logic to highlight low stock rows
-                        const totalStock = p.stockByShop ? Object.values(p.stockByShop).reduce((a, b) => a + b, 0) : 0;
-                        const minStock = parseInt(p.minStock) || 0;
-                        const isLowStock = minStock > 0 && totalStock < minStock;
-
-                        return (
-                        <tr key={p.id} className={isLowStock ? "bg-red-900/20 hover:bg-red-900/30" : "hover:bg-slate-700/50"}>
-                            <td className="px-4 py-3 text-sm text-slate-200">
-                                {p.code}
-                                {isLowStock && <i className="fas fa-exclamation-triangle text-red-500 ml-2" title={`Low Stock! Total: ${totalStock} < Min: ${minStock}`}></i>}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-slate-300">{p.barcode || ''}</td>
-                            <td className="px-4 py-3 text-sm text-slate-300">{p.name}</td>
-                            <td className="px-4 py-3 text-sm text-emerald-400 font-medium">{p.category || p.categoryName || 'General'}</td>
-                            <td className="px-4 py-3 text-sm text-slate-400">{p.vendorName}</td>
-                            <td className="px-4 py-3 text-sm text-slate-400 text-center">{p.minStock || '-'}</td>
-                            <td className="px-4 py-3 text-sm text-slate-300 text-right">{khrFormatter.format(p.cost)}</td>
-                            <td className="px-4 py-3 text-sm text-slate-300 text-right">{khrFormatter.format(p.price)}</td>
-                            {managedShops.map(shop => {
-                                const qty = p.stockByShop?.[shop.id] || 0;
-                                const stockValue = qty * (p.cost || 0);
-                                return (
-                                <td key={shop.id} className="px-4 py-3 text-sm text-slate-300 text-right">
-                                    <div className="flex flex-col items-end group">
-                                        <div className="flex items-center justify-end gap-2">
-                                            <span className={`font-semibold ${(minStock > 0 && qty < minStock) ? 'text-red-400' : ''}`}>
-                                                {qty}
-                                            </span>
-                                            {userProfile.role === 'Admin' && (
-                                                <button 
-                                                    onClick={() => onAction('adjust-stock', { product: p, shopId: shop.id })} 
-                                                    className="text-slate-500 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                    title="Adjust Stock"
-                                                >
-                                                    <i className="fas fa-pen-to-square"></i>
-                                                </button>
-                                            )}
+            <div className="space-y-3">
+                {/* Clean, High-Density Master-Detail Product Table */}
+                <div className="overflow-x-auto rounded-xl border border-slate-700/80 bg-slate-800/40">
+                    <table className="min-w-full divide-y divide-slate-700">
+                        <thead className="bg-slate-900/90">
+                            <tr>
+                                <th className="w-10 px-3 py-3 text-center text-[11px] font-bold text-slate-400 uppercase">
+                                    <i className="fas fa-store-alt text-slate-500" title="Click any row to expand/auto-hide shop matrix"></i>
+                                </th>
+                                <th className="px-3 py-3 text-left text-[11px] font-bold text-slate-400 uppercase">Product &amp; Code</th>
+                                <th className="px-3 py-3 text-left text-[11px] font-bold text-slate-400 uppercase hidden md:table-cell">Cate.V</th>
+                                <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-400 uppercase">
+                                    {focusedShopObj ? `${focusedShopObj.name} FIFO Cost` : 'FIFO / Base Cost'}
+                                </th>
+                                <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-400 uppercase">
+                                    Price &amp; Margin
+                                </th>
+                                <th className="px-4 py-3 text-left text-[11px] font-bold text-slate-400 uppercase">
+                                    {focusedShopObj ? (
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-cyan-400"><i className="fas fa-crosshairs mr-1"></i>{focusedShopObj.name} Stock &amp; Price Suggestion</span>
+                                            <span className="text-[10px] font-mono text-slate-400">Target {Number(focusedShopObj.saleMargin) || 0}%</span>
                                         </div>
-                                        {qty > 0 && (
-                                            <span className="text-[10px] text-slate-500 group-hover:text-emerald-400 transition-colors" title="Total Cost of Stock">
-                                                {khrFormatter.format(stockValue)}
-                                            </span>
+                                    ) : (
+                                        <span>Multi-Shop : {managedShops.length}</span>
+                                    )}
+                                </th>
+                                <th className="px-3 py-3 text-right text-[11px] font-bold text-slate-400 uppercase">C.Value</th>
+                                <th className="px-3 py-3 text-center text-[11px] font-bold text-slate-400 uppercase">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-700/70">
+                            {products.map(p => {
+                                const totalStock = p.stockByShop ? Object.values(p.stockByShop).reduce((a, b) => (Number(a) || 0) + (Number(b) || 0), 0) : 0;
+                                const minStock = parseInt(p.minStock) || 0;
+                                const isLowStock = minStock > 0 && totalStock < minStock;
+                                const prodFifo = fifoValuationMap?.get(p.id);
+                                const isExpanded = activeExpandedProductId === p.id;
+
+                                // Resolve cost & margin based on whether "All Shops" or a single Focused Shop is active
+                                const focusedShopFifo = focusedShopObj ? prodFifo?.byShop?.[focusedShopObj.id] : null;
+                                const displayFifoCost = focusedShopFifo
+                                    ? focusedShopFifo.fifoUnitCost
+                                    : (prodFifo?.globalFifoUnitCost ?? (Number(p.cost) || 0));
+                                const baseCost = Number(p.cost) || 0;
+                                const currentPrice = Number(p.price) || 0;
+                                const actualMarginPct = currentPrice > 0 ? ((currentPrice - displayFifoCost) / currentPrice) * 100 : 0;
+                                const displayTotalValue = focusedShopObj
+                                    ? (focusedShopFifo ? focusedShopFifo.totalFifoValue : ((Number(p.stockByShop?.[focusedShopObj.id]) || 0) * baseCost))
+                                    : (prodFifo?.globalFifoValue ?? (totalStock * baseCost));
+
+                                return (
+                                    <React.Fragment key={p.id}>
+                                        <tr
+                                            onClick={() => toggleExpandRow(p.id)}
+                                            className={`cursor-pointer transition-colors ${
+                                                isExpanded
+                                                    ? 'bg-slate-700/50'
+                                                    : isLowStock
+                                                        ? 'bg-red-950/20 hover:bg-red-900/30'
+                                                        : 'hover:bg-slate-700/40'
+                                            }`}
+                                        >
+                                            {/* 1. Expand Chevron */}
+                                            <td className="px-3 py-3 text-center whitespace-nowrap">
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => { e.stopPropagation(); toggleExpandRow(p.id); }}
+                                                    className={`w-7 h-7 rounded-lg flex items-center justify-center mx-auto border transition-all ${
+                                                        isExpanded
+                                                            ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                                            : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white hover:border-slate-500'
+                                                    }`}
+                                                    title={isExpanded ? 'Hide Multi-Shop FIFO Matrix' : 'Expand Multi-Shop FIFO & Price Matrix'}
+                                                >
+                                                    <i className={`fas fa-chevron-right text-[10px] transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}></i>
+                                                </button>
+                                            </td>
+
+                                            {/* 2. Product Name, Code & Barcode */}
+                                            <td className="px-3 py-3">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-sm font-bold text-slate-100 leading-snug">{p.name}</span>
+                                                    {isLowStock && (
+                                                        <span
+                                                            className="relative inline-flex items-center justify-center w-6 h-6 shrink-0"
+                                                            title={`Low Stock Alert: Total Stock (${totalStock}) is below Min Stock (${minStock})`}
+                                                        >
+                                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-60"></span>
+                                                            <span className="relative inline-flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-red-500 to-amber-500 text-white border border-amber-200 shadow-lg shadow-red-500/50 animate-bounce">
+                                                                <i className="fas fa-exclamation-triangle text-[10px]"></i>
+                                                            </span>
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px] font-mono text-slate-400">
+                                                    <span className="bg-slate-900/90 px-1.5 py-0.5 rounded border border-slate-700 text-blue-300 font-semibold">
+                                                        {p.code}
+                                                    </span>
+                                                    {p.barcode && (
+                                                        <span className="bg-slate-900/60 px-1.5 py-0.5 rounded border border-slate-700/70 text-slate-300">
+                                                            <i className="fas fa-barcode mr-1 text-slate-500"></i>{p.barcode}
+                                                        </span>
+                                                    )}
+                                                    {minStock > 0 && (
+                                                        <span className="text-[10px] text-slate-500">Min: {minStock}</span>
+                                                    )}
+                                                </div>
+                                            </td>
+
+                                            {/* 3. Cate.V */}
+                                            <td className="px-3 py-3 whitespace-nowrap hidden md:table-cell">
+                                                <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-xs font-semibold">
+                                                    <i className="fas fa-tag text-[9px]"></i>
+                                                    <span>{p.category || p.categoryName || 'General'}</span>
+                                                </div>
+                                                <div className="text-xs text-slate-400 mt-1 truncate max-w-[160px]" title={p.vendorName || ''}>
+                                                    <i className="fas fa-truck text-[10px] text-slate-500 mr-1"></i>
+                                                    {p.vendorName || 'No Vendor'}
+                                                </div>
+                                            </td>
+
+                                            {/* 4. FIFO Unit Cost & Base Cost */}
+                                            <td className="px-3 py-3 text-right whitespace-nowrap">
+                                                <div className="text-sm font-black text-amber-400 font-mono" title="Weighted FIFO Unit Cost">
+                                                    ៛{khrFormatter.format(Math.round(displayFifoCost))}
+                                                </div>
+                                                <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                                    {Math.abs(displayFifoCost - baseCost) >= 1 ? (
+                                                        <span>Base: ៛{khrFormatter.format(Math.round(baseCost))}</span>
+                                                    ) : (
+                                                        <span className="text-slate-500">FIFO Synced</span>
+                                                    )}
+                                                </div>
+                                            </td>
+
+                                            {/* 5. Price & Margin */}
+                                            <td className="px-3 py-3 text-right whitespace-nowrap">
+                                                <div className="text-sm font-black text-emerald-400 font-mono">
+                                                    ៛{khrFormatter.format(currentPrice)}
+                                                </div>
+                                                <div className="mt-0.5">
+                                                    <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
+                                                        actualMarginPct >= 20
+                                                            ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                                                            : actualMarginPct >= 0
+                                                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                                                : 'bg-red-500/20 text-red-300 border-red-500/40'
+                                                    }`}>
+                                                        {actualMarginPct.toFixed(1)}%
+                                                    </span>
+                                                </div>
+                                            </td>
+
+                                            {/* 6. Multi-Shop Stock Summary OR Focused Single-Shop Detail */}
+                                            <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
+                                                {focusedShopObj ? (
+                                                    /* FOCUSED SINGLE-SHOP VIEW */
+                                                    (() => {
+                                                        const qty = Number(p.stockByShop?.[focusedShopObj.id]) || 0;
+                                                        const sf = focusedShopFifo || {
+                                                            qty,
+                                                            fifoUnitCost: baseCost,
+                                                            totalFifoValue: qty * baseCost,
+                                                            targetMarginPct: Number(focusedShopObj.saleMargin) || 0,
+                                                            suggestedPrice: currentPrice,
+                                                            activeBatchCount: 0
+                                                        };
+                                                        const isBelowSug = sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
+                                                        return (
+                                                            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/75 px-3 py-2 rounded-xl border border-cyan-500/30">
+                                                                <div className="flex items-center gap-2.5">
+                                                                    <div className={`px-2.5 py-1 rounded-lg font-mono text-xs font-black border ${
+                                                                        qty <= 0
+                                                                            ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                                                                            : (minStock > 0 && qty < minStock)
+                                                                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                                                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                                    }`}>
+                                                                        Q-total: {qty}
+                                                                    </div>
+                                                                    <div className="text-[10px] font-mono text-slate-400">
+                                                                        {sf.activeBatchCount > 0 ? `${sf.activeBatchCount} FIFO batch(es)` : 'Base cost layer'}
+                                                                    </div>
+                                                                </div>
+
+                                                                <div className="flex items-center gap-2">
+                                                                    {sf.targetMarginPct > 0 && sf.suggestedPrice > 0 && (
+                                                                        <div className={`px-2 py-1 rounded-lg border text-[11px] font-mono font-bold flex items-center gap-1.5 ${
+                                                                            isBelowSug
+                                                                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                                                                                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                                                        }`}>
+                                                                            <span>Sug ({sf.targetMarginPct}%): <strong>៛{khrFormatter.format(sf.suggestedPrice)}</strong></span>
+                                                                            {userProfile?.role === 'Admin' && sf.suggestedPrice !== currentPrice && onApplySuggestedPrice && (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, focusedShopObj.name, sf.targetMarginPct)}
+                                                                                    className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black shadow transition"
+                                                                                >
+                                                                                    Apply
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    {userProfile?.role === 'Admin' && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => onAction('adjust-stock', { product: p, shopId: focusedShopObj.id })}
+                                                                            className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-600 flex items-center justify-center transition"
+                                                                            title={`Adjust Stock at ${focusedShopObj.name}`}
+                                                                        >
+                                                                            <i className="fas fa-pen-to-square text-xs"></i>
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()
+                                                ) : (
+                                                    /* ALL-SHOPS COMPACT MATRIX VIEW */
+                                                    <div className="space-y-1.5">
+                                                        <div className="flex items-center gap-2 text-xs">
+                                                            <span className={`px-2 py-0.5 rounded-md font-mono font-black border ${
+                                                                totalStock <= 0
+                                                                    ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                                                                    : isLowStock
+                                                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                                                        : 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                                                            }`}>
+                                                                Q-total: {khrFormatter.format(totalStock)}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* Compact Multi-Shop Badges Grid */}
+                                                        <div className="flex flex-wrap gap-1 max-w-xl">
+                                                            {managedShops.map(shop => {
+                                                                const qty = Number(p.stockByShop?.[shop.id]) || 0;
+                                                                const sf = prodFifo?.byShop?.[shop.id];
+                                                                const hasSugDiff = sf && sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
+                                                                return (
+                                                                    <button
+                                                                        key={shop.id}
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            if (userProfile?.role === 'Admin') {
+                                                                                onAction('adjust-stock', { product: p, shopId: shop.id });
+                                                                            } else {
+                                                                                toggleExpandRow(p.id);
+                                                                            }
+                                                                        }}
+                                                                        className={`px-2 py-0.5 rounded-md text-[10px] font-mono flex items-center gap-1 border transition ${
+                                                                            qty <= 0
+                                                                                ? 'bg-slate-900/50 text-slate-500 border-slate-800 hover:border-slate-600'
+                                                                                : (minStock > 0 && qty < minStock)
+                                                                                    ? 'bg-red-950/40 text-red-300 border-red-500/40 hover:bg-red-900/50'
+                                                                                    : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-blue-400'
+                                                                        }`}
+                                                                        title={`${shop.name}: ${qty} qty | FIFO Cost: ៛${khrFormatter.format(Math.round(sf?.fifoUnitCost || baseCost))} | Sug (${sf?.targetMarginPct || 0}%): ៛${khrFormatter.format(sf?.suggestedPrice || currentPrice)}${userProfile?.role === 'Admin' ? ' (Click to Adjust Stock)' : ''}`}
+                                                                    >
+                                                                        <span className="text-slate-400 font-sans font-semibold">{getShortShopCode(shop.name)}:</span>
+                                                                        <strong className={qty > 0 ? 'text-emerald-400' : 'text-slate-500'}>{qty}</strong>
+                                                                        {hasSugDiff && (
+                                                                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" title="Current price is below shop target margin suggestion"></span>
+                                                                        )}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </td>
+
+                                            {/* 7. C.Value Column */}
+                                            <td className="px-3 py-3 text-right whitespace-nowrap">
+                                                <div className="text-sm font-black text-slate-100 font-mono">
+                                                    ៛{khrFormatter.format(Math.round(displayTotalValue))}
+                                                </div>
+                                            </td>
+
+                                            {/* 8. Actions */}
+                                            <td className="px-3 py-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                                                <div className="inline-flex items-center gap-1 bg-slate-900/70 p-1 rounded-xl border border-slate-700/80">
+                                                    <button onClick={() => onAction('show-label', p)} className="w-7 h-7 rounded-lg text-teal-400 hover:bg-teal-500/20 flex items-center justify-center transition" title="Print Label">
+                                                        <i className="fas fa-barcode text-xs"></i>
+                                                    </button>
+                                                    <button onClick={() => onAction('show-history', p)} className="w-7 h-7 rounded-lg text-green-400 hover:bg-green-500/20 flex items-center justify-center transition" title="Cost History">
+                                                        <i className="fas fa-history text-xs"></i>
+                                                    </button>
+                                                    <button onClick={() => onAction('show-movement', p)} className="w-7 h-7 rounded-lg text-cyan-400 hover:bg-cyan-500/20 flex items-center justify-center transition" title="Movement History">
+                                                        <i className="fas fa-truck text-xs"></i>
+                                                    </button>
+                                                    <button onClick={() => onAction('view', p)} className="w-7 h-7 rounded-lg text-blue-400 hover:bg-blue-500/20 flex items-center justify-center transition" title="View / Edit Product">
+                                                        <i className="fas fa-eye text-xs"></i>
+                                                    </button>
+                                                    <button onClick={() => onAction('delete', p)} className="w-7 h-7 rounded-lg text-red-500 hover:bg-red-500/20 flex items-center justify-center transition" title="Delete Product">
+                                                        <i className="fas fa-trash text-xs"></i>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        {/* EXPANDED 10-SHOP FIFO COST & SELLING PRICE SUGGESTION MATRIX DRAWER */}
+                                        {isExpanded && (
+                                            <tr className="bg-slate-950/80 animate-fade-in-up">
+                                                <td colSpan="8" className="p-4 border-l-4 border-l-blue-500">
+                                                    <div className="space-y-3">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                                                                    <i className="fas fa-network-wired"></i>
+                                                                    <span>Multi-Shop FIFO Valuation &amp; Smart Price Matrix — {p.name}</span>
+                                                                </span>
+                                                                <span className="text-[11px] font-mono text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                                                                    Total On-Hand: <strong className="text-white">{totalStock} qty</strong> • Total FIFO Value: <strong className="text-emerald-400">៛{khrFormatter.format(Math.round(prodFifo?.globalFifoValue || 0))}</strong>
+                                                                </span>
+                                                            </div>
+                                                            <span className="text-[11px] text-slate-400 font-mono">
+                                                                Current Selling Price: <strong className="text-emerald-400">៛{khrFormatter.format(currentPrice)}</strong>
+                                                            </span>
+                                                        </div>
+
+                                                        {/* Responsive Multi-Shop Card Grid (2 cols mobile, 3 cols tablet, 4-5 cols desktop for 10+ shops) */}
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
+                                                            {managedShops.map(shop => {
+                                                                const qty = Number(p.stockByShop?.[shop.id]) || 0;
+                                                                const sf = prodFifo?.byShop?.[shop.id] || {
+                                                                    qty,
+                                                                    fifoUnitCost: baseCost,
+                                                                    totalFifoValue: qty * baseCost,
+                                                                    targetMarginPct: Number(shop.saleMargin) || 0,
+                                                                    suggestedPrice: currentPrice,
+                                                                    activeBatchCount: 0,
+                                                                    layers: []
+                                                                };
+                                                                const isBelowSuggested = sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
+                                                                const shopActualMargin = currentPrice > 0 ? ((currentPrice - sf.fifoUnitCost) / currentPrice) * 100 : 0;
+
+                                                                return (
+                                                                    <div
+                                                                        key={shop.id}
+                                                                        className={`p-3 rounded-xl border flex flex-col justify-between transition ${
+                                                                            qty > 0
+                                                                                ? 'bg-slate-900/90 border-slate-700/90 hover:border-slate-500'
+                                                                                : 'bg-slate-900/40 border-slate-800/80 opacity-75'
+                                                                        }`}
+                                                                    >
+                                                                        <div>
+                                                                            {/* Card Header: Shop Name + Quick Adjust Button */}
+                                                                            <div className="flex items-center justify-between gap-1.5 border-b border-slate-800 pb-2 mb-2">
+                                                                                <div className="min-w-0">
+                                                                                    <div className="text-xs font-bold text-white truncate flex items-center gap-1.5" title={shop.name}>
+                                                                                        <i className="fas fa-store text-orange-400 text-[10px]"></i>
+                                                                                        <span className="truncate">{shop.name}</span>
+                                                                                    </div>
+                                                                                    <div className="text-[10px] text-slate-400 font-mono">
+                                                                                        Target Margin: <strong className="text-cyan-400">{sf.targetMarginPct}%</strong>
+                                                                                    </div>
+                                                                                </div>
+                                                                                {userProfile?.role === 'Admin' && (
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => onAction('adjust-stock', { product: p, shopId: shop.id })}
+                                                                                        className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-400 hover:text-white border border-slate-700 flex items-center justify-center shrink-0 transition"
+                                                                                        title={`Adjust Stock for ${shop.name}`}
+                                                                                    >
+                                                                                        <i className="fas fa-pen text-[9px]"></i>
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+
+                                                                            {/* Stock & FIFO Cost Metrics */}
+                                                                            <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono mb-2">
+                                                                                <div className="bg-slate-950/60 p-1.5 rounded-lg border border-slate-800/80">
+                                                                                    <span className="text-[9px] uppercase text-slate-500 block">On-Hand</span>
+                                                                                    <span className={`font-black text-xs ${qty <= 0 ? 'text-slate-500' : (minStock > 0 && qty < minStock) ? 'text-red-400' : 'text-white'}`}>
+                                                                                        {qty} qty
+                                                                                    </span>
+                                                                                </div>
+                                                                                <div className="bg-slate-950/60 p-1.5 rounded-lg border border-slate-800/80 text-right">
+                                                                                    <span className="text-[9px] uppercase text-slate-500 block">FIFO Cost</span>
+                                                                                    <span className="font-bold text-xs text-amber-300">
+                                                                                        ៛{khrFormatter.format(Math.round(sf.fifoUnitCost))}
+                                                                                    </span>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            {/* FIFO Batch Breakdown Pills */}
+                                                                            {sf.layers && sf.layers.length > 0 && (
+                                                                                <div className="mb-2 space-y-1 max-h-20 overflow-y-auto pr-0.5">
+                                                                                    {sf.layers.map((layer, lIdx) => (
+                                                                                        <div key={lIdx} className="text-[10px] font-mono bg-slate-950/50 px-2 py-0.5 rounded border border-slate-800/60 flex justify-between text-slate-400">
+                                                                                            <span>{layer.qty}× @ ៛{khrFormatter.format(Math.round(layer.unitCost))}</span>
+                                                                                            <span className="text-slate-500 truncate max-w-[75px]" title={layer.ref}>{layer.ref}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+
+                                                                        {/* Card Footer: Suggested Price & 1-Click Apply */}
+                                                                        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-1.5">
+                                                                            <div className="min-w-0">
+                                                                                <span className="text-[9px] uppercase font-bold text-slate-400 block">
+                                                                                    Sug. Price ({sf.targetMarginPct}%)
+                                                                                </span>
+                                                                                {sf.targetMarginPct > 0 && sf.suggestedPrice > 0 ? (
+                                                                                    <span className={`text-xs font-black font-mono ${isBelowSuggested ? 'text-amber-300' : 'text-emerald-400'}`}>
+                                                                                        ៛{khrFormatter.format(sf.suggestedPrice)}
+                                                                                    </span>
+                                                                                ) : (
+                                                                                    <span className="text-[10px] text-slate-500 italic">No margin set</span>
+                                                                                )}
+                                                                            </div>
+
+                                                                            {userProfile?.role === 'Admin' && sf.targetMarginPct > 0 && sf.suggestedPrice > 0 && sf.suggestedPrice !== currentPrice ? (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, shop.name, sf.targetMarginPct)}
+                                                                                    className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black shadow transition shrink-0"
+                                                                                    title={`Apply ៛${khrFormatter.format(sf.suggestedPrice)} as Product Selling Price`}
+                                                                                >
+                                                                                    Apply
+                                                                                </button>
+                                                                            ) : (
+                                                                                <span className="text-[10px] font-mono text-slate-500">
+                                                                                    Actual: {shopActualMargin.toFixed(0)}%
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
                                         )}
-                                    </div>
-                                </td>
-                            )})}
-                            <td className="px-4 py-3 text-center space-x-4">
-                                <button onClick={() => onAction('show-label', p)} className="text-teal-400 hover:text-teal-300" title="Print Label"><i className="fas fa-barcode"></i></button>
-                                <button onClick={() => onAction('show-history', p)} className="text-green-400 hover:text-green-300" title="Cost History"><i className="fas fa-history"></i></button>
-                                <button onClick={() => onAction('show-movement', p)} className="text-cyan-400 hover:text-cyan-300" title="Movement History"><i className="fas fa-truck"></i></button>
-                                <button onClick={() => onAction('view', p)} className="text-blue-400 hover:text-blue-300" title="View/Edit"><i className="fas fa-eye"></i></button>
-                                <button onClick={() => onAction('delete', p)} className="text-red-500 hover:text-red-400" title="Delete"><i className="fas fa-trash"></i></button>
-                            </td>
-                        </tr>
-                    )})}
-                </tbody>
-            </table>
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         );
     });
 
-    // Component for handling pagination controls
+    // Component for rendering pagination controls
     const ProductPagination = memo(({ currentPage, totalPages, onNext, onPrev, totalResults, itemsPerPage }) => {
-        if (totalResults === 0) return null;
+        if (totalPages <= 1) return null;
 
-        const startItem = (currentPage - 1) * itemsPerPage + 1;
-        const endItem = Math.min(currentPage * itemsPerPage, totalResults);
+        const firstItem = (currentPage - 1) * itemsPerPage + 1;
+        const lastItem = Math.min(currentPage * itemsPerPage, totalResults);
 
         return (
-            <div className="flex justify-between items-center mt-4 px-4 py-2 bg-slate-900/50 rounded-b-lg">
+            <div className="flex flex-col sm:flex-row justify-between items-center mt-4 pt-4 border-t border-slate-700 gap-2">
                 <span className="text-sm text-slate-400">
-                    Showing {startItem} to {endItem} of {totalResults} results
+                    Showing <strong className="text-slate-200">{firstItem}</strong> to <strong className="text-slate-200">{lastItem}</strong> of <strong className="text-slate-200">{totalResults}</strong> products
                 </span>
                 <div className="flex items-center gap-2">
                     <button
+                        type="button"
                         onClick={onPrev}
                         disabled={currentPage === 1}
-                        className="px-3 py-1 bg-slate-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600 transition"
+                        className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition text-sm font-semibold flex items-center gap-1.5"
                     >
-                        <i className="fas fa-chevron-left"></i>
+                        <i className="fas fa-chevron-left text-xs"></i> Prev
                     </button>
-                    <span className="text-sm text-slate-300 font-semibold px-2">
+                    <span className="text-sm text-slate-300 font-bold px-2">
                         Page {currentPage} of {totalPages}
                     </span>
                     <button
+                        type="button"
                         onClick={onNext}
                         disabled={currentPage === totalPages}
-                        className="px-3 py-1 bg-slate-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600 transition"
+                        className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition text-sm font-semibold flex items-center gap-1.5"
                     >
-                        <i className="fas fa-chevron-right"></i>
+                        Next <i className="fas fa-chevron-right text-xs"></i>
                     </button>
                 </div>
             </div>
         );
     });
 
+    // Component for viewing Product Cost History
+    const CostHistoryModal = ({ product, onClose }) => {
+        const { data: history, loading } = useCollection('costHistory', { query: [['productId', '==', product.id]] });
+        const sortedHistory = useMemo(() => {
+            if (!history) return [];
+            return [...history].sort((a, b) => {
+                const dateA = safeToDate(a.updatedAt);
+                const dateB = safeToDate(b.updatedAt);
+                if (!dateB) return -1;
+                if (!dateA) return 1;
+                return dateB - dateA;
+            });
+        }, [history]);
 
-    // Main ProductList component, now using client-side filtering
+        return (
+            <Modal show={true} onClose={onClose} maxWidth="max-w-3xl">
+                <ModalHeader title={`Cost History: ${product.name}`} onClose={onClose} />
+                <ModalBody>
+                    {loading ? (
+                        <div className="flex justify-center p-6"><div className="loader"></div></div>
+                    ) : sortedHistory.length === 0 ? (
+                        <p className="text-center text-slate-400 p-6">No cost history found for this product.</p>
+                    ) : (
+                        <table className="min-w-full divide-y divide-slate-700">
+                            <thead className="bg-slate-900/50">
+                                <tr>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">PO Number</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Audited By</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Old Cost (៛)</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">New Cost (៛)</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Difference</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-700">
+                                {sortedHistory.map(entry => {
+                                    const diff = (Number(entry.newCost) || 0) - (Number(entry.oldCost) || 0);
+                                    return (
+                                        <tr key={entry.id} className="hover:bg-slate-700/50">
+                                            <td className="px-4 py-3 text-sm text-slate-400">{formatDateDDMMYYYY(entry.updatedAt)}</td>
+                                            <td className="px-4 py-3 text-sm text-slate-300 font-mono">{entry.poNumber || '-'}</td>
+                                            <td className="px-4 py-3 text-sm text-slate-300">{entry.auditedBy || 'N/A'}</td>
+                                            <td className="px-4 py-3 text-sm text-slate-400 text-right">៛{khrFormatter.format(Math.round(entry.oldCost || 0))}</td>
+                                            <td className="px-4 py-3 text-sm text-amber-400 font-bold text-right">៛{khrFormatter.format(Math.round(entry.newCost || 0))}</td>
+                                            <td className={`px-4 py-3 text-sm font-bold text-right ${diff > 0 ? 'text-red-400' : diff < 0 ? 'text-emerald-400' : 'text-slate-400'}`}>
+                                                {diff > 0 ? '+' : ''}៛{khrFormatter.format(Math.round(diff))}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    )}
+                </ModalBody>
+                <ModalFooter>
+                    <button onClick={onClose} type="button" className="bg-slate-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-slate-500">Close</button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
+    // Main ProductList component, now using client-side filtering + Smart FIFO Valuation by Shop
     const ProductList = ({ userProfile }) => {
-        const { products: allProducts, vendors, categories, shops, isLoading: dataLoading } = useData();
+        const { products: allProducts, vendors, categories, shops, allPOs, allTransfers, isLoading: dataLoading } = useData();
         
-        const [filters, setFilters] = useState({ searchTerm: '', vendorId: '', categoryName: '' });
+        const [filters, setFilters] = useState({ searchTerm: '', vendorId: '', categoryName: '', catVendorQuery: '' });
+        const [focusedShopId, setFocusedShopId] = useState('ALL');
         const [currentPage, setCurrentPage] = useState(1);
         const [itemsPerPage] = useState(20);
         
@@ -21240,10 +21762,193 @@
         const [productModal, setProductModal] = useState({ show: false, product: null, mode: 'edit' });
         const [isGeneratingCode, setIsGeneratingCode] = useState(false);
         
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, stockByShop: {} }; // Added minStock & categoryId
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, stockByShop: {} };
 
         // Identify managed shops for calculation
         const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
+
+        // ============================================================================
+        // SMART FIFO COST WITH QTY & SELLING PRICE SUGGESTION ENGINE (BY SHOP)
+        // Reconstructs the active remaining inventory layers for each (productId, shopId)
+        // from chronological Audited POs and Completed Internal Transfers.
+        // Because older stock is sold first under FIFO, the current On-Hand Stock (`qty`)
+        // consists of the most recent incoming cost batches up to `qty`.
+        // ============================================================================
+        const fifoValuationMap = useMemo(() => {
+            const map = new Map();
+            if (!allProducts || allProducts.length === 0) return map;
+
+            // 1. Index incoming stock layers per `${productId}_${shopId}` from Audited POs & Done Transfers
+            const incomingLayersByProdShop = new Map();
+            const pushIncomingLayer = (productId, shopId, qty, unitCost, dateMs, refNo, sourceType) => {
+                if (!productId || !shopId || qty <= 0 || unitCost <= 0) return;
+                const key = `${productId}_${shopId}`;
+                if (!incomingLayersByProdShop.has(key)) {
+                    incomingLayersByProdShop.set(key, []);
+                }
+                incomingLayersByProdShop.get(key).push({
+                    qty: Number(qty),
+                    unitCost: Number(unitCost),
+                    dateMs: Number(dateMs) || 0,
+                    ref: refNo || sourceType
+                });
+            };
+
+            // Collect from Audited Purchase Orders
+            (allPOs || []).forEach(po => {
+                if (!po || po.status !== 'audited' || !po.shopId) return;
+                const poDate = safeToDate(po.auditedAt || po.updatedAt || po.requestDate || po.createdAt);
+                const dateMs = poDate ? poDate.getTime() : 0;
+                const rate = parseFloat(po.exchangeRate) || 4000;
+
+                (po.items || []).forEach(item => {
+                    const audQty = parseFloat(item.auditedQty ?? item.quantity) || 0;
+                    if (!item.productId || audQty <= 0) return;
+                    let unitCost = 0;
+                    if (item.auditedTotalKHR !== '' && item.auditedTotalKHR != null && Number(item.auditedTotalKHR) > 0) {
+                        unitCost = parseFloat(item.auditedTotalKHR) / audQty;
+                    } else if (item.auditedTotalUSD !== '' && item.auditedTotalUSD != null && Number(item.auditedTotalUSD) > 0 && rate > 0) {
+                        unitCost = (parseFloat(item.auditedTotalUSD) * rate) / audQty;
+                    } else {
+                        unitCost = parseFloat(item.cost) || 0;
+                    }
+                    if (unitCost > 0) {
+                        pushIncomingLayer(item.productId, po.shopId, audQty, unitCost, dateMs, po.poNumber || 'PO', 'PO');
+                    }
+                });
+            });
+
+            // Collect from Completed Internal Transfers (Inbound to `toShopId`)
+            (allTransfers || []).forEach(tr => {
+                if (!tr || tr.status !== 'done' || !tr.toShopId) return;
+                const trDate = safeToDate(tr.completedAt || tr.updatedAt || tr.transferDate || tr.createdAt);
+                const dateMs = trDate ? trDate.getTime() : 0;
+
+                (tr.items || []).forEach(item => {
+                    const recQty = parseFloat(item.receivedQty ?? item.quantity) || 0;
+                    const unitCost = parseFloat(item.cost) || 0;
+                    if (item.productId && recQty > 0 && unitCost > 0) {
+                        pushIncomingLayer(item.productId, tr.toShopId, recQty, unitCost, dateMs, tr.transferNo || 'TR', 'Transfer');
+                    }
+                });
+            });
+
+            // Helper to round suggested KHR selling price cleanly to nearest 100 KHR
+            const roundToKhr100 = (val) => {
+                if (!val || val <= 0) return 0;
+                return Math.ceil(val / 100) * 100;
+            };
+
+            // 2. Compute FIFO Remaining Stock Valuation & Suggested Price per Shop for every Product
+            allProducts.forEach(prod => {
+                const baseCost = Math.max(0, parseFloat(prod.cost) || 0);
+                const byShop = {};
+                let globalStockQty = 0;
+                let globalFifoValue = 0;
+
+                managedShops.forEach(shop => {
+                    const currentStock = Math.max(0, Number(prod.stockByShop?.[shop.id]) || 0);
+                    const key = `${prod.id}_${shop.id}`;
+                    const rawBatches = incomingLayersByProdShop.get(key) || [];
+                    // Sort newest-first to slice the remaining unsold FIFO tail, then reverse to oldest-first (FIFO order)
+                    const sortedNewestFirst = [...rawBatches].sort((a, b) => b.dateMs - a.dateMs);
+
+                    const activeFifoLayers = [];
+                    let remainingToAccount = currentStock;
+
+                    if (currentStock > 0) {
+                        for (const batch of sortedNewestFirst) {
+                            if (remainingToAccount <= 0) break;
+                            const takenQty = Math.min(remainingToAccount, batch.qty);
+                            activeFifoLayers.unshift({
+                                qty: takenQty,
+                                unitCost: batch.unitCost,
+                                ref: batch.ref,
+                                dateMs: batch.dateMs
+                            });
+                            remainingToAccount -= takenQty;
+                        }
+                        // If current stock exceeds historical PO/Transfer batches (e.g. initial opening stock), value remainder at baseCost
+                        if (remainingToAccount > 0) {
+                            activeFifoLayers.unshift({
+                                qty: remainingToAccount,
+                                unitCost: baseCost,
+                                ref: 'Opening/Base Stock',
+                                dateMs: 0
+                            });
+                        }
+                    }
+
+                    let totalShopFifoValue = 0;
+                    let fifoUnitCost = baseCost;
+
+                    if (currentStock > 0 && activeFifoLayers.length > 0) {
+                        totalShopFifoValue = activeFifoLayers.reduce((sum, l) => sum + (l.qty * l.unitCost), 0);
+                        fifoUnitCost = totalShopFifoValue / currentStock;
+                    } else if (sortedNewestFirst.length > 0) {
+                        // When stock is 0, use the most recent batch cost or baseCost
+                        fifoUnitCost = sortedNewestFirst[0].unitCost || baseCost;
+                    }
+
+                    // Calculate Suggested Selling Price from Shop's configured Sale Margin (%)
+                    // Formula: Selling Price = FIFO Cost / (1 - (SaleMargin% / 100))
+                    const targetMarginPct = Math.max(0, Math.min(99, parseFloat(shop.saleMargin) || 0));
+                    let suggestedPrice = Number(prod.price) || 0;
+                    if (fifoUnitCost > 0 && targetMarginPct > 0 && targetMarginPct < 100) {
+                        const rawSuggested = fifoUnitCost / (1 - (targetMarginPct / 100));
+                        suggestedPrice = roundToKhr100(rawSuggested);
+                    }
+
+                    byShop[shop.id] = {
+                        shopId: shop.id,
+                        shopName: shop.name,
+                        qty: currentStock,
+                        fifoUnitCost,
+                        oldestLayerCost: activeFifoLayers.length > 0 ? activeFifoLayers[0].unitCost : fifoUnitCost,
+                        newestLayerCost: activeFifoLayers.length > 0 ? activeFifoLayers[activeFifoLayers.length - 1].unitCost : fifoUnitCost,
+                        totalFifoValue: totalShopFifoValue,
+                        targetMarginPct,
+                        suggestedPrice,
+                        activeBatchCount: activeFifoLayers.length,
+                        layers: activeFifoLayers
+                    };
+
+                    if (currentStock > 0) {
+                        globalStockQty += currentStock;
+                        globalFifoValue += totalShopFifoValue;
+                    }
+                });
+
+                const globalFifoUnitCost = globalStockQty > 0 ? (globalFifoValue / globalStockQty) : baseCost;
+
+                map.set(prod.id, {
+                    byShop,
+                    globalStockQty,
+                    globalFifoValue,
+                    globalFifoUnitCost
+                });
+            });
+
+            return map;
+        }, [allProducts, allPOs, allTransfers, managedShops]);
+
+        // Quick 1-Click Handler to apply a Shop's FIFO Suggested Selling Price to the Product
+        const handleApplySuggestedPrice = useCallback((product, newSuggestedPrice, shopName, marginPct) => {
+            if (!product || !product.id || !newSuggestedPrice) return;
+            const cleanPrice = Math.round(Number(newSuggestedPrice) || 0);
+            if (window.SolarisCollectionMutator) {
+                window.SolarisCollectionMutator.upsertDoc("products", product.id, { price: cleanPrice }, false);
+            } else {
+                db.collection("products").doc(product.id).update({ price: cleanPrice }).catch(() => {});
+            }
+            setModal({
+                type: 'message',
+                data: {
+                    title: 'Suggested Price Applied',
+                    message: `Updated selling price for "${product.name}" to ៛${khrFormatter.format(cleanPrice)} based on ${shopName}'s ${marginPct}% Sale Margin.`
+                }
+            });
+        }, []);
 
         const fuse = useMemo(() => {
             if (!allProducts) return null;
@@ -21257,7 +21962,7 @@
 
         const filteredProducts = useMemo(() => {
             if (!allProducts) return [];
-            const { searchTerm, vendorId, categoryName } = filters;
+            const { searchTerm, vendorId, categoryName, catVendorQuery } = filters;
             
             let results = [...allProducts]; // Create a mutable copy
 
@@ -21270,9 +21975,18 @@
                 results = results.filter(p => (p.category || p.categoryName || '').trim().toLowerCase() === targetCat);
             }
 
+            if (catVendorQuery) {
+                const q = catVendorQuery.trim().toLowerCase();
+                results = results.filter(p => {
+                    const cName = (p.category || p.categoryName || '').toLowerCase();
+                    const vName = (p.vendorName || '').toLowerCase();
+                    return cName.includes(q) || vName.includes(q);
+                });
+            }
+
             // If a search term is present, use Fuse for relevance-based results.
             if (searchTerm.trim() && fuse) {
-                const hasSubFilter = vendorId || categoryName;
+                const hasSubFilter = vendorId || categoryName || catVendorQuery;
                 const searchInstance = hasSubFilter ? new Fuse(results, { keys: ['name', 'code', 'barcode', 'category'], threshold: 0.3 }) : fuse;
                 return searchInstance.search(searchTerm.trim()).map(result => result.item);
             }
@@ -21502,19 +22216,47 @@
         
         const handleExport = async () => {
             const managedShops = shops.filter(s => s.manageStock);
-            const headers = ['Code', 'Barcode', 'Name', 'Vendor', 'Min Stock', 'Cost', 'Price', 'Note', ...managedShops.map(s => s.name)]; // Added Min Stock header
+            const shopColumns = managedShops.flatMap(s => [
+                `${s.name} (Qty)`,
+                `${s.name} (FIFO Unit Cost ៛)`,
+                `${s.name} (Total FIFO Cost ៛)`,
+                `${s.name} (Suggested Price @ ${Number(s.saleMargin) || 0}% ៛)`
+            ]);
+            const headers = ['Code', 'Barcode', 'Name', 'Category', 'Vendor', 'Min Stock', 'Base Cost', 'Global FIFO Cost', 'Current Price', 'Note', ...shopColumns];
 
             const data = filteredProducts.map(p => {
-                const row = { 'Code': p.code, 'Barcode': p.barcode, 'Name': p.name, 'Vendor': p.vendorName, 'Min Stock': p.minStock || 0, 'Cost': p.cost, 'Price': p.price, 'Note': p.note }; // Added Min Stock data
-                managedShops.forEach(shop => { row[shop.name] = p.stockByShop?.[shop.id] || 0; });
+                const prodFifo = fifoValuationMap.get(p.id);
+                const row = {
+                    'Code': p.code,
+                    'Barcode': p.barcode,
+                    'Name': p.name,
+                    'Category': p.category || p.categoryName || 'General',
+                    'Vendor': p.vendorName,
+                    'Min Stock': p.minStock || 0,
+                    'Base Cost': p.cost || 0,
+                    'Global FIFO Cost': Math.round(prodFifo?.globalFifoUnitCost ?? (p.cost || 0)),
+                    'Current Price': p.price || 0,
+                    'Note': p.note || ''
+                };
+                managedShops.forEach(shop => {
+                    const sf = prodFifo?.byShop?.[shop.id];
+                    const qty = p.stockByShop?.[shop.id] || 0;
+                    row[`${shop.name} (Qty)`] = qty;
+                    row[`${shop.name} (FIFO Unit Cost ៛)`] = Math.round(sf?.fifoUnitCost ?? (p.cost || 0));
+                    row[`${shop.name} (Total FIFO Cost ៛)`] = Math.round(sf?.totalFifoValue ?? (qty * (p.cost || 0)));
+                    row[`${shop.name} (Suggested Price @ ${Number(shop.saleMargin) || 0}% ៛)`] = sf?.suggestedPrice ?? (p.price || 0);
+                });
                 return row;
             });
 
             const ws = XLSX.utils.json_to_sheet(data, { header: headers });
-            ws['!cols'] = [ {wch:15}, {wch:15}, {wch:40}, {wch:20}, {wch:10}, {wch:12}, {wch:12}, {wch:20}, ...managedShops.map(() => ({wch: 15}))]; // Added width for Min Stock
+            ws['!cols'] = [
+                {wch:15}, {wch:15}, {wch:36}, {wch:18}, {wch:20}, {wch:10}, {wch:12}, {wch:16}, {wch:14}, {wch:20},
+                ...shopColumns.map(() => ({wch: 22}))
+            ];
             const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, "Products");
-            XLSX.writeFile(wb, "products_export.xlsx");
+            XLSX.utils.book_append_sheet(wb, ws, "Products_FIFO");
+            XLSX.writeFile(wb, "products_fifo_export.xlsx");
         };
 
         const handleDownloadTemplate = () => {
@@ -21601,28 +22343,42 @@
                     show={true} 
                     productToEdit={productModal.product} 
                     mode={productModal.mode}
+                    fifoInfo={productModal.product?.id ? fifoValuationMap.get(productModal.product.id) : null}
                     onSave={handleSaveProduct} 
                     onClose={() => setProductModal({ show: false, product: null, mode: 'edit' })} 
                 />}
 
                 <TableCard title={`Existing Products - ${filteredProducts.length}`}>
-                    <ProductFilters onFilterChange={handleFilterChange} onClear={refresh} />
-                    <ProductActions 
-                        onAddNew={handleAddNew}
-                        onImport={handleImport}
-                        onExport={handleExport}
-                        onTemplate={handleDownloadTemplate}
-                        onDeleteAll={() => setModal({ type: 'confirmDeleteAll', title: 'DANGER: Delete All Products', message: 'Are you sure you want to delete ALL products? This cannot be undone.'})}
-                        userProfile={userProfile}
-                        isGeneratingCode={isGeneratingCode}
-                    />
+                    {/* Unified Top Filter & Action Bar: 2-Column Search Grid + Shop View Droplist + Icon-Only Actions */}
+                    <div className="mb-4 pb-3 border-b border-slate-700/80 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-2.5">
+                        <ProductFilters onFilterChange={handleFilterChange} />
+                        <ProductActions 
+                            onAddNew={handleAddNew}
+                            onImport={handleImport}
+                            onExport={handleExport}
+                            onTemplate={handleDownloadTemplate}
+                            onDeleteAll={() => setModal({ type: 'confirmDeleteAll', title: 'DANGER: Delete All Products', message: 'Are you sure you want to delete ALL products? This cannot be undone.'})}
+                            userProfile={userProfile}
+                            isGeneratingCode={isGeneratingCode}
+                            managedShops={managedShops}
+                            focusedShopId={focusedShopId}
+                            onSelectShopView={setFocusedShopId}
+                        />
+                    </div>
                     {dataLoading ? (
                         <div className="flex justify-center p-8"><div className="loader"></div></div>
                     ) : filteredProducts.length === 0 ? (
                         <p className="text-center p-4 text-slate-400">No products found for the current filters.</p>
                     ) : (
                         <>
-                            <ProductTable products={paginatedProducts} onAction={handleAction} userProfile={userProfile} />
+                            <ProductTable
+                                products={paginatedProducts}
+                                onAction={handleAction}
+                                userProfile={userProfile}
+                                fifoValuationMap={fifoValuationMap}
+                                onApplySuggestedPrice={handleApplySuggestedPrice}
+                                focusedShopId={focusedShopId}
+                            />
                             <ProductPagination 
                                 currentPage={currentPage}
                                 totalPages={totalPages}
@@ -21639,7 +22395,7 @@
     };
 
 
-    const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit' }) => {
+    const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit', fifoInfo = null }) => {
         const { vendors, categories, products, shops } = useData(); 
         // PHASE 1: Added categoryId & category fields
         const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, stockByShop: {} };
@@ -22013,6 +22769,78 @@
                                         <input type="number" name="price" value={formData.price} onChange={handleInputChange} onKeyDown={handleInputKeyDown} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md read-only:bg-slate-800 read-only:text-slate-400" required readOnly={isViewMode} />
                                     </div>
                                 </div>
+
+                                {/* --- Smart FIFO Valuation & Shop Sale Margin Price Suggestions --- */}
+                                {managedShops.length > 0 && (
+                                    <div className="bg-slate-900/60 p-3.5 rounded-xl border border-slate-700 space-y-2.5">
+                                        <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
+                                            <span className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                                                <i className="fas fa-calculator"></i>
+                                                <span>Smart FIFO Cost &amp; Price Suggestion by Shop</span>
+                                            </span>
+                                            <span className="text-[10px] text-slate-400 font-mono">
+                                                Price = FIFO Cost / (1 - Margin%)
+                                            </span>
+                                        </div>
+                                        <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                                            {managedShops.map(shop => {
+                                                const liveQty = Number(formData.stockByShop?.[shop.id]) || 0;
+                                                const sf = fifoInfo?.byShop?.[shop.id];
+                                                const effectiveFifoCost = (sf && sf.fifoUnitCost > 0) ? sf.fifoUnitCost : (parseFloat(formData.cost) || 0);
+                                                const totalShopValuation = liveQty * effectiveFifoCost;
+                                                const marginPct = Math.max(0, Math.min(99, parseFloat(shop.saleMargin) || 0));
+                                                const suggestedKhr = (effectiveFifoCost > 0 && marginPct > 0)
+                                                    ? Math.ceil((effectiveFifoCost / (1 - (marginPct / 100))) / 100) * 100
+                                                    : 0;
+
+                                                return (
+                                                    <div key={shop.id} className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                                                        <div>
+                                                            <div className="font-bold text-slate-200 flex items-center gap-1.5">
+                                                                <i className="fas fa-store text-orange-400 text-[10px]"></i>
+                                                                <span>{shop.name}</span>
+                                                                <span className="px-1.5 py-0.5 rounded bg-slate-700 text-slate-300 font-mono text-[10px]">
+                                                                    {liveQty} qty
+                                                                </span>
+                                                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[10px]">
+                                                                    Target: {marginPct}%
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-[11px] text-slate-400 font-mono mt-1">
+                                                                FIFO Cost: <strong className="text-amber-300">៛{khrFormatter.format(Math.round(effectiveFifoCost))}</strong>
+                                                                {' '}• Stock Val: <strong className="text-slate-200">៛{khrFormatter.format(Math.round(totalShopValuation))}</strong>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                                                            {suggestedKhr > 0 ? (
+                                                                <>
+                                                                    <div className="text-right">
+                                                                        <div className="text-[10px] uppercase text-slate-400 font-bold">Suggested Price</div>
+                                                                        <div className="text-sm font-black text-emerald-400 font-mono">
+                                                                            ៛{khrFormatter.format(suggestedKhr)}
+                                                                        </div>
+                                                                    </div>
+                                                                    {!isViewMode && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => setFormData(prev => ({ ...prev, price: suggestedKhr }))}
+                                                                            className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] transition shadow"
+                                                                            title="Use this Suggested Price"
+                                                                        >
+                                                                            Use Price
+                                                                        </button>
+                                                                    )}
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-[11px] text-slate-500 italic">Set Shop Margin %</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* --- Stock by Shop Section --- */}
                                 <div>
