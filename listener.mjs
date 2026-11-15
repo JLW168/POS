@@ -5,7 +5,7 @@
  * 1. STRICT FAIL-CLOSED CHAT ID WHITELIST:
  *    - Previously, `if (allowedChatIds.length === 0) return true` and `if (!stripped) return true`
  *      caused the listener to scan and save ABA PayWay messages from ALL Telegram groups the user
- *      belonged to (e.g. "-5207801009", "-5433742888") even when those shops had NOT enabled
+ *      belonged to (e.g. "-5207801119", "-5433742788") even when those shops had NOT enabled
  *      ABA PayWay Auto-Verification!
  *    - Now dynamically syncs the `shops` collection from Firestore and ONLY allows Chat IDs
  *      belonging to shops where `khqrConfig.paywayVerifyEnabled !== false` and `khqrConfig.paywayChatId`
