@@ -13,6 +13,13 @@
         <meta name="apple-mobile-web-app-title" content="POS Terminal">
         <meta name="application-name" content="POS Terminal">
         <meta name="format-detection" content="telephone=no">
+
+        <!-- Preconnect to Critical CDNs for Faster Cold-Start Handshakes -->
+        <link rel="preconnect" href="https://unpkg.com" crossorigin>
+        <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+        <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+        <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+        <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
         
         <!-- Dynamic PWA Manifest & Native App Icon Generator -->
         <script>
@@ -211,17 +218,15 @@
         <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
         <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
         
-        <!-- Helper Libraries -->
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+        <!-- Helper Libraries (Deferred or On-Demand so they never block initial React + Babel boot) -->
         <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
-        <!-- NEW: Chart.js for Reports -->
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <!-- NEW: HTML5-QRCode for Mobile Camera Barcode & QR Scanning -->
-        <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+        <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+        <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+        <script defer src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script defer src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
         <!-- Custom Styles -->
         <style>
@@ -345,10 +350,42 @@
                     display: none;
                 }
             }
+            @keyframes boot-progress-indeterminate {
+                0% { transform: translateX(-100%) scaleX(0.35); }
+                50% { transform: translateX(0%) scaleX(0.65); }
+                100% { transform: translateX(120%) scaleX(0.35); }
+            }
+            .boot-progress-bar {
+                animation: boot-progress-indeterminate 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            }
         </style>
     </head>
     <body>
-        <div id="root"></div>
+        <div id="root">
+            <!-- 0ms Instant Native PWA Boot Splash (Eliminates blank screen while Babel & scripts initialize) -->
+            <div style="min-height: 100dvh; background: radial-gradient(circle at 50% 25%, #1e293b 0%, #0f172a 70%); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f8fafc; user-select: none;">
+                <div style="width: 76px; height: 76px; border-radius: 20px; background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #0f172a 100%); display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 20px 45px rgba(37, 99, 235, 0.32), inset 0 1px 1px rgba(255, 255, 255, 0.25); border: 1px solid rgba(96, 165, 250, 0.35); margin-bottom: 1.25rem;">
+                    <span style="font-size: 22px; font-weight: 900; letter-spacing: 0.04em; color: #ffffff; line-height: 1;">POS</span>
+                    <span style="margin-top: 4px; padding: 2px 7px; border-radius: 999px; background: #10b981; color: #052e16; font-size: 8px; font-weight: 900; letter-spacing: 0.08em;">TERMINAL</span>
+                </div>
+                <h1 id="solaris-boot-title" style="font-size: 1.35rem; font-weight: 800; margin: 0 0 0.35rem 0; letter-spacing: -0.01em; color: #f8fafc;">POS Terminal</h1>
+                <p id="solaris-boot-subtitle" style="font-size: 0.8rem; color: #94a3b8; margin: 0 0 1.35rem 0; font-weight: 500;">Launching workspace &amp; local catalog vault...</p>
+                <div style="width: 210px; height: 5px; background: rgba(51, 65, 85, 0.7); border-radius: 999px; overflow: hidden; position: relative;">
+                    <div class="boot-progress-bar" style="width: 100%; height: 100%; background: linear-gradient(90deg, #3b82f6, #10b981); border-radius: 999px;"></div>
+                </div>
+            </div>
+        </div>
+        <script>
+            // Hydrate custom app title into 0ms splash screen immediately from localStorage
+            try {
+                var cachedAppName = localStorage.getItem('solaris_cached_app_name');
+                if (cachedAppName) {
+                    document.title = cachedAppName;
+                    var bootTitleEl = document.getElementById('solaris-boot-title');
+                    if (bootTitleEl) bootTitleEl.textContent = cachedAppName;
+                }
+            } catch (e) {}
+        </script>
 
         <script type="text/babel">
     // --- 1. SETUP & CONFIGURATION ---
@@ -601,12 +638,12 @@
     auth.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(err => {
         console.warn("Session persistence warning:", err);
     });
-
-    // Safe Sign-Out helper that cleans up active listeners and session markers before signing out
+    //Safe Sign-Out helper that cleans up active listeners and session markers before signing out
     window.safeSignOut = async () => {
         try {
             sessionStorage.removeItem(AUTH_SESSION_ACTIVE_KEY);
             localStorage.removeItem(AUTH_LAST_ACTIVE_TS_KEY);
+            localStorage.removeItem('solaris_last_active_profile_v1');
             if (window.SolarisPayWayVerifier) {
                 window.SolarisPayWayVerifier.stopSharedListeners();
             }
@@ -3600,7 +3637,14 @@
         const [productSyncStatus, setProductSyncStatus] = useState(() => window.SolarisSmartProductEngine.syncStatus);
         
         // --- NEW: System Config State ---
-        const [systemConfig, setSystemConfig] = useState({ appName: 'PO System' });
+        const [systemConfig, setSystemConfig] = useState(() => {
+            try {
+                const cachedName = localStorage.getItem('solaris_cached_app_name');
+                return { appName: cachedName || 'PO System' };
+            } catch (e) {
+                return { appName: 'PO System' };
+            }
+        });
 
         // --- NEW: Device Management State (PHASE 1) ---
         const { data: devices, loading: devicesLoading } = useCollection('devices');
@@ -3685,7 +3729,11 @@
         useEffect(() => {
             const unsubscribe = db.collection('system').doc('config').onSnapshot(doc => {
                 if (doc.exists) {
-                    setSystemConfig(prev => ({ ...prev, ...doc.data() }));
+                    const data = doc.data() || {};
+                    setSystemConfig(prev => ({ ...prev, ...data }));
+                    if (data.appName) {
+                        try { localStorage.setItem('solaris_cached_app_name', data.appName); } catch (e) {}
+                    }
                 }
             }, (error) => {
                 // Silently handle permission errors if rules are strict
@@ -4574,13 +4622,21 @@
         const [error, setError] = useState('');
         const [loading, setLoading] = useState(false);
         
-        const [appName, setAppName] = useState('PO System');
+        const [appName, setAppName] = useState(() => {
+            try {
+                return localStorage.getItem('solaris_cached_app_name') || 'PO System';
+            } catch (e) {
+                return 'PO System';
+            }
+        });
 
         useEffect(() => {
             db.collection('system').doc('config').get().then(doc => {
                 if(doc.exists && doc.data().appName) {
-                    setAppName(doc.data().appName);
-                    document.title = doc.data().appName;
+                    const fetchedName = doc.data().appName;
+                    setAppName(fetchedName);
+                    document.title = fetchedName;
+                    try { localStorage.setItem('solaris_cached_app_name', fetchedName); } catch (e) {}
                 }
             }).catch(err => {
                 if (err.code !== 'permission-denied') console.log("Config fetch error", err);
@@ -30087,7 +30143,25 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
     // --- 10. ROOT APP COMPONENT ---
 
     function App() {
-        const [authState, setAuthState] = useState({ loading: true, userProfile: null });
+        // 0ms Optimistic Auth Hydration: If an active tab session and recent (<30m) cached profile exist,
+        // mount directly into Dashboard without flashing the "Authenticating..." screen!
+        const [authState, setAuthState] = useState(() => {
+            try {
+                const hasActiveTabSession = sessionStorage.getItem(AUTH_SESSION_ACTIVE_KEY) === '1';
+                const lastActiveTs = parseInt(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0', 10);
+                const isNotExpired = lastActiveTs > 0 && (Date.now() - lastActiveTs <= MAX_INACTIVITY_MS);
+                if (hasActiveTabSession && isNotExpired) {
+                    const cachedLastProfile = localStorage.getItem('solaris_last_active_profile_v1');
+                    if (cachedLastProfile) {
+                        const parsed = JSON.parse(cachedLastProfile);
+                        if (parsed && parsed.uid) {
+                            return { loading: false, userProfile: parsed };
+                        }
+                    }
+                }
+            } catch (e) {}
+            return { loading: true, userProfile: null };
+        });
 
         useEffect(() => {
             const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
@@ -30105,6 +30179,18 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                     }
 
                     const cachedProfileKey = `solaris_user_profile_${firebaseUser.uid}`;
+
+                    // Fast-path: Immediately unlock UI using cached user profile in 0ms while verifying in background
+                    try {
+                        const rawCached = localStorage.getItem(cachedProfileKey);
+                        if (rawCached) {
+                            const cachedObj = JSON.parse(rawCached);
+                            if (cachedObj && cachedObj.uid === firebaseUser.uid) {
+                                setAuthState(prev => (prev.loading ? { loading: false, userProfile: cachedObj } : prev));
+                            }
+                        }
+                    } catch (e) {}
+
                     try {
                         let querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
 
@@ -30122,7 +30208,10 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             const userDoc = querySnapshot.docs[0];
                             const profileObj = { id: userDoc.id, ...userDoc.data() };
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                            try { localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj)); } catch (e) {}
+                            try {
+                                localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
+                                localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(profileObj));
+                            } catch (e) {}
                             setAuthState({ loading: false, userProfile: profileObj });
                         } else {
                             // Auto-provision Admin profile in the new database if no profile document exists yet
@@ -30138,7 +30227,10 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             const docRef = await db.collection("users").add(newProfileData);
                             const profileObj = { id: docRef.id, ...newProfileData };
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                            try { localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj)); } catch (e) {}
+                            try {
+                                localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
+                                localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(profileObj));
+                            } catch (e) {}
                             setAuthState({ loading: false, userProfile: profileObj });
                         }
                     } catch (error) {
@@ -30163,10 +30255,12 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             };
                         }
                         localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
+                        try { localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(fallbackProfile)); } catch (e) {}
                         setAuthState({ loading: false, userProfile: fallbackProfile });
                     }
                 } else {
                     sessionStorage.removeItem(AUTH_SESSION_ACTIVE_KEY);
+                    localStorage.removeItem('solaris_last_active_profile_v1');
                     setAuthState({ loading: false, userProfile: null });
                 }
             });
