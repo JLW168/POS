@@ -3001,7 +3001,8 @@
                         usdAccount: s.khqrConfig.usdAccount || '',
                         exchangeRate: s.khqrConfig.exchangeRate || 4000,
                         baseEmvPayload: s.khqrConfig.baseEmvPayload || '',
-                        staticQrImage: s.khqrConfig.staticQrImage || ''
+                        staticQrImage: s.khqrConfig.staticQrImage || '',
+                        bankStateFeedMode: s.khqrConfig.bankStateFeedMode || 'on-demand'
                     } : null
                 }));
                 localStorage.setItem('solaris_cached_shops_list', JSON.stringify(lightShops));
@@ -5752,25 +5753,31 @@
                     }}
                 />
 
-                {/* Modals */}
+                {/* MODALS */}
                 {showPaymentModal && (
-                    <PaymentModal 
-                        total={cartTotal} 
+                    <PaymentModal
+                        total={cartTotal}
                         cart={cart}
                         products={products}
                         loyaltyRule={activeLoyaltyRule}
                         customer={selectedCustomerObj}
                         shop={effectiveCurrentShopObj}
                         systemConfig={systemConfig}
-                        onConfirm={handleProcessSale} 
-                        onCancel={() => setShowPaymentModal(false)}
+                        onConfirm={handleProcessSale}
+                        onCancel={() => {
+                            setShowPaymentModal(false);
+                            refocusSearchInput();
+                        }}
                         isProcessing={isProcessing}
                     />
                 )}
                 {showReceiptModal && lastSaleData && (
-                    <ReceiptModal 
-                        saleData={lastSaleData} 
-                        onClose={() => setShowReceiptModal(false)} 
+                    <ReceiptModal
+                        saleData={lastSaleData}
+                        onClose={() => {
+                            setShowReceiptModal(false);
+                            refocusSearchInput();
+                        }}
                     />
                 )}
                 {thankYouModalData && (
@@ -5779,8 +5786,6 @@
                         onClose={() => setThankYouModalData(null)}
                     />
                 )}
-                
-                {/* PHASE 3 MODALS */}
                 {showSalesHistory && (
                     <SalesHistoryModal 
                         shopId={selectedShopId} 
@@ -5789,6 +5794,34 @@
                         onClose={() => setShowSalesHistory(false)}
                         onReprint={(sale) => { setLastSaleData(sale); setShowReceiptModal(true); }}
                         userProfile={userProfile}
+                        onSaleVoided={(voidedSale) => {
+                            if (!voidedSale) return;
+                            const grandTotal = Number(voidedSale.grandTotal) || 0;
+                            const isCash = voidedSale.paymentMethod === 'Cash';
+                            setTodaySales(prev => prev.map(s => s.id === voidedSale.id ? { ...s, status: 'void' } : s));
+                            setCurrentShift(prev => {
+                                if (!prev || (voidedSale.shiftId && prev.id !== voidedSale.shiftId)) return prev;
+                                const updatedShift = {
+                                    ...prev,
+                                    totalSales: Math.max(0, (Number(prev.totalSales) || 0) - grandTotal),
+                                    transactionCount: Math.max(0, (Number(prev.transactionCount) || 0) - 1),
+                                    totalCashSales: isCash ? Math.max(0, (Number(prev.totalCashSales) || 0) - grandTotal) : (Number(prev.totalCashSales) || 0),
+                                    totalKHQRSales: !isCash ? Math.max(0, (Number(prev.totalKHQRSales) || 0) - grandTotal) : (Number(prev.totalKHQRSales) || 0)
+                                };
+                                if (localShiftStorageKey) {
+                                    try { localStorage.setItem(localShiftStorageKey, JSON.stringify(updatedShift)); } catch (e) {}
+                                }
+                                try {
+                                    const cachedShifts = JSON.parse(localStorage.getItem('solaris_shifts_report_cache_v1') || '[]');
+                                    const nextCached = [
+                                        updatedShift,
+                                        ...(Array.isArray(cachedShifts) ? cachedShifts.filter(s => s.id !== updatedShift.id) : [])
+                                    ].slice(0, 200);
+                                    localStorage.setItem('solaris_shifts_report_cache_v1', JSON.stringify(nextCached));
+                                } catch (e) {}
+                                return updatedShift;
+                            });
+                        }}
                     />
                 )}
                 {showDailyReport && (
@@ -7904,53 +7937,41 @@
         const [actualBankUSD, setActualBankUSD] = useState('');
         const [closingFloatCash, setClosingFloatCash] = useState('');
         const [note, setNote] = useState('');
-
         const [loading, setLoading] = useState(false);
         const [error, setError] = useState('');
         const [showBillCounter, setShowBillCounter] = useState(null); // 'KHR' | 'USD' | null
         const [closedShiftData, setClosedShiftData] = useState(null);
-
-        const shiftSummaryRef = useRef(null);
         const [isSavingImage, setIsSavingImage] = useState(false);
+        const shiftSummaryRef = useRef(null);
 
-        const formatNumber = useCallback((value) => {
-            if (!value && value !== 0) return '';
-            const raw = String(value).replace(/[^0-9.]/g, '');
-            if (!raw) return '';
-            const parts = raw.split('.');
-            parts[0] = parseInt(parts[0], 10).toLocaleString('en-US');
-            return parts.join('.');
+        const formatNumber = useCallback((val) => {
+            if (val === null || val === undefined || val === '') return '';
+            const clean = String(val).replace(/[^0-9.]/g, '');
+            if (!clean) return '';
+            const parts = clean.split('.');
+            parts[0] = (parseInt(parts[0], 10) || 0).toLocaleString('en-US');
+            return parts.length > 1 ? `${parts[0]}.${parts[1].slice(0, 2)}` : parts[0];
         }, []);
 
-        const parseNumber = useCallback((value) => {
-            if (!value) return 0;
-            return parseFloat(String(value).replace(/,/g, '')) || 0;
+        const parseNumber = useCallback((val) => {
+            if (val === null || val === undefined || val === '') return 0;
+            const num = parseFloat(String(val).replace(/,/g, ''));
+            return isNaN(num) ? 0 : num;
         }, []);
 
-        const handleCurrencyInput = (setter) => (e) => {
-            const val = e.target.value;
-            if (/^[0-9.,]*$/.test(val)) {
-                setter(formatNumber(val));
-            }
-        };
+        const handleCurrencyInput = useCallback((setter) => (e) => {
+            setter(formatNumber(e.target.value));
+        }, [formatNumber]);
 
-        // Initialize start cash from shop's float cash configuration when opening a new shift
-        useEffect(() => {
-            if (!currentShift && !startCash && shopObj?.floatCash) {
-                setStartCash(formatNumber(shopObj.floatCash));
-            }
-        }, [currentShift, shopObj, startCash, formatNumber]);
-
-        // Unified Shift Sales Statistics (Computed directly from todaySales + fallback cloud fetch only if needed)
+        // Unified Shift Sales Statistics (Computed directly from todaySales + Local Ledger + fallback cloud fetch)
         const [cloudShiftSales, setCloudShiftSales] = useState(null);
         useEffect(() => {
             if (!currentShift?.id) return;
-            const localMatches = (todaySales || []).filter(s => s.shiftId === currentShift.id);
-            if (localMatches.length === 0 && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
+            if (!window.SolarisPayWayVerifier?.isQuotaExceeded) {
                 db.collection('sales').where('shiftId', '==', currentShift.id).get()
                     .then(snap => {
                         if (!snap.empty) {
-                            setCloudShiftSales(snap.docs.map(doc => doc.data()));
+                            setCloudShiftSales(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
                         }
                     })
                     .catch(() => {});
@@ -7959,32 +7980,65 @@
 
         const shiftSalesStats = useMemo(() => {
             if (!currentShift?.id) {
-                return { gross: 0, discount: 0, net: 0, cost: 0, margin: 0, voidCount: 0, voidAmount: 0 };
+                return {
+                    gross: 0, discount: 0, net: 0, cost: 0, margin: 0,
+                    voidCount: 0, voidAmount: 0, voidCashAmount: 0, voidBankAmount: 0,
+                    liveCashSales: 0, liveBankSales: 0, activeCount: 0
+                };
             }
-            const localMatches = (todaySales || []).filter(s => s.shiftId === currentShift.id);
-            const sourceSales = (cloudShiftSales && cloudShiftSales.length > localMatches.length)
-                ? cloudShiftSales
-                : localMatches;
+            const mergedSalesMap = new Map();
+            if (window.SolarisLocalSalesStore) {
+                window.SolarisLocalSalesStore.getSales().forEach(s => {
+                    if (s && s.id && s.shiftId === currentShift.id) mergedSalesMap.set(s.id, s);
+                });
+            }
+            (todaySales || []).forEach(s => {
+                if (s && s.id && s.shiftId === currentShift.id) {
+                    mergedSalesMap.set(s.id, { ...(mergedSalesMap.get(s.id) || {}), ...s });
+                }
+            });
+            (cloudShiftSales || []).forEach((s, idx) => {
+                const key = s.id || s.receiptNo || `cloud_${idx}`;
+                if (s && s.shiftId === currentShift.id) {
+                    mergedSalesMap.set(key, { ...(mergedSalesMap.get(key) || {}), ...s });
+                }
+            });
 
-            let gross = 0, discount = 0, net = 0, cost = 0, voidCount = 0, voidAmount = 0;
+            const sourceSales = Array.from(mergedSalesMap.values());
+
+            let gross = 0, discount = 0, net = 0, cost = 0;
+            let voidCount = 0, voidAmount = 0, voidCashAmount = 0, voidBankAmount = 0;
+            let liveCashSales = 0, liveBankSales = 0, activeCount = 0;
+
             sourceSales.forEach(d => {
+                const rev = Number(d.grandTotal) || 0;
+                const isCash = d.paymentMethod === 'Cash';
                 if (d.status === 'void') {
                     voidCount++;
-                    voidAmount += (Number(d.grandTotal) || 0);
+                    voidAmount += rev;
+                    if (isCash) voidCashAmount += rev;
+                    else voidBankAmount += rev;
                     return;
                 }
-                const rev = Number(d.grandTotal) || 0;
-                const disc = Number(d.discount) || 0;
+                activeCount++;
+                const disc = Number(d.discount) || (Number(d.manualDiscount || 0) + Number(d.redemptionAmount || 0));
                 gross += (Number(d.subtotal) || (rev + disc));
                 discount += disc;
                 net += rev;
                 cost += (Number(d.totalCost) || 0);
+                if (isCash) liveCashSales += rev;
+                else liveBankSales += rev;
             });
+
             const margin = net > 0 ? ((net - cost) / net) * 100 : 0;
-            return { gross, discount, net, cost, margin, voidCount, voidAmount };
+            return {
+                gross, discount, net, cost, margin,
+                voidCount, voidAmount, voidCashAmount, voidBankAmount,
+                liveCashSales, liveBankSales, activeCount
+            };
         }, [currentShift?.id, todaySales, cloudShiftSales]);
 
-        // Single Source of Truth for Live & Submitted Reconciliation Math
+        // Single Source of Truth for Live & Submitted Reconciliation Math (Automatically excludes Voided Cash & Voided Bank/KHQR)
         const reconciliation = useMemo(() => {
             const expectedFloat = parseFloat(currentShift?.startCash) || 0;
             const enteredFloat = parseNumber(closingFloatCash);
@@ -7999,9 +8053,14 @@
             const actualBankTotal = bankKHR + (bankUSD * currentRate);
             const actualCombinedTotal = actualCashTotal + actualBankTotal;
 
-            const expectedCashTotal = parseFloat(currentShift?.totalCashSales) || 0;
-            const expectedBankTotal = parseFloat(currentShift?.totalKHQRSales) || 0;
-            const sysGrandTotal = parseFloat(currentShift?.totalSales) || (expectedCashTotal + expectedBankTotal);
+            const hasLiveSalesRecords = (shiftSalesStats.activeCount + shiftSalesStats.voidCount) > 0;
+            const expectedCashTotal = hasLiveSalesRecords
+                ? shiftSalesStats.liveCashSales
+                : (parseFloat(currentShift?.totalCashSales) || 0);
+            const expectedBankTotal = hasLiveSalesRecords
+                ? shiftSalesStats.liveBankSales
+                : (parseFloat(currentShift?.totalKHQRSales) || 0);
+            const sysGrandTotal = expectedCashTotal + expectedBankTotal;
 
             const cashVariance = actualCashTotal - expectedCashTotal;
             const bankVariance = actualBankTotal - expectedBankTotal;
@@ -8025,7 +8084,7 @@
                 bankVariance,
                 totalVariance
             };
-        }, [currentShift, closingFloatCash, actualCashKHR, actualCashUSD, actualBankKHR, actualBankUSD, currentRate, parseNumber]);
+        }, [currentShift, shiftSalesStats, closingFloatCash, actualCashKHR, actualCashUSD, actualBankKHR, actualBankUSD, currentRate, parseNumber]);
 
         const handleApplyBillCount = (total) => {
             if (showBillCounter === 'KHR') {
@@ -8141,13 +8200,19 @@
                     difference: reconciliation.totalVariance,
                     status: 'closed',
                     closedBy: userProfile?.name || 'Staff',
+                    totalSales: reconciliation.sysGrandTotal,
+                    totalCashSales: reconciliation.expectedCashTotal,
+                    totalKHQRSales: reconciliation.expectedBankTotal,
+                    transactionCount: shiftSalesStats.activeCount || currentShift.transactionCount || 0,
                     statsGross: shiftSalesStats.gross || 0,
                     statsDiscount: shiftSalesStats.discount || 0,
-                    statsNet: shiftSalesStats.net || 0,
+                    statsNet: shiftSalesStats.net || reconciliation.sysGrandTotal || 0,
                     statsCost: shiftSalesStats.cost || 0,
                     statsMargin: shiftSalesStats.margin || 0,
                     statsVoidCount: shiftSalesStats.voidCount || 0,
-                    statsVoidAmount: shiftSalesStats.voidAmount || 0
+                    statsVoidAmount: shiftSalesStats.voidAmount || 0,
+                    statsVoidCashAmount: shiftSalesStats.voidCashAmount || 0,
+                    statsVoidBankAmount: shiftSalesStats.voidBankAmount || 0
                 };
 
                 try {
@@ -8607,6 +8672,12 @@
                                             <span>System Bank: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.expectedBankTotal)}</strong></span>
                                             <span>Counted: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.actualBankTotal)}</strong></span>
                                         </div>
+                                        {shiftSalesStats.voidBankAmount > 0 && (
+                                            <div className="flex justify-between items-center text-[11px] text-amber-300 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/25">
+                                                <span><i className="fas fa-ban mr-1"></i>Voided Bank/KHQR Excluded:</span>
+                                                <span className="font-mono font-bold">-៛{khrFormatter.format(shiftSalesStats.voidBankAmount)}</span>
+                                            </div>
+                                        )}
                                         <div className="flex justify-between text-[11px] text-slate-500 font-mono pt-0.5">
                                             <span>KHR: ៛{khrFormatter.format(reconciliation.bankKHR)}</span>
                                             <span>USD: ${reconciliation.bankUSD.toFixed(2)}</span>
@@ -10826,7 +10897,7 @@
     };
 
     // --- PHASE 3: Sales History & Void Logic (Reuses shared todaySales state from POSTerminal) ---
-    const SalesHistoryModal = ({ shopId, sales = [], loading = false, onClose, onReprint, userProfile }) => {
+    const SalesHistoryModal = ({ shopId, sales = [], loading = false, onClose, onReprint, userProfile, onSaleVoided }) => {
         const [voidingId, setVoidingId] = useState(null);
         const [expandedSaleId, setExpandedSaleId] = useState(null); // New state for row expansion
         const [saleToVoid, setSaleToVoid] = useState(null);
@@ -10911,7 +10982,7 @@
                 if (sale.shiftId) {
                     const shiftRef = db.collection("shifts").doc(sale.shiftId);
                     const isCash = sale.paymentMethod === 'Cash';
-                    const isKHQR = sale.paymentMethod === 'KHQR';
+                    const isKHQR = !isCash; // Covers 'KHQR', 'KHQR (ABA)', and 'Bank'
                     const grandTotal = parseFloat(sale.grandTotal) || 0;
 
                     const shiftUpdate = {
@@ -10925,16 +10996,19 @@
                         shiftUpdate.totalKHQRSales = firebase.firestore.FieldValue.increment(-grandTotal);
                     }
 
-                    batch.update(shiftRef, shiftUpdate);
+                    batch.set(shiftRef, shiftUpdate, { merge: true });
                 }
 
-                // Immediately mark void in local sales store so Sale Report updates in 0ms
+                // Immediately mark void in local sales store & parent shift state so Close Shift & Sale Report update in 0ms
                 if (window.SolarisLocalSalesStore) {
                     window.SolarisLocalSalesStore.markSaleVoid(sale.id, {
                         voidedAt: new Date().toISOString(),
                         voidedBy: userProfile?.name || 'Unknown',
                         voidReason: reason
                     });
+                }
+                if (typeof onSaleVoided === 'function') {
+                    onSaleVoided(sale);
                 }
 
                 await batch.commit();
@@ -17579,32 +17653,59 @@
                     if (rawDocs.length > 0) {
                         try {
                             const existingCache = JSON.parse(localStorage.getItem('solaris_shifts_report_cache_v1') || '[]');
-                            const map = new Map();
-                            if (Array.isArray(existingCache)) existingCache.forEach(s => { if (s?.id) map.set(s.id, s); });
-                            rawDocs.forEach(s => { if (s?.id) map.set(s.id, s); });
-                            localStorage.setItem('solaris_shifts_report_cache_v1', JSON.stringify(Array.from(map.values()).slice(0, 200)));
+                            const cacheMap = new Map();
+                            if (Array.isArray(existingCache)) {
+                                existingCache.forEach(s => { if (s && s.id) cacheMap.set(s.id, s); });
+                            }
+                            rawDocs.forEach(s => {
+                                if (s && s.id) {
+                                    cacheMap.set(s.id, {
+                                        ...(cacheMap.get(s.id) || {}),
+                                        ...s,
+                                        startTime: safeToDate(s.startTime)?.toISOString() || s.startTime,
+                                        endTime: safeToDate(s.endTime)?.toISOString() || s.endTime
+                                    });
+                                }
+                            });
+                            localStorage.setItem('solaris_shifts_report_cache_v1', JSON.stringify(Array.from(cacheMap.values()).slice(0, 200)));
                         } catch (e) {}
                     }
                     setShiftsData(applyLocalShiftOverrides(rawDocs, start, end));
                     setShiftsLoading(false);
                 }, err => {
-                    console.warn("Shifts report sync paused (using local cache):", err?.code || err?.message);
-                    setShiftsData(prev => applyLocalShiftOverrides(prev, start, end));
+                    console.warn("Shifts report sync fallback (using local cache):", err?.code || err?.message);
+                    setShiftsData(applyLocalShiftOverrides([], start, end));
                     setShiftsLoading(false);
                 });
                 return () => unsubscribe();
             }
         }, [activeTab, startDate, endDate, selectedShopId, userProfile, applyLocalShiftOverrides]);
 
-        // Reset Bank State Pagination on Filter Change
-        useEffect(() => {
-            setBankStateCurrentPage(1);
-        }, [startDate, endDate, selectedShopId, bankStateSearchTerm]);
-        
-        // --- FIXED: Bank State (TG Feed) Strict Shop Filter & On-Demand Fetch (0 Automatic Reads) ---
+        // --- FIXED: Bank State (TG Feed) Strict Shop Filter & Dynamic Mode (Configured Strictly in Settings → KHQR & ABA PayWay Configuration) ---
         const [hasFetchedBankStateOnce, setHasFetchedBankStateOnce] = useState(false);
         const [secretChatIdsByShop, setSecretChatIdsByShop] = useState({});
         const isRefreshingBankStateRef = useRef(false);
+
+        // Resolve configured Bank State Feed Mode ('live' vs 'on-demand') strictly from Settings → KHQR & ABA PayWay Configuration
+        const configuredBankStateFeedMode = useMemo(() => {
+            if (selectedShopId && selectedShopId !== 'All') {
+                const shopObj = shops.find(s => s.id === selectedShopId);
+                const secBackupMode = secretChatIdsByShop[selectedShopId]?.bankStateFeedMode;
+                const mode = shopObj?.khqrConfig?.bankStateFeedMode || secBackupMode || 'on-demand';
+                return mode === 'live' ? 'live' : 'on-demand';
+            }
+            // When 'All Shops' is selected, if any allowed shop is configured for 'live' in KHQR Settings, use 'live'
+            const allowedShops = userProfile?.role === 'Admin'
+                ? shops
+                : shops.filter(s => (userProfile?.assignedShops || []).includes(s.id));
+            const anyLive = (allowedShops || []).some(s => {
+                const secBackupMode = secretChatIdsByShop[s.id]?.bankStateFeedMode;
+                return (s?.khqrConfig?.bankStateFeedMode || secBackupMode) === 'live';
+            });
+            return anyLive ? 'live' : 'on-demand';
+        }, [selectedShopId, shops, userProfile, secretChatIdsByShop]);
+
+        const effectiveBankStateFeedMode = configuredBankStateFeedMode;
 
         const stripTgChatId = useCallback((rawId) => {
             return window.SolarisKHQREngine
@@ -17612,7 +17713,7 @@
                 : String(rawId || '').trim().replace(/^-100/, '').replace(/^-/, '').trim();
         }, []);
 
-        // Load fallback paywayChatId & accountName from `payway_secrets/{shopId}` only when user fetches Bank State
+        // Load fallback paywayChatId, accountName, and bankStateFeedMode from `payway_secrets/{shopId}`
         const ensureSecretChatIdsLoaded = useCallback(async () => {
             if (!shops || shops.length === 0 || !window.SolarisKHQREngine) return;
             if (Object.keys(secretChatIdsByShop).length > 0) return;
@@ -17623,7 +17724,8 @@
                             const sec = await window.SolarisKHQREngine.getStaffPaywaySecrets(s.id);
                             return [s.id, {
                                 paywayChatId: sec?.paywayChatId || sec?.khqrConfigBackup?.paywayChatId || '',
-                                accountName: sec?.khqrConfigBackup?.accountName || ''
+                                accountName: sec?.khqrConfigBackup?.accountName || '',
+                                bankStateFeedMode: sec?.bankStateFeedMode || sec?.khqrConfigBackup?.bankStateFeedMode || s?.khqrConfig?.bankStateFeedMode || 'on-demand'
                             }];
                         } catch (e) {
                             return [s.id, null];
@@ -17895,6 +17997,42 @@
                 setBankStateLoading(false);
             }
         }, [startDate, endDate, selectedShopId, shops, ensureSecretChatIdsLoaded]);
+
+        // --- INTEGRATED WORKFLOW: Auto-Subscribe & Stream in "Live Feed" Mode vs. Pause in "On-Demand Fetch" Mode ---
+        useEffect(() => {
+            if (activeTab !== 'bank-state') return;
+            if (effectiveBankStateFeedMode !== 'live') return;
+
+            let isMounted = true;
+            // 1. Trigger immediate fetch on entering Live Feed mode
+            refreshBankStateMultiSource(true, bankStateData.length === 0);
+
+            // 2. Subscribe to real-time SolarisPayWayVerifier stream (Firestore onSnapshot + Render SSE + Cross-Tab Bus)
+            let debounceTimer = null;
+            const unsubVerifier = window.SolarisPayWayVerifier
+                ? window.SolarisPayWayVerifier.subscribe(() => {
+                    if (!isMounted) return;
+                    if (debounceTimer) clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(() => {
+                        refreshBankStateMultiSource(false, false);
+                    }, 300);
+                })
+                : () => {};
+
+            // 3. Periodic background sync every 8 seconds while viewing Bank State in Live Feed mode
+            const intervalId = setInterval(() => {
+                if (isMounted && !document.hidden) {
+                    refreshBankStateMultiSource(true, false);
+                }
+            }, 8000);
+
+            return () => {
+                isMounted = false;
+                if (debounceTimer) clearTimeout(debounceTimer);
+                if (typeof unsubVerifier === 'function') unsubVerifier();
+                clearInterval(intervalId);
+            };
+        }, [activeTab, effectiveBankStateFeedMode, startDate, endDate, selectedShopId, refreshBankStateMultiSource]);
 
         // Purge stray / unconfigured Chat ID documents (e.g., -5207801009, -5433742888) from `/aba_payments`
         const handlePurgeUnconfiguredChatIdsFromDb = async () => {
@@ -19898,17 +20036,17 @@
                             </TableCard>
                         )}
 
-                        {/* NEW: Bank State (TG Feed) Log (Fetch-on-Demand Mode) */}
+                        {/* NEW: Bank State (TG Feed) Log (Mode Strictly Controlled by Settings → KHQR & ABA PayWay Configuration) */}
                         {activeTab === 'bank-state' && (
                             <TableCard title={`Bank State (Telegram Feed) - ${filteredBankStateData.length} Records`}>
-                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3">
-                                    <div className="relative w-full max-w-md">
+                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-row justify-between items-center gap-2.5">
+                                    <div className="relative flex-1 max-w-md min-w-0">
                                         <input
                                             type="text"
                                             value={bankStateSearchTerm}
                                             onChange={e => setBankStateSearchTerm(e.target.value)}
                                             placeholder="Search payer, bank, APV, or Invoice..."
-                                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 rounded-lg border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm h-[40px]"
                                         />
                                         <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
                                         {bankStateSearchTerm && (
@@ -19922,43 +20060,64 @@
                                         )}
                                     </div>
 
-                                    {/* On-Demand Fetch Controls */}
-                                    <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
-                                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs">
-                                            <span className={`w-2 h-2 rounded-full ${window.SolarisRenderBridge?.isConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
-                                            <span className="text-slate-300 font-semibold">Mode:</span>
-                                            <span className="font-mono text-sky-400">On-Demand Fetch</span>
+                                    {/* Compact Icon-Only Controls: Mode Status, Purge Unconfigured Chat IDs, & Fetch Bank Feed */}
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                        {/* 1. Mode Indicator Icon (Read-Only, Configured in Settings → KHQR & ABA PayWay Configuration) */}
+                                        <div
+                                            className={`w-10 h-10 rounded-xl border flex items-center justify-center relative shrink-0 ${
+                                                effectiveBankStateFeedMode === 'live'
+                                                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                                                    : 'bg-sky-500/15 border-sky-500/40 text-sky-300'
+                                            }`}
+                                            title={
+                                                effectiveBankStateFeedMode === 'live'
+                                                    ? 'Mode: Live Feed (Configured in Settings → KHQR & ABA PayWay Configuration)'
+                                                    : 'Mode: On-Demand Fetch (Configured in Settings → KHQR & ABA PayWay Configuration)'
+                                            }
+                                        >
+                                            {effectiveBankStateFeedMode === 'live' ? (
+                                                <>
+                                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping absolute top-1.5 right-1.5"></span>
+                                                    <i className="fas fa-satellite-dish text-sm text-emerald-400"></i>
+                                                </>
+                                            ) : (
+                                                <i className="fas fa-hand-pointer text-sm text-sky-400"></i>
+                                            )}
                                         </div>
 
+                                        {/* 2. Purge Unconfigured Chat IDs Icon Button */}
                                         <button
                                             type="button"
                                             onClick={handlePurgeUnconfiguredChatIdsFromDb}
                                             disabled={bankStateLoading}
-                                            className="px-3 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 text-xs font-bold transition flex items-center gap-1.5"
-                                            title="Remove records from unconfigured Chat IDs (e.g. -5207801009, -5433742888) out of /aba_payments"
+                                            className="w-10 h-10 rounded-xl bg-red-600/20 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/40 transition flex items-center justify-center active:scale-95 disabled:opacity-50"
+                                            title="Purge Unconfigured Chat IDs from /aba_payments"
                                         >
-                                            <i className="fas fa-broom"></i>
-                                            <span>Purge Unconfigured Chat IDs</span>
+                                            <i className="fas fa-broom text-sm"></i>
                                         </button>
 
+                                        {/* 3. Fetch / Refresh Bank Feed Icon Button */}
                                         <button
                                             type="button"
                                             disabled={bankStateLoading}
                                             onClick={() => refreshBankStateMultiSource(true, true)}
-                                            className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-emerald-900/30 disabled:opacity-50"
-                                            title="Fetch Bank Feed for Selected Shop and Date Range"
+                                            className="w-10 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition flex items-center justify-center shadow-md shadow-emerald-900/30 active:scale-95 disabled:opacity-50"
+                                            title={effectiveBankStateFeedMode === 'live' ? 'Refresh Bank Feed Now' : 'Fetch Bank Feed'}
                                         >
-                                            <i className={`fas ${bankStateLoading ? 'fa-spinner fa-spin' : 'fa-cloud-download-alt'}`}></i>
-                                            <span>{bankStateLoading ? 'Fetching Bank Feed...' : 'Fetch Bank Feed'}</span>
+                                            <i className={`fas ${bankStateLoading ? 'fa-spinner fa-spin' : 'fa-cloud-download-alt'} text-sm`}></i>
                                         </button>
                                     </div>
                                 </div>
                                 {bankStateLoading ? (
                                     <div className="flex flex-col items-center justify-center p-10 text-slate-300 gap-3">
                                         <div className="loader"></div>
-                                        <span className="text-sm font-medium">Fetching bank transactions for {startDate} to {endDate}...</span>
+                                        <span className="text-sm font-medium">
+                                            {effectiveBankStateFeedMode === 'live'
+                                                ? `Synchronizing Live Bank Feed for ${startDate} to ${endDate}...`
+                                                : `Fetching bank transactions for ${startDate} to ${endDate}...`}
+                                        </span>
                                     </div>
-                                ) : !hasFetchedBankStateOnce && bankStateData.length === 0 ? (
+                                ) : effectiveBankStateFeedMode === 'on-demand' && !hasFetchedBankStateOnce && bankStateData.length === 0 ? (
                                     <div className="text-center p-10 bg-slate-900/40 rounded-xl border border-slate-700/80 space-y-3">
                                         <div className="w-14 h-14 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center mx-auto">
                                             <i className="fas fa-university text-2xl"></i>
@@ -19966,17 +20125,19 @@
                                         <div>
                                             <h5 className="text-base font-bold text-slate-200">On-Demand Bank Feed Ready</h5>
                                             <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
-                                                Automatic background reads are paused to save Firebase quota. Click below to fetch ABA PayWay transactions for your selected shop and date range.
+                                                This branch is configured in <strong>Settings &rarr; KHQR &amp; ABA PayWay Configuration</strong> as <strong>On-Demand Fetch</strong> to conserve Firebase quota. Click below to fetch ABA PayWay transactions on demand.
                                             </p>
                                         </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => refreshBankStateMultiSource(true, true)}
-                                            className="mt-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-black inline-flex items-center gap-2 shadow-lg shadow-emerald-900/40 transition active:scale-95"
-                                        >
-                                            <i className="fas fa-cloud-download-alt"></i>
-                                            <span>Fetch Bank Feed Now</span>
-                                        </button>
+                                        <div className="flex items-center justify-center gap-2.5 pt-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => refreshBankStateMultiSource(true, true)}
+                                                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-black inline-flex items-center gap-2 shadow-lg shadow-emerald-900/40 transition active:scale-95"
+                                            >
+                                                <i className="fas fa-cloud-download-alt"></i>
+                                                <span>Fetch Bank Feed Now</span>
+                                            </button>
+                                        </div>
                                     </div>
                                 ) : filteredBankStateData.length === 0 ? (
                                     <div className="text-center p-8 text-slate-400 space-y-3">
@@ -25218,6 +25379,7 @@
                         requireRemoteKhqr: cfg.requireRemoteKhqr !== undefined ? !!cfg.requireRemoteKhqr : false,
                         remoteThresholdMeters: cfg.remoteThresholdMeters !== undefined ? Number(cfg.remoteThresholdMeters) : 100,
                         paywayVerifyEnabled: cfg.paywayVerifyEnabled !== undefined ? !!cfg.paywayVerifyEnabled : true,
+                        bankStateFeedMode: cfg.bankStateFeedMode || 'on-demand',
                         qrValidMinutes: cfg.qrValidMinutes !== undefined ? Number(cfg.qrValidMinutes) : 2,
                         autoVerifyWindowMinutes: cfg.autoVerifyWindowMinutes !== undefined ? Number(cfg.autoVerifyWindowMinutes) : 5,
                         paywayChatId: savedPaywayChatId,
@@ -25297,6 +25459,7 @@
                         requireRemoteKhqr: !!cfg.requireRemoteKhqr,
                         remoteThresholdMeters: Number(cfg.remoteThresholdMeters) || 100,
                         paywayVerifyEnabled: cfg.paywayVerifyEnabled !== undefined ? !!cfg.paywayVerifyEnabled : true,
+                        bankStateFeedMode: cfg.bankStateFeedMode || 'on-demand',
                         qrValidMinutes: Number(cfg.qrValidMinutes) || 2,
                         autoVerifyWindowMinutes: Number(cfg.autoVerifyWindowMinutes) || 5,
                         paywayChatId: String(cfg.paywayChatId || '').trim(),
@@ -25415,6 +25578,7 @@
                     requireRemoteKhqr: !!formData.requireRemoteKhqr,
                     remoteThresholdMeters: Number(formData.remoteThresholdMeters) || 100,
                     paywayVerifyEnabled: !!formData.paywayVerifyEnabled,
+                    bankStateFeedMode: formData.bankStateFeedMode === 'live' ? 'live' : 'on-demand',
                     qrValidMinutes: Math.max(1, Number(formData.qrValidMinutes) || 2),
                     autoVerifyWindowMinutes: Math.max(1, Number(formData.autoVerifyWindowMinutes) || 5),
                     paywayChatId: String(formData.paywayChatId || '').trim(),
@@ -25432,6 +25596,7 @@
                     shopId: filterShop,
                     shopName: shops.find(s => s.id === filterShop)?.name || '',
                     paywayChatId: cleanKhqrConfig.paywayChatId,
+                    bankStateFeedMode: cleanKhqrConfig.bankStateFeedMode,
                     tgApiId: String(secretFormData.tgApiId || '').trim(),
                     tgApiHash: String(secretFormData.tgApiHash || '').trim(),
                     tgPhone: String(secretFormData.tgPhone || '').trim(),
@@ -25454,6 +25619,14 @@
                 await db.collection('shops').doc(filterShop).set({
                     khqrConfig: cleanKhqrConfig
                 }, { merge: true });
+
+                // 4. Notify Render Listener Bridge (`listener.mjs`) immediately so it reloads `bankStateFeedMode` & Chat ID whitelist in 0ms
+                if (window.SolarisRenderBridge?.baseUrl) {
+                    fetch(`${window.SolarisRenderBridge.baseUrl}/sync-config?shopId=${encodeURIComponent(filterShop)}&mode=${encodeURIComponent(cleanKhqrConfig.bankStateFeedMode)}`, {
+                        mode: 'cors',
+                        cache: 'no-store'
+                    }).catch(() => {});
+                }
 
                 showToast("KHQR settings & Staff-Only Telegram MTProto credentials saved to Firestore!", "success");
             } catch (err) {
@@ -25676,6 +25849,59 @@
 
                                 {formData.paywayVerifyEnabled && (
                                     <div className="p-4 rounded-2xl bg-sky-50/60 border border-sky-200 space-y-3 animate-fade-in-up">
+                                        {/* Bank State (Telegram Feed) Report Mode Selector: Live Feed vs. On-Demand Fetch */}
+                                        <div className="bg-white p-3.5 rounded-xl border border-sky-200 shadow-sm space-y-2">
+                                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                                <div>
+                                                    <label className="block text-[11px] font-black text-stone-800 uppercase tracking-wider flex items-center gap-1.5">
+                                                        <i className="fa-solid fa-satellite-dish text-sky-600"></i>
+                                                        <span>Bank State (Telegram Feed) Report Mode</span>
+                                                    </label>
+                                                    <p className="text-[11px] text-stone-500 mt-0.5">
+                                                        Controls how <b>Sale Report &rarr; Bank State (TG Feed)</b> loads Telegram bank transactions for this branch.
+                                                    </p>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-1.5 bg-stone-100 p-1 rounded-xl border border-stone-200 shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setFormData({ ...formData, bankStateFeedMode: 'live' })}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center justify-center gap-1.5 transition ${
+                                                            formData.bankStateFeedMode === 'live'
+                                                                ? 'bg-emerald-600 text-white shadow-sm'
+                                                                : 'text-stone-600 hover:text-stone-900'
+                                                        }`}
+                                                    >
+                                                        <span className={`w-2 h-2 rounded-full ${formData.bankStateFeedMode === 'live' ? 'bg-white animate-ping' : 'bg-emerald-500'}`}></span>
+                                                        <span>Live Feed</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setFormData({ ...formData, bankStateFeedMode: 'on-demand' })}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center justify-center gap-1.5 transition ${
+                                                            (formData.bankStateFeedMode || 'on-demand') === 'on-demand'
+                                                                ? 'bg-sky-600 text-white shadow-sm'
+                                                                : 'text-stone-600 hover:text-stone-900'
+                                                        }`}
+                                                    >
+                                                        <i className="fa-solid fa-cloud-arrow-down text-[10px]"></i>
+                                                        <span>On-Demand Fetch</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className={`text-[11px] px-3 py-1.5 rounded-lg border flex items-center gap-2 ${
+                                                formData.bankStateFeedMode === 'live'
+                                                    ? 'bg-emerald-50/80 border-emerald-200 text-emerald-800'
+                                                    : 'bg-sky-50/80 border-sky-200 text-sky-800'
+                                            }`}>
+                                                <i className={`fa-solid ${formData.bankStateFeedMode === 'live' ? 'fa-bolt text-emerald-600' : 'fa-shield-halved text-sky-600'}`}></i>
+                                                <span>
+                                                    {formData.bankStateFeedMode === 'live'
+                                                        ? 'Live Feed Active: Sale Report → Bank State (TG Feed) will automatically stream and refresh incoming ABA PayWay transactions in real time.'
+                                                        : 'On-Demand Fetch Active (Quota Saver): Sale Report → Bank State (TG Feed) pauses background reads until you click "Fetch Bank Feed".'}
+                                                </span>
+                                            </div>
+                                        </div>
+
                                         {/* Step 1: Target Group Chat ID & Recency Window Settings */}
                                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                                             <div className="sm:col-span-2">
