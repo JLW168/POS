@@ -18384,8 +18384,11 @@
         const [productSearchTerm, setProductSearchTerm] = useState('');
         const [productTierFilter, setProductTierFilter] = useState('ALL'); // 'ALL' | 'HOT' | 'FAST' | 'STEADY' | 'SLOW'
         const [productSortBy, setProductSortBy] = useState('hotScore'); // 'hotScore' | 'qty' | 'revenue' | 'profit' | 'margin'
+        
+        const [monthFilter, setMonthFilter] = useState(() => String(new Date().getMonth()));
+        const [yearFilter, setYearFilter] = useState(() => String(new Date().getFullYear()));
 
-        // Helper for Quick Date Ranges (Includes 1 Month, 3 Months, 6 Months, 1 Year & Custom)
+        // Helper for Quick Date Ranges (Includes Specific Month/Year & Custom)
         const setDateRange = (type) => {
             setDateRangePreset(type);
             if (type === 'custom') return;
@@ -18413,23 +18416,27 @@
             } else if (type === 'lastMonth') {
                 start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
                 end = new Date(today.getFullYear(), today.getMonth(), 0);
-            } else if (type === '1month') {
-                start = new Date(today);
-                start.setMonth(today.getMonth() - 1);
-            } else if (type === '3months') {
-                start = new Date(today);
-                start.setMonth(today.getMonth() - 3);
-            } else if (type === '6months') {
-                start = new Date(today);
-                start.setMonth(today.getMonth() - 6);
-            } else if (type === '1year') {
-                start = new Date(today);
-                start.setFullYear(today.getFullYear() - 1);
+            } else if (type === 'monthYear') {
+                const m = parseInt(monthFilter, 10);
+                const y = parseInt(yearFilter, 10);
+                start = new Date(y, m, 1);
+                end = new Date(y, m + 1, 0);
             }
 
             setStartDate(start.toLocaleDateString('en-CA'));
             setEndDate(end.toLocaleDateString('en-CA'));
         };
+
+        useEffect(() => {
+            if (dateRangePreset === 'monthYear') {
+                const m = parseInt(monthFilter, 10);
+                const y = parseInt(yearFilter, 10);
+                const start = new Date(y, m, 1);
+                const end = new Date(y, m + 1, 0);
+                setStartDate(start.toLocaleDateString('en-CA'));
+                setEndDate(end.toLocaleDateString('en-CA'));
+            }
+        }, [dateRangePreset, monthFilter, yearFilter]);
 
         // Initialize Shop Filter based on Role
         useEffect(() => {
@@ -20828,10 +20835,7 @@
                                         <option value="lastWeek">⏪ Last Week</option>
                                         <option value="thisMonth">🗓️ This Month</option>
                                         <option value="lastMonth">📁 Last Month</option>
-                                        <option value="1month">🔥 Last 1 Month (30 Days)</option>
-                                        <option value="3months">🔥 Last 3 Months (Quarter)</option>
-                                        <option value="6months">🔥 Last 6 Months (Half-Year)</option>
-                                        <option value="1year">🔥 Last 1 Year (365 Days)</option>
+                                        <option value="monthYear">🗂️ Specific Month / Year</option>
                                         <option value="custom">⚙️ Custom Date Range ({startDate} to {endDate})</option>
                                     </select>
                                     <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-slate-400">
@@ -26108,40 +26112,32 @@
                     <form onSubmit={handleSubmitVendor} className="p-6 bg-slate-900/50 rounded-lg border border-slate-700">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">
-                                    <i className="fas fa-building text-orange-400 mr-2"></i>Vendor Name
-                                </label>
-                                <input type="text" name="name" placeholder="Vendor Name" value={formData.name} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md" required />
+                                <label className="block text-sm font-medium text-slate-300 mb-1">Vendor Name *</label>
+                                <input type="text" name="name" value={formData.name} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md outline-none" required />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">
-                                    <i className="fas fa-address-book text-blue-400 mr-2"></i>Contact Info
-                                </label>
-                                <input type="text" name="contact" placeholder="Contact Info" value={formData.contact} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md" required />
+                                <label className="block text-sm font-medium text-slate-300 mb-1">Contact Info</label>
+                                <input type="text" name="contact" value={formData.contact} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md outline-none" />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">
-                                    <i className="fas fa-flag text-red-400 mr-2"></i>Priority
-                                </label>
-                                <select name="priority" value={formData.priority} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md h-[42px]">
+                                <label className="block text-sm font-medium text-slate-300 mb-1">Priority</label>
+                                <select name="priority" value={formData.priority} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md outline-none">
                                     <option value="High">High</option>
                                     <option value="Medium">Medium</option>
                                     <option value="Low">Low</option>
                                 </select>
                             </div>
                         </div>
-                        <div className="mt-6 text-right space-x-3">
-                            {editId && <button type="button" onClick={resetForm} className="bg-slate-600 font-bold py-2 px-6 rounded-lg hover:bg-slate-500">Cancel</button>}
-                            <button type="submit" className={`${editId ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'} text-white font-bold py-2 px-6 rounded-lg`}>
-                                {editId ? 'Update' : 'Add'}
-                            </button>
+                        <div className="mt-6 flex justify-end gap-3">
+                            <button type="button" onClick={resetForm} className="bg-slate-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-slate-500">Clear</button>
+                            <button type="submit" className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700">{editId ? 'Update Vendor' : 'Add Vendor'}</button>
                         </div>
                     </form>
                 </Card>
 
-                <TableCard title="Existing Vendors">
-                    <div className="mb-4 border-b border-slate-700 pb-4 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3">
-                        <div className="w-full max-w-sm">
+                <TableCard title="Vendor Management">
+                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col sm:flex-row justify-between items-center gap-4">
+                        <div className="flex-1 w-full max-w-sm">
                             <label className="block text-sm font-medium text-slate-300 mb-1">
                                 <i className="fas fa-search text-purple-400 mr-2"></i>Search Vendor
                             </label>
