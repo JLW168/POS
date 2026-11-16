@@ -18376,7 +18376,13 @@
         const [startDate, setStartDate] = useState(new Date().toLocaleDateString('en-CA'));
         const [endDate, setEndDate] = useState(new Date().toLocaleDateString('en-CA'));
 
-        // Helper for Quick Date Ranges
+        // --- NEW: Smart Sales by Product & Vendor Hot-Sale Engine State ---
+        const [productReportMode, setProductReportMode] = useState('products'); // 'products' | 'vendors'
+        const [productSearchTerm, setProductSearchTerm] = useState('');
+        const [productTierFilter, setProductTierFilter] = useState('ALL'); // 'ALL' | 'HOT' | 'FAST' | 'STEADY' | 'SLOW'
+        const [productSortBy, setProductSortBy] = useState('hotScore'); // 'hotScore' | 'qty' | 'revenue' | 'profit' | 'margin'
+
+        // Helper for Quick Date Ranges (Includes 1 Month, 3 Months, 6 Months, 1 Year & Custom)
         const setDateRange = (type) => {
             setDateRangePreset(type);
             if (type === 'custom') return;
@@ -18404,6 +18410,18 @@
             } else if (type === 'lastMonth') {
                 start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
                 end = new Date(today.getFullYear(), today.getMonth(), 0);
+            } else if (type === '1month') {
+                start = new Date(today);
+                start.setMonth(today.getMonth() - 1);
+            } else if (type === '3months') {
+                start = new Date(today);
+                start.setMonth(today.getMonth() - 3);
+            } else if (type === '6months') {
+                start = new Date(today);
+                start.setMonth(today.getMonth() - 6);
+            } else if (type === '1year') {
+                start = new Date(today);
+                start.setFullYear(today.getFullYear() - 1);
             }
 
             setStartDate(start.toLocaleDateString('en-CA'));
@@ -19604,36 +19622,240 @@
             return { totalRevenue, totalTransactions, avgTicket, totalProfit, paymentMethods };
         }, [salesData, computeSaleFinancials]);
 
-        const productStats = useMemo(() => {
-            const prodStats = {};
-            salesData.filter(s => s.status !== 'void').forEach(sale => {
-                // Extract MM-YY for grouping
-                const dateObj = safeToDate(sale.timestamp);
-                const monthYear = dateObj ? `${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getFullYear()).slice(-2)}` : 'N/A';
+        // --- SMART HOT-SALE PRODUCT & VENDOR ANALYTICS ENGINE (1M / 3M / 6M / 1Y / Custom) ---
+        const activePeriodDays = useMemo(() => {
+            const s = new Date(startDate);
+            const e = new Date(endDate);
+            if (isNaN(s.getTime()) || isNaN(e.getTime())) return 1;
+            const diffDays = Math.round(Math.abs(e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+            return Math.max(1, diffDays);
+        }, [startDate, endDate]);
 
-                sale.items.forEach(item => {
-                    // Group by Shop, Product, AND Month-Year
-                    const key = `${sale.shopId}_${item.productId}_${monthYear}`;
-                    if (!prodStats[key]) {
-                        const productInfo = productMap.get(item.productId);
-                        prodStats[key] = { 
-                            monthYear: monthYear,
-                            shopName: sale.shopName || 'Unknown Shop',
-                            vendorName: productInfo?.vendorName || 'Unknown Vendor',
-                            name: item.name, 
-                            code: item.code, 
-                            qty: 0, 
+        const classifyHotTier = useCallback((hotScore, rankIndex, totalItems) => {
+            if (totalItems <= 0) {
+                return { code: 'SLOW', label: '❄️ SLOW', badgeClass: 'bg-slate-800 text-slate-300 border-slate-600' };
+            }
+            if (hotScore >= 70 || (rankIndex === 0 && hotScore >= 40) || (totalItems >= 4 && rankIndex < Math.ceil(totalItems * 0.2) && hotScore >= 50)) {
+                return { code: 'HOT', label: '🔥 HOT SALE', badgeClass: 'bg-gradient-to-r from-orange-500/25 to-rose-500/25 text-orange-300 border-orange-500/50 shadow-sm shadow-orange-950/50' };
+            }
+            if (hotScore >= 42 || (totalItems >= 4 && rankIndex < Math.ceil(totalItems * 0.5) && hotScore >= 30)) {
+                return { code: 'FAST', label: '⚡ FAST MOVER', badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/40' };
+            }
+            if (hotScore >= 20) {
+                return { code: 'STEADY', label: '✅ STEADY', badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+            }
+            return { code: 'SLOW', label: '❄️ SLOW', badgeClass: 'bg-slate-800 text-slate-400 border-slate-700' };
+        }, []);
+
+        const smartProductAndVendorAnalytics = useMemo(() => {
+            const prodMap = {};
+            const vendorMap = {};
+            let grandTotalQty = 0;
+            let grandTotalRev = 0;
+            let grandTotalCost = 0;
+
+            salesData.filter(s => s.status !== 'void').forEach(sale => {
+                const sName = sale.shopName || 'Unknown Shop';
+                (sale.items || []).forEach(item => {
+                    const qty = Number(item.quantity) || 0;
+                    if (qty <= 0) return;
+                    const price = Number(item.price) || 0;
+                    const productInfo = productMap.get(item.productId);
+                    const unitCost = item.cost !== undefined && item.cost !== null
+                        ? (Number(item.cost) || 0)
+                        : (Number(productInfo?.cost) || 0);
+                    const rev = price * qty;
+                    const cost = unitCost * qty;
+                    const vendorName = (productInfo?.vendorName || item.vendorName || 'Uncategorized').trim() || 'Uncategorized';
+                    const categoryName = (productInfo?.category || productInfo?.categoryName || 'General').trim() || 'General';
+                    const prodKey = item.productId || item.code || item.name;
+
+                    grandTotalQty += qty;
+                    grandTotalRev += rev;
+                    grandTotalCost += cost;
+
+                    if (!prodMap[prodKey]) {
+                        prodMap[prodKey] = {
+                            productId: item.productId || prodKey,
+                            name: item.name || 'Unknown Product',
+                            code: item.code || '-',
+                            barcode: productInfo?.barcode || item.barcode || '',
+                            vendorName,
+                            categoryName,
+                            shopsSet: new Set(),
+                            txCount: 0,
+                            qty: 0,
                             revenue: 0,
-                            cost: 0 
+                            cost: 0
                         };
                     }
-                    prodStats[key].qty += item.quantity;
-                    prodStats[key].revenue += (item.price * item.quantity);
-                    prodStats[key].cost += (item.cost * item.quantity);
+                    prodMap[prodKey].shopsSet.add(sName);
+                    prodMap[prodKey].txCount += 1;
+                    prodMap[prodKey].qty += qty;
+                    prodMap[prodKey].revenue += rev;
+                    prodMap[prodKey].cost += cost;
+
+                    if (!vendorMap[vendorName]) {
+                        vendorMap[vendorName] = {
+                            vendorName,
+                            shopsSet: new Set(),
+                            productsSoldMap: {},
+                            txCount: 0,
+                            qty: 0,
+                            revenue: 0,
+                            cost: 0
+                        };
+                    }
+                    vendorMap[vendorName].shopsSet.add(sName);
+                    vendorMap[vendorName].txCount += 1;
+                    vendorMap[vendorName].qty += qty;
+                    vendorMap[vendorName].revenue += rev;
+                    vendorMap[vendorName].cost += cost;
+                    if (!vendorMap[vendorName].productsSoldMap[prodKey]) {
+                        vendorMap[vendorName].productsSoldMap[prodKey] = {
+                            name: item.name || 'Item',
+                            code: item.code || '',
+                            qty: 0,
+                            revenue: 0
+                        };
+                    }
+                    vendorMap[vendorName].productsSoldMap[prodKey].qty += qty;
+                    vendorMap[vendorName].productsSoldMap[prodKey].revenue += rev;
                 });
             });
-            return Object.values(prodStats).sort((a, b) => b.revenue - a.revenue);
-        }, [salesData, productMap]);
+
+            const rawProducts = Object.values(prodMap);
+            const maxProdQty = rawProducts.reduce((m, p) => Math.max(m, p.qty), 0) || 1;
+            const maxProdRev = rawProducts.reduce((m, p) => Math.max(m, p.revenue), 0) || 1;
+
+            const scoredProducts = rawProducts.map(p => {
+                const profit = p.revenue - p.cost;
+                const marginPct = p.revenue > 0 ? (profit / p.revenue) * 100 : 0;
+                const revSharePct = grandTotalRev > 0 ? (p.revenue / grandTotalRev) * 100 : 0;
+                const qtySharePct = grandTotalQty > 0 ? (p.qty / grandTotalQty) * 100 : 0;
+                const dailyVelocity = p.qty / activePeriodDays;
+
+                // Weighted Hot Score (0 - 100): 55% Volume Velocity + 35% Revenue Impact + 10% Profit Margin Health
+                const qtyNorm = (p.qty / maxProdQty) * 100;
+                const revNorm = (p.revenue / maxProdRev) * 100;
+                const marginNorm = Math.max(0, Math.min(100, marginPct * 2));
+                const hotScore = Math.round(Math.min(100, (qtyNorm * 0.55) + (revNorm * 0.35) + (marginNorm * 0.10)));
+
+                return {
+                    ...p,
+                    shopName: Array.from(p.shopsSet).join(', '),
+                    profit,
+                    marginPct,
+                    revSharePct,
+                    qtySharePct,
+                    dailyVelocity,
+                    hotScore
+                };
+            }).sort((a, b) => b.hotScore - a.hotScore || b.qty - a.qty || b.revenue - a.revenue);
+
+            const enrichedProducts = scoredProducts.map((p, idx) => ({
+                ...p,
+                rank: idx + 1,
+                tier: classifyHotTier(p.hotScore, idx, scoredProducts.length)
+            }));
+
+            const rawVendors = Object.values(vendorMap);
+            const maxVenQty = rawVendors.reduce((m, v) => Math.max(m, v.qty), 0) || 1;
+            const maxVenRev = rawVendors.reduce((m, v) => Math.max(m, v.revenue), 0) || 1;
+
+            const scoredVendors = rawVendors.map(v => {
+                const profit = v.revenue - v.cost;
+                const marginPct = v.revenue > 0 ? (profit / v.revenue) * 100 : 0;
+                const revSharePct = grandTotalRev > 0 ? (v.revenue / grandTotalRev) * 100 : 0;
+                const qtySharePct = grandTotalQty > 0 ? (v.qty / grandTotalQty) * 100 : 0;
+                const dailyVelocity = v.qty / activePeriodDays;
+                const topProductsList = Object.values(v.productsSoldMap).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
+                const topProduct = topProductsList[0] || null;
+
+                const qtyNorm = (v.qty / maxVenQty) * 100;
+                const revNorm = (v.revenue / maxVenRev) * 100;
+                const marginNorm = Math.max(0, Math.min(100, marginPct * 2));
+                const hotScore = Math.round(Math.min(100, (qtyNorm * 0.55) + (revNorm * 0.35) + (marginNorm * 0.10)));
+
+                return {
+                    vendorName: v.vendorName,
+                    shopName: Array.from(v.shopsSet).join(', '),
+                    uniqueProductsCount: topProductsList.length,
+                    topProduct,
+                    topProductsList: topProductsList.slice(0, 3),
+                    txCount: v.txCount,
+                    qty: v.qty,
+                    revenue: v.revenue,
+                    cost: v.cost,
+                    profit,
+                    marginPct,
+                    revSharePct,
+                    qtySharePct,
+                    dailyVelocity,
+                    hotScore
+                };
+            }).sort((a, b) => b.hotScore - a.hotScore || b.revenue - a.revenue);
+
+            const enrichedVendors = scoredVendors.map((v, idx) => ({
+                ...v,
+                rank: idx + 1,
+                tier: classifyHotTier(v.hotScore, idx, scoredVendors.length)
+            }));
+
+            return {
+                products: enrichedProducts,
+                vendors: enrichedVendors,
+                grandTotalQty,
+                grandTotalRev,
+                grandTotalProfit: grandTotalRev - grandTotalCost,
+                hotProductsCount: enrichedProducts.filter(p => p.tier.code === 'HOT').length,
+                hotVendorsCount: enrichedVendors.filter(v => v.tier.code === 'HOT').length
+            };
+        }, [salesData, productMap, activePeriodDays, classifyHotTier]);
+
+        const productStats = smartProductAndVendorAnalytics.products;
+        const vendorHotStats = smartProductAndVendorAnalytics.vendors;
+
+        const filteredProductStats = useMemo(() => {
+            const q = productSearchTerm.trim().toLowerCase();
+            const list = productStats.filter(p => {
+                if (productTierFilter !== 'ALL' && p.tier.code !== productTierFilter) return false;
+                if (!q) return true;
+                return (
+                    (p.name || '').toLowerCase().includes(q) ||
+                    (p.code || '').toLowerCase().includes(q) ||
+                    (p.vendorName || '').toLowerCase().includes(q) ||
+                    (p.shopName || '').toLowerCase().includes(q)
+                );
+            });
+            return [...list].sort((a, b) => {
+                if (productSortBy === 'qty') return b.qty - a.qty;
+                if (productSortBy === 'revenue') return b.revenue - a.revenue;
+                if (productSortBy === 'profit') return b.profit - a.profit;
+                if (productSortBy === 'margin') return b.marginPct - a.marginPct;
+                return b.hotScore - a.hotScore || b.qty - a.qty;
+            });
+        }, [productStats, productSearchTerm, productTierFilter, productSortBy]);
+
+        const filteredVendorHotStats = useMemo(() => {
+            const q = productSearchTerm.trim().toLowerCase();
+            const list = vendorHotStats.filter(v => {
+                if (productTierFilter !== 'ALL' && v.tier.code !== productTierFilter) return false;
+                if (!q) return true;
+                return (
+                    (v.vendorName || '').toLowerCase().includes(q) ||
+                    (v.topProduct?.name || '').toLowerCase().includes(q) ||
+                    (v.shopName || '').toLowerCase().includes(q)
+                );
+            });
+            return [...list].sort((a, b) => {
+                if (productSortBy === 'qty') return b.qty - a.qty;
+                if (productSortBy === 'revenue') return b.revenue - a.revenue;
+                if (productSortBy === 'profit') return b.profit - a.profit;
+                if (productSortBy === 'margin') return b.marginPct - a.marginPct;
+                return b.hotScore - a.hotScore || b.revenue - a.revenue;
+            });
+        }, [vendorHotStats, productSearchTerm, productTierFilter, productSortBy]);
 
         const cashierStats = useMemo(() => {
             const cashiers = {};
@@ -19862,19 +20084,43 @@
                 ws['!cols'] = [{wch:20}, {wch:20}];
             } 
             else if (activeTab === 'products') {
-                const data = productStats.map(p => ({
-                    'Date (MM-YY)': p.monthYear,
-                    'Shop': p.shopName,
-                    'Vendor': p.vendorName,
+                const prodSheetData = filteredProductStats.map((p, i) => ({
+                    'Rank': i + 1,
+                    'Hot Status': p.tier.label,
+                    'Hot Score (0-100)': p.hotScore,
                     'Product Name': p.name,
-                    'Code': p.code,
+                    'Product Code': p.code,
+                    'Vendor': p.vendorName,
+                    'Shop(s)': p.shopName,
                     'Qty Sold': p.qty,
-                    'Revenue (KHR)': p.revenue,
-                    'Profit (KHR)': p.revenue - p.cost,
-                    'Margin (%)': p.revenue > 0 ? parseFloat((((p.revenue - p.cost) / p.revenue) * 100).toFixed(2)) : 0
+                    'Daily Velocity (Qty/Day)': parseFloat(p.dailyVelocity.toFixed(2)),
+                    'Revenue Share (%)': parseFloat(p.revSharePct.toFixed(2)),
+                    'Total Revenue (KHR)': p.revenue,
+                    'Net Profit (KHR)': p.profit,
+                    'Sale Margin (%)': parseFloat(p.marginPct.toFixed(2))
                 }));
-                ws = XLSX.utils.json_to_sheet(data);
-                ws['!cols'] = [{wch:15}, {wch:20}, {wch:20}, {wch:30}, {wch:15}, {wch:10}, {wch:15}, {wch:15}, {wch:10}];
+                const vendorSheetData = filteredVendorHotStats.map((v, i) => ({
+                    'Rank': i + 1,
+                    'Hot Status': v.tier.label,
+                    'Hot Score (0-100)': v.hotScore,
+                    'Vendor Name': v.vendorName,
+                    'Active SKUs Sold': v.uniqueProductsCount,
+                    'Top Hot Product': v.topProduct ? `${v.topProduct.name} (${v.topProduct.qty} sold)` : '-',
+                    'Total Qty Sold': v.qty,
+                    'Daily Velocity (Qty/Day)': parseFloat(v.dailyVelocity.toFixed(2)),
+                    'Revenue Share (%)': parseFloat(v.revSharePct.toFixed(2)),
+                    'Total Revenue (KHR)': v.revenue,
+                    'Net Profit (KHR)': v.profit,
+                    'Sale Margin (%)': parseFloat(v.marginPct.toFixed(2))
+                }));
+                const wsProducts = XLSX.utils.json_to_sheet(prodSheetData);
+                wsProducts['!cols'] = [{wch:8}, {wch:16}, {wch:16}, {wch:30}, {wch:15}, {wch:22}, {wch:20}, {wch:12}, {wch:20}, {wch:16}, {wch:18}, {wch:18}, {wch:14}];
+                const wsVendors = XLSX.utils.json_to_sheet(vendorSheetData);
+                wsVendors['!cols'] = [{wch:8}, {wch:16}, {wch:16}, {wch:24}, {wch:14}, {wch:32}, {wch:14}, {wch:20}, {wch:16}, {wch:18}, {wch:18}, {wch:14}];
+                XLSX.utils.book_append_sheet(wb, wsProducts, "Hot Sale Products");
+                XLSX.utils.book_append_sheet(wb, wsVendors, "Hot Sale Vendors");
+                XLSX.writeFile(wb, `Smart_Hot_Sale_Report_${startDate}_to_${endDate}.xlsx`);
+                return;
             } 
             else if (activeTab === 'details') {
                 // Export both Receipt-level and Item-level sheets in the workbook
@@ -20579,6 +20825,10 @@
                                         <option value="lastWeek">⏪ Last Week</option>
                                         <option value="thisMonth">🗓️ This Month</option>
                                         <option value="lastMonth">📁 Last Month</option>
+                                        <option value="1month">🔥 Last 1 Month (30 Days)</option>
+                                        <option value="3months">🔥 Last 3 Months (Quarter)</option>
+                                        <option value="6months">🔥 Last 6 Months (Half-Year)</option>
+                                        <option value="1year">🔥 Last 1 Year (365 Days)</option>
                                         <option value="custom">⚙️ Custom Date Range ({startDate} to {endDate})</option>
                                     </select>
                                     <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-slate-400">
@@ -20767,42 +21017,456 @@
                             </div>
                         )}
 
-                        {/* Phase 2: Sale By Product */}
+                        {/* Phase 2: Smart Sale By Product & Vendor Hot-Sale Judgment Engine */}
                         {activeTab === 'products' && (
-                            <TableCard title="Sales by Product">
-                                <table className="min-w-full divide-y divide-slate-700">
-                                    <thead className="bg-slate-900/50">
-                                        <tr>
-                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
-                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
-                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor</th>
-                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
-                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Code</th>
-                                            <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Qty Sold</th>
-                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Revenue</th>
-                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Profit</th>
-                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Margin</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-700">
-                                        {productStats.map((p, idx) => {
-                                            const margin = p.revenue > 0 ? ((p.revenue - p.cost) / p.revenue) * 100 : 0;
-                                            return (
-                                            <tr key={idx} className="hover:bg-slate-700/50">
-                                                <td className="px-4 py-3 text-sm text-slate-400">{p.monthYear}</td>
-                                                <td className="px-4 py-3 text-sm text-slate-400">{p.shopName}</td>
-                                                <td className="px-4 py-3 text-sm text-slate-400">{p.vendorName}</td>
-                                                <td className="px-4 py-3 text-sm text-slate-200">{p.name}</td>
-                                                <td className="px-4 py-3 text-sm text-slate-400">{p.code}</td>
-                                                <td className="px-4 py-3 text-sm text-center text-slate-300">{p.qty}</td>
-                                                <td className="px-4 py-3 text-sm text-right text-emerald-400 font-bold">៛{khrFormatter.format(p.revenue)}</td>
-                                                <td className="px-4 py-3 text-sm text-right text-yellow-400">៛{khrFormatter.format(p.revenue - p.cost)}</td>
-                                                <td className="px-4 py-3 text-sm text-right text-cyan-400 font-bold">{margin.toFixed(2)}%</td>
-                                            </tr>
-                                        )})}
-                                    </tbody>
-                                </table>
-                            </TableCard>
+                            <div className="space-y-4">
+                                {/* 1. Quick Period Bar (1 Month, 3 Months, 6 Months, 1 Year, Custom) & Mode Switcher */}
+                                <Card className="p-3.5 sm:p-5">
+                                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3.5 border-b border-slate-700/80">
+                                        <div>
+                                            <h4 className="text-base sm:text-xl font-black text-white flex items-center gap-2">
+                                                <span className="w-8 h-8 rounded-xl bg-gradient-to-br from-orange-500 to-rose-600 text-white flex items-center justify-center shadow-md shadow-orange-950/50">
+                                                    <i className="fas fa-fire text-sm"></i>
+                                                </span>
+                                                <span>Smart Hot-Sale Product &amp; Vendor Intelligence</span>
+                                                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono font-bold bg-orange-500/15 text-orange-300 border border-orange-500/30">
+                                                    {activePeriodDays} {activePeriodDays === 1 ? 'Day' : 'Days'} Window
+                                                </span>
+                                            </h4>
+                                            <p className="text-xs text-slate-400 mt-1">
+                                                AI Velocity &amp; Margin Scoring evaluates Quantity Sold (55%), Revenue Share (35%), and Profit Margin (10%) to judge Hot Sale items and vendors.
+                                            </p>
+                                        </div>
+
+                                        {/* 1-Click Horizon Period Selector: 1M | 3M | 6M | 1Y | Custom */}
+                                        <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-2xl border border-slate-700 shrink-0">
+                                            {[
+                                                { id: '1month', label: '1 Month' },
+                                                { id: '3months', label: '3 Months' },
+                                                { id: '6months', label: '6 Months' },
+                                                { id: '1year', label: '1 Year' },
+                                                { id: 'custom', label: 'Custom' }
+                                            ].map(period => {
+                                                const isActive = dateRangePreset === period.id;
+                                                return (
+                                                    <button
+                                                        key={period.id}
+                                                        type="button"
+                                                        onClick={() => setDateRange(period.id)}
+                                                        className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all ${
+                                                            isActive
+                                                                ? 'bg-gradient-to-r from-orange-500 to-rose-600 text-white shadow-md shadow-orange-950/50'
+                                                                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                                                        }`}
+                                                    >
+                                                        {period.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    {/* Inline Custom Date Pickers when 'custom' is active */}
+                                    {dateRangePreset === 'custom' && (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 pb-1 border-b border-slate-700/70 animate-fade-in-up">
+                                            <div>
+                                                <label className="block text-[11px] font-bold uppercase text-slate-400 mb-1">Custom Start Date</label>
+                                                <input
+                                                    type="date"
+                                                    value={startDate}
+                                                    onChange={e => setStartDate(e.target.value)}
+                                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-orange-500 outline-none text-xs sm:text-sm"
+                                                    style={{ colorScheme: 'dark' }}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[11px] font-bold uppercase text-slate-400 mb-1">Custom End Date</label>
+                                                <input
+                                                    type="date"
+                                                    value={endDate}
+                                                    onChange={e => setEndDate(e.target.value)}
+                                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-orange-500 outline-none text-xs sm:text-sm"
+                                                    style={{ colorScheme: 'dark' }}
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Top 4 Hot-Sale Highlight KPI Cards */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-3.5">
+                                        {/* #1 Hot Sale Product */}
+                                        <div className="bg-gradient-to-br from-orange-950/40 via-slate-900 to-slate-900 p-3.5 rounded-2xl border border-orange-500/40 relative overflow-hidden">
+                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-orange-300 mb-1">
+                                                <span>🔥 #1 Hot Sale Product</span>
+                                                {productStats[0] && (
+                                                    <span className="px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40">
+                                                        Score: {productStats[0].hotScore}/100
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {productStats[0] ? (
+                                                <>
+                                                    <div className="text-sm sm:text-base font-black text-white truncate" title={productStats[0].name}>
+                                                        {productStats[0].name}
+                                                    </div>
+                                                    <div className="flex items-center justify-between text-xs mt-1.5 font-mono">
+                                                        <span className="text-orange-300 font-bold">{khrFormatter.format(productStats[0].qty)} sold ({productStats[0].dailyVelocity.toFixed(1)}/d)</span>
+                                                        <span className="text-emerald-400 font-black">៛{khrFormatter.format(productStats[0].revenue)}</span>
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="text-xs text-slate-500 py-2">No sales in selected period</div>
+                                            )}
+                                        </div>
+
+                                        {/* #1 Hot Sale Vendor */}
+                                        <div className="bg-gradient-to-br from-indigo-950/40 via-slate-900 to-slate-900 p-3.5 rounded-2xl border border-indigo-500/40 relative overflow-hidden">
+                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-300 mb-1">
+                                                <span>🏆 #1 Hot Sale Vendor</span>
+                                                {vendorHotStats[0] && (
+                                                    <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                                                        {vendorHotStats[0].revSharePct.toFixed(1)}% Share
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {vendorHotStats[0] ? (
+                                                <>
+                                                    <div className="text-sm sm:text-base font-black text-white truncate" title={vendorHotStats[0].vendorName}>
+                                                        {vendorHotStats[0].vendorName}
+                                                    </div>
+                                                    <div className="flex items-center justify-between text-xs mt-1.5 font-mono">
+                                                        <span className="text-indigo-300 font-bold">{khrFormatter.format(vendorHotStats[0].qty)} units • {vendorHotStats[0].uniqueProductsCount} SKUs</span>
+                                                        <span className="text-emerald-400 font-black">៛{khrFormatter.format(vendorHotStats[0].revenue)}</span>
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="text-xs text-slate-500 py-2">No vendor data in period</div>
+                                            )}
+                                        </div>
+
+                                        {/* Hot Sale Items Count */}
+                                        <div className="bg-slate-900/90 p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                                <span>Hot Sale Breakdown</span>
+                                                <i className="fas fa-bolt text-amber-400"></i>
+                                            </div>
+                                            <div className="flex items-baseline gap-2 my-1">
+                                                <span className="text-xl font-black text-orange-400">{smartProductAndVendorAnalytics.hotProductsCount} Hot Items</span>
+                                                <span className="text-xs text-slate-500">/ {productStats.length} total</span>
+                                            </div>
+                                            <div className="text-[11px] text-slate-400 font-mono">
+                                                {smartProductAndVendorAnalytics.hotVendorsCount} Hot Vendors of {vendorHotStats.length} active
+                                            </div>
+                                        </div>
+
+                                        {/* Period Velocity & Net Profit */}
+                                        <div className="bg-slate-900/90 p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                                <span>Period Velocity &amp; Profit</span>
+                                                <i className="fas fa-chart-line text-emerald-400"></i>
+                                            </div>
+                                            <div className="text-xl font-black text-emerald-400 my-1 font-mono">
+                                                ៛{khrFormatter.format(smartProductAndVendorAnalytics.grandTotalProfit)}
+                                            </div>
+                                            <div className="text-[11px] text-slate-400 font-mono">
+                                                {khrFormatter.format(smartProductAndVendorAnalytics.grandTotalQty)} units ({(smartProductAndVendorAnalytics.grandTotalQty / activePeriodDays).toFixed(1)}/day)
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Toolbar Row: View Toggle (By Product vs By Vendor), Search Box, Tier Filter, Sort Dropdown */}
+                                    <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2.5 pt-4 mt-3.5 border-t border-slate-700/80">
+                                        {/* Left: Product vs Vendor View Switcher + Tier Filter Pills */}
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setProductReportMode('products')}
+                                                    className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition ${
+                                                        productReportMode === 'products'
+                                                            ? 'bg-blue-600 text-white shadow'
+                                                            : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    <i className="fas fa-box"></i>
+                                                    <span>By Product ({filteredProductStats.length})</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setProductReportMode('vendors')}
+                                                    className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition ${
+                                                        productReportMode === 'vendors'
+                                                            ? 'bg-indigo-600 text-white shadow'
+                                                            : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    <i className="fas fa-truck"></i>
+                                                    <span>By Vendor ({filteredVendorHotStats.length})</span>
+                                                </button>
+                                            </div>
+
+                                            {/* Hot Tier Filter Pills */}
+                                            <div className="flex items-center gap-1 bg-slate-900/80 p-1 rounded-xl border border-slate-700/80 overflow-x-auto no-scrollbar">
+                                                {[
+                                                    { id: 'ALL', label: 'All Tiers' },
+                                                    { id: 'HOT', label: '🔥 Hot Sale' },
+                                                    { id: 'FAST', label: '⚡ Fast' },
+                                                    { id: 'STEADY', label: '✅ Steady' },
+                                                    { id: 'SLOW', label: '❄️ Slow' }
+                                                ].map(t => (
+                                                    <button
+                                                        key={t.id}
+                                                        type="button"
+                                                        onClick={() => setProductTierFilter(t.id)}
+                                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition ${
+                                                            productTierFilter === t.id
+                                                                ? 'bg-orange-500 text-slate-950 font-black shadow-sm'
+                                                                : 'text-slate-400 hover:text-slate-200'
+                                                        }`}
+                                                    >
+                                                        {t.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {/* Right: Search Input + Sort Selector */}
+                                        <div className="flex items-center gap-2 flex-1 md:max-w-md">
+                                            <div className="relative flex-1 min-w-0">
+                                                <input
+                                                    type="text"
+                                                    value={productSearchTerm}
+                                                    onChange={e => setProductSearchTerm(e.target.value)}
+                                                    placeholder={productReportMode === 'products' ? "Search product, code, or vendor..." : "Search vendor or top product..."}
+                                                    className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-orange-500 outline-none text-xs sm:text-sm h-[38px]"
+                                                />
+                                                <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                                {productSearchTerm && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setProductSearchTerm('')}
+                                                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                                    >
+                                                        <i className="fas fa-times-circle text-xs"></i>
+                                                    </button>
+                                                )}
+                                            </div>
+
+                                            <select
+                                                value={productSortBy}
+                                                onChange={e => setProductSortBy(e.target.value)}
+                                                className="bg-slate-800 text-slate-200 px-3 py-2 rounded-xl border border-slate-600 text-xs font-bold outline-none cursor-pointer h-[38px] shrink-0"
+                                                title="Sort Leaderboard By"
+                                            >
+                                                <option value="hotScore">🔥 Sort: Hot Score</option>
+                                                <option value="qty">📦 Sort: Qty Sold</option>
+                                                <option value="revenue">💰 Sort: Revenue</option>
+                                                <option value="profit">📈 Sort: Net Profit</option>
+                                                <option value="margin">⚡ Sort: Margin %</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </Card>
+
+                                {/* 2. Leaderboard Table Card (Product Ranking OR Vendor Ranking) */}
+                                <Card className="p-0 overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        {productReportMode === 'products' ? (
+                                            <table className="min-w-full divide-y divide-slate-700">
+                                                <thead className="bg-slate-900/70">
+                                                    <tr>
+                                                        <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase w-14">Rank</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Hot Judgment</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">QTY Sold</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Velocity / Day</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Rev Share</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Revenue</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Profit</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700/80">
+                                                    {filteredProductStats.length === 0 ? (
+                                                        <tr>
+                                                            <td colSpan="10" className="px-4 py-10 text-center text-slate-500">
+                                                                No product sales found for this period and filter.
+                                                            </td>
+                                                        </tr>
+                                                    ) : filteredProductStats.map((p, idx) => (
+                                                        <tr key={`${p.productId}_${idx}`} className="hover:bg-slate-700/40 transition-colors">
+                                                            <td className="px-3 py-3 text-center whitespace-nowrap">
+                                                                <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg font-mono text-xs font-black border ${
+                                                                    p.rank === 1
+                                                                        ? 'bg-amber-400 text-slate-950 border-amber-300 shadow'
+                                                                        : p.rank === 2
+                                                                            ? 'bg-slate-300 text-slate-950 border-slate-200'
+                                                                            : p.rank === 3
+                                                                                ? 'bg-amber-700/60 text-amber-100 border-amber-500/50'
+                                                                                : 'bg-slate-800 text-slate-400 border-slate-700'
+                                                                }`}>
+                                                                    #{p.rank}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-3 whitespace-nowrap">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className={`px-2.5 py-1 rounded-lg text-[11px] font-black uppercase border ${p.tier.badgeClass}`}>
+                                                                        {p.tier.label}
+                                                                    </span>
+                                                                    <span className="text-xs font-mono font-bold text-slate-400" title="Composite Hot Score (0-100)">
+                                                                        {p.hotScore}pt
+                                                                    </span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3">
+                                                                <div className="text-sm font-bold text-slate-100">{p.name}</div>
+                                                                <div className="text-[11px] text-slate-400 font-mono">
+                                                                    {p.code} <span className="text-slate-600">•</span> <span className="text-slate-400 font-sans">{p.shopName}</span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-indigo-300 font-semibold whitespace-nowrap">
+                                                                {p.vendorName}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-center whitespace-nowrap">
+                                                                <span className="px-2.5 py-1 rounded-full text-xs font-black font-mono bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                                                    {khrFormatter.format(p.qty)}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-center text-xs font-mono text-slate-300 whitespace-nowrap">
+                                                                <strong>{p.dailyVelocity.toFixed(1)}</strong> <span className="text-slate-500">/day</span>
+                                                            </td>
+                                                            <td className="px-4 py-3 whitespace-nowrap min-w-[130px]">
+                                                                <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+                                                                    <span className="text-slate-300 font-bold">{p.revSharePct.toFixed(1)}%</span>
+                                                                </div>
+                                                                <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-700/70">
+                                                                    <div
+                                                                        className="h-full bg-gradient-to-r from-orange-500 to-emerald-400 rounded-full"
+                                                                        style={{ width: `${Math.min(100, Math.max(3, p.revSharePct))}%` }}
+                                                                    ></div>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-emerald-400 font-black font-mono whitespace-nowrap">
+                                                                ៛{khrFormatter.format(p.revenue)}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-yellow-400 font-bold font-mono whitespace-nowrap">
+                                                                ៛{khrFormatter.format(p.profit)}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-cyan-400 font-bold font-mono whitespace-nowrap">
+                                                                {p.marginPct.toFixed(1)}%
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        ) : (
+                                            /* VENDOR HOT-SALE LEADERBOARD TABLE */
+                                            <table className="min-w-full divide-y divide-slate-700">
+                                                <thead className="bg-slate-900/70">
+                                                    <tr>
+                                                        <th className="px-3 py-3 text-center text-xs font-semibold text-slate-400 uppercase w-14">Rank</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor Judgment</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor Name</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Top Hot Product(s)</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Total QTY</th>
+                                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Velocity / Day</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Market Share</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Revenue</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Profit</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700/80">
+                                                    {filteredVendorHotStats.length === 0 ? (
+                                                        <tr>
+                                                            <td colSpan="10" className="px-4 py-10 text-center text-slate-500">
+                                                                No vendor sales found for this period and filter.
+                                                            </td>
+                                                        </tr>
+                                                    ) : filteredVendorHotStats.map((v, idx) => (
+                                                        <tr key={`${v.vendorName}_${idx}`} className="hover:bg-slate-700/40 transition-colors">
+                                                            <td className="px-3 py-3 text-center whitespace-nowrap">
+                                                                <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg font-mono text-xs font-black border ${
+                                                                    v.rank === 1
+                                                                        ? 'bg-amber-400 text-slate-950 border-amber-300 shadow'
+                                                                        : v.rank === 2
+                                                                            ? 'bg-slate-300 text-slate-950 border-slate-200'
+                                                                            : v.rank === 3
+                                                                                ? 'bg-amber-700/60 text-amber-100 border-amber-500/50'
+                                                                                : 'bg-slate-800 text-slate-400 border-slate-700'
+                                                                }`}>
+                                                                    #{v.rank}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-3 whitespace-nowrap">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className={`px-2.5 py-1 rounded-lg text-[11px] font-black uppercase border ${v.tier.badgeClass}`}>
+                                                                        {v.tier.label}
+                                                                    </span>
+                                                                    <span className="text-xs font-mono font-bold text-slate-400">
+                                                                        {v.hotScore}pt
+                                                                    </span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3">
+                                                                <div className="text-sm font-black text-white flex items-center gap-1.5">
+                                                                    <i className="fas fa-truck text-indigo-400 text-xs"></i>
+                                                                    <span>{v.vendorName}</span>
+                                                                </div>
+                                                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                    {v.uniqueProductsCount} active SKU(s) • {v.shopName}
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3">
+                                                                <div className="flex flex-wrap gap-1 max-w-xs">
+                                                                    {v.topProductsList.map((tp, tIdx) => (
+                                                                        <span
+                                                                            key={tIdx}
+                                                                            className="px-2 py-0.5 rounded-md bg-slate-900/90 border border-slate-700 text-[11px] text-slate-200 font-medium truncate max-w-[210px]"
+                                                                            title={`${tp.name}: ${tp.qty} sold (៛${khrFormatter.format(tp.revenue)})`}
+                                                                        >
+                                                                            <strong className="text-orange-300 font-mono">{tp.qty}×</strong> {tp.name}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-center whitespace-nowrap">
+                                                                <span className="px-2.5 py-1 rounded-full text-xs font-black font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                                                                    {khrFormatter.format(v.qty)}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-center text-xs font-mono text-slate-300 whitespace-nowrap">
+                                                                <strong>{v.dailyVelocity.toFixed(1)}</strong> <span className="text-slate-500">/day</span>
+                                                            </td>
+                                                            <td className="px-4 py-3 whitespace-nowrap min-w-[130px]">
+                                                                <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+                                                                    <span className="text-slate-300 font-bold">{v.revSharePct.toFixed(1)}%</span>
+                                                                </div>
+                                                                <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-700/70">
+                                                                    <div
+                                                                        className="h-full bg-gradient-to-r from-indigo-500 to-cyan-400 rounded-full"
+                                                                        style={{ width: `${Math.min(100, Math.max(3, v.revSharePct))}%` }}
+                                                                    ></div>
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-emerald-400 font-black font-mono whitespace-nowrap">
+                                                                ៛{khrFormatter.format(v.revenue)}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-yellow-400 font-bold font-mono whitespace-nowrap">
+                                                                ៛{khrFormatter.format(v.profit)}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-sm text-right text-cyan-400 font-bold font-mono whitespace-nowrap">
+                                                                {v.marginPct.toFixed(1)}%
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        )}
+                                    </div>
+                                </Card>
+                            </div>
                         )}
 
                         {/* MERGED: Unified Sale Detail Report (Combines Receipts & Sale Details by Item) */}
