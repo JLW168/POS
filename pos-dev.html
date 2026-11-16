@@ -4293,6 +4293,18 @@
             const collectLocalAndRenderShiftPayments = () => {
                 if (!window.SolarisPayWayVerifier) return [];
                 window.SolarisPayWayVerifier.loadLocalAbaCache();
+
+                // Build VLOOKUP sets of Trx IDs & APVs from Local Sales Ledger so Bypass DB Mode judges Verified/Claimed in 0ms
+                const localClaimedTrxMap = new Map();
+                const localClaimedApvMap = new Map();
+                if (window.SolarisLocalSalesStore) {
+                    window.SolarisLocalSalesStore.getSales().forEach(s => {
+                        if (!s || s.status === 'void') return;
+                        if (s.abaTrxId) localClaimedTrxMap.set(String(s.abaTrxId).trim(), s);
+                        if (s.abaApv) localClaimedApvMap.set(String(s.abaApv).trim().toUpperCase(), s);
+                    });
+                }
+
                 const list = [];
                 window.SolarisPayWayVerifier.inMemoryAbaPayments.forEach((entry, trxId) => {
                     if (!entry || !entry.parsedAba) return;
@@ -4300,12 +4312,17 @@
                     if (recMs < shiftStartMs) return;
                     const msgChatNorm = window.SolarisKHQREngine.normalizeChatId(entry.chatId || entry.parsedAba.chatId || '');
                     if (normTargetIds.length > 0 && (!msgChatNorm || !normTargetIds.includes(msgChatNorm))) return;
+                    const cleanTrx = String(trxId || entry.parsedAba.trxId || '').trim();
+                    const cleanApv = String(entry.parsedAba.apv || '').trim().toUpperCase();
+                    const matchedSale = localClaimedTrxMap.get(cleanTrx) || (cleanApv ? localClaimedApvMap.get(cleanApv) : null);
+
                     list.push({
                         id: trxId,
                         trxId,
                         ...entry.parsedAba,
                         receivedAt: recMs,
-                        claimedByOrderId: entry.claimedByOrderId || null
+                        claimedByOrderId: entry.claimedByOrderId || matchedSale?.id || null,
+                        claimedByInvoiceNo: entry.claimedByInvoiceNo || matchedSale?.receiptNo || null
                     });
                 });
                 return list.sort((a, b) => (Number(b.receivedAt) || 0) - (Number(a.receivedAt) || 0));
@@ -18719,8 +18736,113 @@
             ));
         }, [secretChatIdsByShop]);
 
+        // ============================================================================
+        // REAL-TIME VLOOKUP ENGINE: Bank Statement (TG Feed) <-> Sale Detail Report
+        // When Bank State Bypass Firebase Database is ON (Bypass DB), raw Telegram
+        // transactions stream directly from Render.com -> Web Application Caches.
+        // This VLOOKUP index cross-references every Bank Statement row's APV & Trx ID
+        // against the Sale Detail Report `Reference: APV/Trx` column (`salesData` +
+        // `SolarisLocalSalesStore`) to automatically judge Verified vs. Unverified!
+        // ============================================================================
+        const saleDetailVlookupIndex = useMemo(() => {
+            const byTrxId = new Map();
+            const byApv = new Map();
+            const byOrderId = new Map();
+            const byReceiptNo = new Map();
+
+            const registerSaleRecord = (s) => {
+                if (!s || s.status === 'void') return;
+                if (s.id) byOrderId.set(String(s.id).trim(), s);
+                if (s.receiptNo) byReceiptNo.set(String(s.receiptNo).trim().toUpperCase(), s);
+                const trx = String(s.abaTrxId || '').trim();
+                if (trx) byTrxId.set(trx, s);
+                const apv = String(s.abaApv || '').trim().toUpperCase();
+                if (apv) {
+                    if (!byApv.has(apv)) byApv.set(apv, []);
+                    const list = byApv.get(apv);
+                    if (!list.some(existing => existing.id === s.id)) {
+                        list.push(s);
+                    }
+                }
+            };
+
+            // 1. Index all active sales in the current Sale Detail Report date range
+            (salesData || []).forEach(registerSaleRecord);
+
+            // 2. Also index all locally cached POS sales so cross-tab/recent sales are always VLOOKUP-able
+            if (window.SolarisLocalSalesStore) {
+                window.SolarisLocalSalesStore.getSales().forEach(registerSaleRecord);
+            }
+
+            return { byTrxId, byApv, byOrderId, byReceiptNo };
+        }, [salesData]);
+
+        // VLOOKUPs a Bank Statement item against the Sale Detail Report Reference: APV/Trx column
+        const vlookupBankVerification = useCallback((bankItem) => {
+            if (!bankItem) return { isVerified: false, matchedSale: null, invoiceNo: '', orderId: '' };
+
+            const trxId = String(bankItem.trxId || bankItem.id || '').trim();
+            const apv = String(bankItem.apv || '').trim().toUpperCase();
+            const directOrderId = String(bankItem.claimedByOrderId || '').trim();
+            const directInvoiceNo = String(bankItem.claimedByInvoiceNo || '').trim();
+
+            let matchedSale = null;
+
+            // 1. Exact VLOOKUP by Trx ID in Sale Detail Report (`Reference: APV/Trx`)
+            if (trxId && saleDetailVlookupIndex.byTrxId.has(trxId)) {
+                matchedSale = saleDetailVlookupIndex.byTrxId.get(trxId);
+            }
+
+            // 2. VLOOKUP by Order ID or Invoice Number
+            if (!matchedSale && directOrderId && saleDetailVlookupIndex.byOrderId.has(directOrderId)) {
+                matchedSale = saleDetailVlookupIndex.byOrderId.get(directOrderId);
+            }
+            if (!matchedSale && directInvoiceNo && saleDetailVlookupIndex.byReceiptNo.has(directInvoiceNo.toUpperCase())) {
+                matchedSale = saleDetailVlookupIndex.byReceiptNo.get(directInvoiceNo.toUpperCase());
+            }
+
+            // 3. VLOOKUP by APV Code in Sale Detail Report (`Reference: APV/Trx`)
+            if (!matchedSale && apv && saleDetailVlookupIndex.byApv.has(apv)) {
+                const candidates = saleDetailVlookupIndex.byApv.get(apv) || [];
+                if (candidates.length === 1) {
+                    matchedSale = candidates[0];
+                } else if (candidates.length > 1) {
+                    const bankAmt = Number(bankItem.amount) || 0;
+                    const isUsd = String(bankItem.currency || 'KHR').toUpperCase() === 'USD';
+                    matchedSale = candidates.find(s => {
+                        const rate = Math.max(100, Number(s.exchangeRate) || 4000);
+                        const expectedKhr = Number(s.grandTotal) || 0;
+                        return isUsd
+                            ? Math.abs(Math.round(bankAmt * rate) - expectedKhr) <= 200
+                            : Math.abs(bankAmt - expectedKhr) <= 100;
+                    }) || candidates[0];
+                }
+            }
+
+            const resolvedOrderId = matchedSale?.id || directOrderId || '';
+            const resolvedInvoiceNo = matchedSale?.receiptNo || directInvoiceNo || directOrderId || '';
+            const isVerified = !!(matchedSale || resolvedOrderId);
+
+            // Sync VLOOKUP match back into local memory cache so POS Verifier & Render cache stay in sync
+            if (isVerified && trxId && window.SolarisPayWayVerifier) {
+                window.SolarisPayWayVerifier.processedTrxIdsMemory.add(trxId);
+                const memEntry = window.SolarisPayWayVerifier.inMemoryAbaPayments.get(trxId);
+                if (memEntry && !memEntry.claimedByOrderId) {
+                    memEntry.claimedByOrderId = resolvedOrderId || 'VERIFIED_BY_VLOOKUP';
+                    if (resolvedInvoiceNo) memEntry.claimedByInvoiceNo = resolvedInvoiceNo;
+                }
+            }
+
+            return {
+                isVerified,
+                matchedSale,
+                orderId: resolvedOrderId,
+                invoiceNo: resolvedInvoiceNo
+            };
+        }, [saleDetailVlookupIndex]);
+
         // Strictly resolves which shop a bank transaction belongs to:
-        // 0. Explicit shopId or Linked POS Sale (claimedByOrderId / claimedByInvoiceNo)
+        // 0. Explicit shopId or Linked/VLOOKUP POS Sale (claimedByOrderId / claimedByInvoiceNo / APV / Trx ID)
         // 1. Telegram Group Chat ID match (`paywayChatId`)
         // 2. Merchant Account Name / Invoice Prefix match (`accountName`)
         const resolveShopForBankPayment = useCallback((paymentItem) => {
@@ -18732,22 +18854,17 @@
                 if (directShop) return directShop;
             }
 
-            // 0B. Linked POS Sale or Invoice Prefix match
-            if (paymentItem.claimedByOrderId || paymentItem.claimedByInvoiceNo) {
-                const linkedSale = salesData.find(s =>
-                    (paymentItem.claimedByOrderId && s.id === paymentItem.claimedByOrderId) ||
-                    (paymentItem.claimedByInvoiceNo && s.receiptNo === paymentItem.claimedByInvoiceNo)
-                );
-                if (linkedSale?.shopId) {
-                    const saleShop = shops.find(s => s.id === linkedSale.shopId);
-                    if (saleShop) return saleShop;
-                }
-                if (paymentItem.claimedByInvoiceNo && window.SolarisInvoiceEngine) {
-                    const invPrefix = String(paymentItem.claimedByInvoiceNo).split('-')[0].trim().toUpperCase();
-                    if (invPrefix) {
-                        const prefixShops = shops.filter(s => window.SolarisInvoiceEngine.getShopPrefix(s) === invPrefix);
-                        if (prefixShops.length === 1) return prefixShops[0];
-                    }
+            // 0B. VLOOKUP against Sale Detail Report (`Reference: APV/Trx`) or Linked POS Sale
+            const vlookupRes = vlookupBankVerification(paymentItem);
+            if (vlookupRes.matchedSale?.shopId) {
+                const saleShop = shops.find(s => s.id === vlookupRes.matchedSale.shopId);
+                if (saleShop) return saleShop;
+            }
+            if (vlookupRes.invoiceNo && window.SolarisInvoiceEngine) {
+                const invPrefix = String(vlookupRes.invoiceNo).split('-')[0].trim().toUpperCase();
+                if (invPrefix) {
+                    const prefixShops = shops.filter(s => window.SolarisInvoiceEngine.getShopPrefix(s) === invPrefix);
+                    if (prefixShops.length === 1) return prefixShops[0];
                 }
             }
 
@@ -18788,7 +18905,7 @@
             }
 
             return null;
-        }, [shops, salesData, stripTgChatId, getShopPaywayChatIds, getShopMerchantAliases]);
+        }, [shops, stripTgChatId, getShopPaywayChatIds, getShopMerchantAliases, vlookupBankVerification]);
 
         // Strict Shop Filter: When a Shop is selected, ONLY display transactions belonging to that shop!
         const matchesShopBankFilter = useCallback((paymentItem, shopObj) => {
@@ -19157,13 +19274,15 @@
                 const payer = (b.payerName || '').toLowerCase();
                 const bank = (b.sourceBank || b.paymentChannel || '').toLowerCase();
                 const apv = (b.apv || '').toLowerCase();
+                const trx = (b.trxId || '').toLowerCase();
                 const shopObj = resolveShopForBankPayment(b);
                 const shopName = (shopObj?.name || b.merchantName || '').toLowerCase();
-                const saleMatch = salesData.find(s => s.id === b.claimedByOrderId);
-                const invoice = (b.claimedByInvoiceNo || saleMatch?.receiptNo || b.claimedByOrderId || '').toLowerCase();
-                return payer.includes(q) || bank.includes(q) || apv.includes(q) || invoice.includes(q) || shopName.includes(q);
+                const vlookup = vlookupBankVerification(b);
+                const invoice = (vlookup.invoiceNo || '').toLowerCase();
+                const statusStr = vlookup.isVerified ? 'verified' : 'unverified';
+                return payer.includes(q) || bank.includes(q) || apv.includes(q) || trx.includes(q) || invoice.includes(q) || shopName.includes(q) || statusStr.includes(q);
             });
-        }, [shopFilteredBankStateData, bankStateSearchTerm, salesData, resolveShopForBankPayment]);
+        }, [shopFilteredBankStateData, bankStateSearchTerm, resolveShopForBankPayment, vlookupBankVerification]);
 
         const totalBankStatePages = Math.ceil(filteredBankStateData.length / bankStateItemsPerPage);
         const paginatedBankStateData = useMemo(() => {
@@ -19204,7 +19323,8 @@
                 const entry = map.get(shopKey);
                 const amt = Number(b.amount) || 0;
                 const isUsd = String(b.currency || 'KHR').toUpperCase() === 'USD';
-                const isClaimed = !!b.claimedByOrderId;
+                const vlookup = vlookupBankVerification(b);
+                const isClaimed = vlookup.isVerified;
 
                 entry.trxCount += 1;
                 if (isClaimed) entry.verifiedCount += 1;
@@ -19236,7 +19356,7 @@
                 grandVerifiedCount,
                 grandUnverifiedCount: Math.max(0, grandCount - grandVerifiedCount)
             };
-        }, [filteredBankStateData, resolveShopForBankPayment]);
+        }, [filteredBankStateData, resolveShopForBankPayment, vlookupBankVerification]);
 
         // Smart Refresh Handler for Live Feed Mode (Forces MTProto + Render SSE + Bot + Firestore Sync)
         const handleSmartBankFeedRefresh = useCallback(async () => {
@@ -19538,29 +19658,120 @@
         const [detailViewMode, setDetailViewMode] = useState('receipts'); // 'receipts' (Master-Detail) | 'items' (Flat Line-Items)
         const [expandedReceiptIds, setExpandedReceiptIds] = useState({});
         const [detailSearchTerm, setDetailSearchTerm] = useState('');
+        const [hoveredSalePopover, setHoveredSalePopover] = useState(null);
+        const hoverPopoverTimeoutRef = useRef(null);
+
+        const handleShowSaleHoverPopover = useCallback((e, sale, bankMeta, financials) => {
+            if (!sale) return;
+            if (hoverPopoverTimeoutRef.current) {
+                clearTimeout(hoverPopoverTimeoutRef.current);
+                hoverPopoverTimeoutRef.current = null;
+            }
+            setHoveredSalePopover({
+                sale,
+                bankMeta,
+                financials
+            });
+        }, []);
+
+        const handleHideSaleHoverPopover = useCallback(() => {
+            if (hoverPopoverTimeoutRef.current) clearTimeout(hoverPopoverTimeoutRef.current);
+            hoverPopoverTimeoutRef.current = setTimeout(() => {
+                setHoveredSalePopover(null);
+            }, 160);
+        }, []);
 
         const toggleReceiptExpand = (saleId) => {
             setExpandedReceiptIds(prev => ({ ...prev, [saleId]: !prev[saleId] }));
         };
+
+        // Cross-references POS Sale with auto-verified ABA PayWay fields AND live/cached Bank Statement feed
+        const resolveSaleBankVerifyMeta = useCallback((sale) => {
+            if (!sale) return { isBank: false, isVerified: false, apv: '', trxId: '', payer: '', channel: '', paidAmountStr: '', paidAtStr: '', rawText: '' };
+            const rawMethod = String(sale.paymentMethod || '');
+            const isBank = rawMethod === 'KHQR' || rawMethod === 'Bank' || rawMethod === 'KHQR (ABA)' || !!sale.abaVerified || !!sale.abaApv || !!sale.abaTrxId;
+
+            let apv = String(sale.abaApv || '').trim();
+            let trxId = String(sale.abaTrxId || '').trim();
+            let payer = String(sale.abaPayer || '').trim();
+            let channel = String(sale.abaSourceBank || sale.abaPaymentChannel || '').trim();
+            let paidAmountStr = String(sale.abaPaidAmountStr || '').trim();
+            let paidAtStr = String(sale.abaPaidAtStr || '').trim();
+            let rawText = '';
+            let isVerified = !!(sale.abaVerified || apv || trxId);
+
+            // Cross-check against Bank Statement feed / In-Memory Verifier if linked by Order ID, Invoice No, Trx ID, or APV
+            if (isBank) {
+                const matchedBank = bankStateData.find(b =>
+                    (b.claimedByOrderId && b.claimedByOrderId === sale.id) ||
+                    (b.claimedByInvoiceNo && sale.receiptNo && b.claimedByInvoiceNo === sale.receiptNo) ||
+                    (trxId && String(b.trxId) === trxId) ||
+                    (apv && String(b.apv).toUpperCase() === apv.toUpperCase())
+                );
+                if (matchedBank) {
+                    isVerified = true;
+                    if (!apv && matchedBank.apv) apv = String(matchedBank.apv).trim();
+                    if (!trxId && matchedBank.trxId) trxId = String(matchedBank.trxId).trim();
+                    if (!payer && matchedBank.payerName) payer = `${matchedBank.payerName} (${matchedBank.maskedAccount || '*ABA'})`;
+                    if (!channel) channel = matchedBank.sourceBank || matchedBank.paymentChannel || 'ABA Bank';
+                    if (!paidAmountStr && matchedBank.amount) {
+                        paidAmountStr = matchedBank.currency === 'USD'
+                            ? `$${Number(matchedBank.amount).toFixed(2)}`
+                            : `៛${khrFormatter.format(matchedBank.amount)}`;
+                    }
+                    if (!paidAtStr && matchedBank.paidAtStr) paidAtStr = matchedBank.paidAtStr;
+                    if (matchedBank.rawText) rawText = matchedBank.rawText;
+                } else if (window.SolarisPayWayVerifier?.inMemoryAbaPayments) {
+                    for (const [, entry] of window.SolarisPayWayVerifier.inMemoryAbaPayments.entries()) {
+                        const p = entry?.parsedAba;
+                        if (!p) continue;
+                        if (
+                            (entry.claimedByOrderId && entry.claimedByOrderId === sale.id) ||
+                            (entry.claimedByInvoiceNo && sale.receiptNo && entry.claimedByInvoiceNo === sale.receiptNo) ||
+                            (trxId && String(p.trxId) === trxId) ||
+                            (apv && String(p.apv).toUpperCase() === apv.toUpperCase())
+                        ) {
+                            isVerified = true;
+                            if (!apv && p.apv) apv = String(p.apv).trim();
+                            if (!trxId && p.trxId) trxId = String(p.trxId).trim();
+                            if (!payer && p.payerName) payer = `${p.payerName} (${p.maskedAccount || '*ABA'})`;
+                            if (!channel) channel = p.sourceBank || p.paymentChannel || 'ABA Bank';
+                            if (!paidAmountStr && p.amount) {
+                                paidAmountStr = p.currency === 'USD'
+                                    ? `$${Number(p.amount).toFixed(2)}`
+                                    : `៛${khrFormatter.format(p.amount)}`;
+                            }
+                            if (!paidAtStr && p.paidAtStr) paidAtStr = p.paidAtStr;
+                            if (p.rawText) rawText = p.rawText;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return { isBank, isVerified, apv, trxId, payer, channel, paidAmountStr, paidAtStr, rawText };
+        }, [bankStateData]);
 
         const sortedDetailSales = useMemo(() => {
             const q = detailSearchTerm.trim().toLowerCase();
             return [...salesData]
                 .filter(sale => {
                     if (!q) return true;
+                    const bankMeta = resolveSaleBankVerifyMeta(sale);
                     const matchReceipt = (sale.receiptNo || '').toLowerCase().includes(q);
                     const matchCashier = (sale.cashierName || '').toLowerCase().includes(q);
                     const matchCustomer = (sale.customerName || '').toLowerCase().includes(q);
                     const matchShop = (sale.shopName || '').toLowerCase().includes(q);
+                    const matchApvOrTrx = bankMeta.apv.toLowerCase().includes(q) || bankMeta.trxId.toLowerCase().includes(q) || bankMeta.payer.toLowerCase().includes(q);
                     const matchItem = (sale.items || []).some(item =>
                         (item.name || '').toLowerCase().includes(q) ||
                         (item.code || '').toLowerCase().includes(q) ||
                         String(item.barcode || '').toLowerCase().includes(q)
                     );
-                    return matchReceipt || matchCashier || matchCustomer || matchShop || matchItem;
+                    return matchReceipt || matchCashier || matchCustomer || matchShop || matchApvOrTrx || matchItem;
                 })
                 .sort((a, b) => safeToDate(b.timestamp) - safeToDate(a.timestamp));
-        }, [salesData, detailSearchTerm]);
+        }, [salesData, detailSearchTerm, resolveSaleBankVerifyMeta]);
 
         const expandAllReceipts = () => {
             const allMap = {};
@@ -19572,18 +19783,20 @@
             setExpandedReceiptIds({});
         };
 
-        // Flattened Itemized List (with Receipt & Payment context)
+        // Flattened Itemized List (with Receipt, Payment & Bank Verify Reference context)
         const saleByItems = useMemo(() => {
             const items = [];
             const q = detailSearchTerm.trim().toLowerCase();
             sortedDetailSales.forEach(sale => {
                 const { discountVal } = computeSaleFinancials(sale);
+                const bankMeta = resolveSaleBankVerifyMeta(sale);
                 (sale.items || []).forEach((item, index) => {
                     if (q) {
                         const matchReceipt = (sale.receiptNo || '').toLowerCase().includes(q);
                         const matchCashier = (sale.cashierName || '').toLowerCase().includes(q);
+                        const matchApvOrTrx = bankMeta.apv.toLowerCase().includes(q) || bankMeta.trxId.toLowerCase().includes(q);
                         const matchItem = (item.name || '').toLowerCase().includes(q) || (item.code || '').toLowerCase().includes(q);
-                        if (!matchReceipt && !matchCashier && !matchItem) return;
+                        if (!matchReceipt && !matchCashier && !matchApvOrTrx && !matchItem) return;
                     }
                     const qty = Number(item.quantity) || 0;
                     const price = Number(item.price) || 0;
@@ -19605,6 +19818,7 @@
                         cashierName: sale.cashierName,
                         customerName: sale.customerName || 'Walk-in',
                         paymentMethod: sale.paymentMethod,
+                        bankMeta,
                         status: sale.status,
                         productName: item.name,
                         code: item.code,
@@ -19622,7 +19836,7 @@
                 });
             });
             return items;
-        }, [sortedDetailSales, detailSearchTerm, productMap, computeSaleFinancials]);
+        }, [sortedDetailSales, detailSearchTerm, productMap, computeSaleFinancials, resolveSaleBankVerifyMeta]);
 
         // --- NEW: Handle Export Logic ---
         const handleExport = () => {
@@ -19667,7 +19881,17 @@
                 const itemData = [];
                 sortedDetailSales.forEach(s => {
                     const { discountVal, subtotalVal } = computeSaleFinancials(s);
-                    const payMethod = s.paymentMethod === 'KHQR' || s.paymentMethod === 'KHQR (ABA)' ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash');
+                    const bankMeta = resolveSaleBankVerifyMeta(s);
+                    const payMethod = bankMeta.isBank ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash');
+                    const statusLabel = s.status === 'void'
+                        ? 'VOID'
+                        : bankMeta.isBank
+                            ? (bankMeta.isVerified ? 'PAID / VERIFIED' : 'PAID / UNVERIFIED')
+                            : 'PAID';
+                    const refApvTrx = bankMeta.isBank
+                        ? [bankMeta.apv ? `APV: ${bankMeta.apv}` : '', bankMeta.trxId ? `Trx: ${bankMeta.trxId}` : ''].filter(Boolean).join(' | ') || '-'
+                        : '-';
+
                     (s.items || []).forEach(item => {
                         const qty = Number(item.quantity) || 0;
                         const price = Number(item.price) || 0;
@@ -19687,6 +19911,7 @@
                             'Cashier': s.cashierName,
                             'Customer': s.customerName || 'Walk-in',
                             'Payment Method': payMethod,
+                            'Reference: APV/Trx': refApvTrx,
                             'Product Name': item.name,
                             'Product Code': item.code,
                             'Item Note': item.note || '',
@@ -19699,16 +19924,26 @@
                             'Receipt Subtotal (KHR)': subtotalVal,
                             'Receipt Discount (KHR)': discountVal,
                             'Receipt Grand Total (KHR)': s.grandTotal,
-                            'Status': s.status === 'void' ? 'VOID' : 'PAID'
+                            'Status': statusLabel
                         });
                     });
                 });
                 ws = XLSX.utils.json_to_sheet(itemData);
-                ws['!cols'] = [{wch:20}, {wch:16}, {wch:16}, {wch:15}, {wch:16}, {wch:15}, {wch:28}, {wch:14}, {wch:18}, {wch:8}, {wch:15}, {wch:15}, {wch:18}, {wch:16}, {wch:14}, {wch:18}, {wch:18}, {wch:20}, {wch:10}];
+                ws['!cols'] = [{wch:20}, {wch:16}, {wch:16}, {wch:15}, {wch:16}, {wch:15}, {wch:26}, {wch:28}, {wch:14}, {wch:18}, {wch:8}, {wch:15}, {wch:15}, {wch:18}, {wch:16}, {wch:14}, {wch:18}, {wch:18}, {wch:20}, {wch:18}];
 
                 const receiptData = sortedDetailSales.map(s => {
                     const { discountVal, subtotalVal, revenueVal, costVal, profitVal, marginPct } = computeSaleFinancials(s);
+                    const bankMeta = resolveSaleBankVerifyMeta(s);
                     const itemSummary = (s.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ');
+                    const statusLabel = s.status === 'void'
+                        ? 'VOID'
+                        : bankMeta.isBank
+                            ? (bankMeta.isVerified ? 'PAID / VERIFIED' : 'PAID / UNVERIFIED')
+                            : 'PAID';
+                    const refApvTrx = bankMeta.isBank
+                        ? [bankMeta.apv ? `APV: ${bankMeta.apv}` : '', bankMeta.trxId ? `Trx: ${bankMeta.trxId}` : ''].filter(Boolean).join(' | ') || '-'
+                        : '-';
+
                     return {
                         'Date/Time': safeFormatDateTime(s.timestamp || s.createdAt, ''),
                         'Receipt #': s.receiptNo,
@@ -19716,19 +19951,20 @@
                         'Cashier': s.cashierName,
                         'Customer': s.customerName || 'Walk-in',
                         'Items Summary': itemSummary,
-                        'Payment Method': s.paymentMethod === 'KHQR' ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash'),
+                        'Payment Method': bankMeta.isBank ? 'BANK (KHQR)' : (s.paymentMethod || 'Cash'),
+                        'Reference: APV/Trx': refApvTrx,
                         'Subtotal (KHR)': subtotalVal,
                         'Discount (KHR)': discountVal,
                         'Total (KHR)': revenueVal,
                         'Total Cost (KHR)': costVal,
                         'Profit (KHR)': profitVal,
                         'Margin (%)': parseFloat(marginPct.toFixed(2)),
-                        'Status': s.status === 'void' ? 'VOID' : 'PAID'
+                        'Status': statusLabel
                     };
                 });
                 
                 const wsReceipts = XLSX.utils.json_to_sheet(receiptData);
-                wsReceipts['!cols'] = [{wch:20}, {wch:16}, {wch:16}, {wch:15}, {wch:16}, {wch:40}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:10}, {wch:10}];
+                wsReceipts['!cols'] = [{wch:20}, {wch:16}, {wch:16}, {wch:15}, {wch:16}, {wch:40}, {wch:15}, {wch:26}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:15}, {wch:10}, {wch:18}];
                 
                 XLSX.utils.book_append_sheet(wb, wsReceipts, "Receipts");
                 XLSX.utils.book_append_sheet(wb, ws, "Line Items"); // ws is itemData
@@ -19786,8 +20022,8 @@
                 const data = filteredBankStateData.map(b => {
                     const shopObj = resolveShopForBankPayment(b);
                     const shopName = shopObj ? shopObj.name : (b.merchantName || 'Unknown');
-                    const saleMatch = salesData.find(s => s.id === b.claimedByOrderId);
-                    const displayInvoice = b.claimedByInvoiceNo || saleMatch?.receiptNo || b.claimedByOrderId || '';
+                    const vlookup = vlookupBankVerification(b);
+                    const displayInvoice = vlookup.invoiceNo || '';
                     return {
                         'Date & Time': formatDateTimeFullAba(b.receivedAt || b.paidTimestamp),
                         'Shop Name': shopName,
@@ -19797,7 +20033,7 @@
                         'Bank Name': b.sourceBank || b.paymentChannel || 'ABA Bank',
                         'APV': b.apv || '',
                         'Trx ID': b.trxId || '',
-                        'Status': b.claimedByOrderId ? 'Verified (Claimed)' : 'Unverified (Open)',
+                        'Status': vlookup.isVerified ? 'Verified (Matched Sale Detail)' : 'Unverified (Open)',
                         'Invoice No.': displayInvoice
                     };
                 });
@@ -20660,11 +20896,201 @@
                                     </div>
                                 </Card>
 
+                                {/* Centered Mouse-Over Completed Transaction Detail Modal for Status & Reference: APV/Trx */}
+                                {hoveredSalePopover && hoveredSalePopover.sale && (
+                                    <div
+                                        style={{
+                                            position: 'fixed',
+                                            inset: 0,
+                                            zIndex: 280
+                                        }}
+                                        className="flex items-center justify-center p-4 pointer-events-none"
+                                    >
+                                        <div
+                                            onMouseEnter={() => {
+                                                if (hoverPopoverTimeoutRef.current) {
+                                                    clearTimeout(hoverPopoverTimeoutRef.current);
+                                                    hoverPopoverTimeoutRef.current = null;
+                                                }
+                                            }}
+                                            onMouseLeave={handleHideSaleHoverPopover}
+                                            className="pointer-events-auto w-full max-w-[380px] bg-slate-900/95 backdrop-blur-md border border-slate-600/90 rounded-2xl shadow-[0_25px_70px_rgba(0,0,0,0.85)] p-4 sm:p-5 text-xs text-slate-200 animate-fade-in-up"
+                                        >
+                                            {(() => {
+                                                const hSale = hoveredSalePopover.sale;
+                                                const hBank = hoveredSalePopover.bankMeta || { isBank: false, isVerified: false };
+                                                const hFin = hoveredSalePopover.financials || computeSaleFinancials(hSale);
+                                                const isVoid = hSale.status === 'void';
+                                                return (
+                                                    <div className="space-y-3">
+                                                        {/* Top Header: Status Badge + Receipt No */}
+                                                        <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-700/80">
+                                                            <div>
+                                                                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                                                    Completed Transaction Detail
+                                                                </div>
+                                                                <div className="text-sm font-black font-mono text-white mt-0.5 flex items-center gap-1.5">
+                                                                    <i className="fas fa-receipt text-blue-400 text-xs"></i>
+                                                                    <span>{hSale.receiptNo || 'N/A'}</span>
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex items-center gap-1.5">
+                                                                {isVoid ? (
+                                                                    <span className="px-2.5 py-1 rounded-lg bg-red-500/20 text-red-300 border border-red-500/40 text-[10px] font-black uppercase">
+                                                                        VOIDED
+                                                                    </span>
+                                                                ) : hBank.isBank ? (
+                                                                    hBank.isVerified ? (
+                                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black uppercase">
+                                                                            <i className="fas fa-check-double text-emerald-400"></i>
+                                                                            <span>PAID / VERIFIED</span>
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-black uppercase">
+                                                                            <i className="fas fa-clock text-amber-400"></i>
+                                                                            <span>PAID / UNVERIFIED</span>
+                                                                        </span>
+                                                                    )
+                                                                ) : (
+                                                                    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black uppercase">
+                                                                        <i className="fas fa-check-circle text-emerald-400"></i>
+                                                                        <span>PAID (CASH)</span>
+                                                                    </span>
+                                                                )}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setHoveredSalePopover(null)}
+                                                                    className="w-6 h-6 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center border border-slate-700 transition"
+                                                                    title="Close"
+                                                                >
+                                                                    <i className="fas fa-times text-[10px]"></i>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Receipt Metadata */}
+                                                        <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px] bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
+                                                            <div>
+                                                                <span className="text-slate-400 block text-[10px]">Date &amp; Time</span>
+                                                                <span className="font-mono font-bold text-slate-200">{safeFormatDateTime(hSale.timestamp || hSale.createdAt, 'N/A')}</span>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-400 block text-[10px]">Shop &amp; Terminal</span>
+                                                                <span className="font-bold text-slate-200 truncate block">{hSale.shopName || 'Shop'} • {hSale.deviceName || 'POS'}</span>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-400 block text-[10px]">Cashier</span>
+                                                                <span className="font-semibold text-slate-200">{hSale.cashierName || 'Staff'}</span>
+                                                            </div>
+                                                            <div>
+                                                                <span className="text-slate-400 block text-[10px]">Customer</span>
+                                                                <span className="font-semibold text-amber-300 truncate block">{hSale.customerName || 'Walk-in'}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* ABA PayWay / Bank Verification Block (When Paid by Bank/KHQR) */}
+                                                        {hBank.isBank ? (
+                                                            <div className={`p-2.5 rounded-xl border space-y-1.5 ${
+                                                                hBank.isVerified
+                                                                    ? 'bg-emerald-950/35 border-emerald-500/40'
+                                                                    : 'bg-amber-950/30 border-amber-500/40'
+                                                            }`}>
+                                                                <div className="flex items-center justify-between">
+                                                                    <span className="text-[10px] font-black uppercase tracking-wider text-sky-300 flex items-center gap-1">
+                                                                        <i className="fas fa-university"></i>
+                                                                        <span>{hBank.channel || 'ABA PayWay KHQR'}</span>
+                                                                    </span>
+                                                                    {hBank.paidAmountStr && (
+                                                                        <span className="font-mono font-black text-emerald-400 text-xs">
+                                                                            {hBank.paidAmountStr}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono pt-1 border-t border-slate-700/60">
+                                                                    <div>
+                                                                        <span className="text-slate-400 text-[10px] block font-sans">APV Code</span>
+                                                                        <span className="text-amber-300 font-bold">{hBank.apv || 'Unverified'}</span>
+                                                                    </div>
+                                                                    <div>
+                                                                        <span className="text-slate-400 text-[10px] block font-sans">Trx. ID</span>
+                                                                        <span className="text-slate-200 font-bold break-all">{hBank.trxId || '—'}</span>
+                                                                    </div>
+                                                                </div>
+                                                                {hBank.payer && (
+                                                                    <div className="text-[11px] text-slate-200 pt-0.5">
+                                                                        <span className="text-slate-400">Paid By: </span>
+                                                                        <strong className="text-white">{hBank.payer}</strong>
+                                                                    </div>
+                                                                )}
+                                                                {hBank.rawText && (
+                                                                    <div className="text-[10px] font-mono text-slate-400 bg-slate-950/70 p-1.5 rounded border border-slate-800 line-clamp-2">
+                                                                        {hBank.rawText}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="p-2.5 rounded-xl bg-slate-800/70 border border-slate-700 flex items-center justify-between text-[11px]">
+                                                                <span className="text-slate-300 font-bold flex items-center gap-1.5">
+                                                                    <i className="fas fa-money-bill-wave text-emerald-400"></i>
+                                                                    <span>Cash Tendered</span>
+                                                                </span>
+                                                                <span className="font-mono text-slate-200">
+                                                                    ៛{khrFormatter.format(hSale.amountTendered || hSale.grandTotal || 0)}
+                                                                    {hSale.changeDue > 0 ? ` (Change: ៛${khrFormatter.format(hSale.changeDue)})` : ''}
+                                                                </span>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Purchased Items Mini-List */}
+                                                        <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-2.5">
+                                                            <div className="text-[10px] font-bold uppercase text-slate-400 mb-1.5 flex justify-between">
+                                                                <span>Items Sold ({(hSale.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0)} Qty)</span>
+                                                                <span>Subtotal: ៛{khrFormatter.format(hFin.subtotalVal)}</span>
+                                                            </div>
+                                                            <div className="space-y-1 max-h-32 overflow-y-auto pr-1 divide-y divide-slate-800/70">
+                                                                {(hSale.items || []).map((it, idx) => (
+                                                                    <div key={idx} className="flex justify-between items-center text-[11px] pt-1 first:pt-0">
+                                                                        <span className="text-slate-200 truncate pr-2">
+                                                                            <strong className="text-blue-300 font-mono">{it.quantity}x</strong> {it.name}
+                                                                        </span>
+                                                                        <span className="font-mono font-bold text-emerald-400 shrink-0">
+                                                                            ៛{khrFormatter.format((Number(it.price) || 0) * (Number(it.quantity) || 0))}
+                                                                        </span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Financial Footer */}
+                                                        <div className="flex items-center justify-between pt-2 border-t border-slate-700/80">
+                                                            <div className="text-[11px] space-x-2">
+                                                                <span className="text-slate-400">
+                                                                    Profit: <strong className="text-yellow-400 font-mono">៛{khrFormatter.format(hFin.profitVal)}</strong>
+                                                                </span>
+                                                                <span className="text-slate-500">•</span>
+                                                                <span className="text-slate-400">
+                                                                    Margin: <strong className="text-cyan-400 font-mono">{hFin.marginPct.toFixed(1)}%</strong>
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <span className="text-[10px] text-slate-400 uppercase font-bold mr-1.5">Total:</span>
+                                                                <span className="text-sm font-black text-emerald-400 font-mono">
+                                                                    ៛{khrFormatter.format(hSale.grandTotal || 0)}
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* 2. Dedicated Sale Detail Report Body Table Card */}
                                 <Card className="p-0 overflow-hidden">
                                     <div className="overflow-x-auto">
                                         {detailViewMode === 'receipts' ? (
-                                            /* MODE 1: Master-Detail Receipts Table with Dedicated Product, QTY, Discount %, Net Profit & Sale Margin Columns */
+                                            /* MODE 1: Master-Detail Receipts Table with Dedicated Product, QTY, Discount %, Net Profit, Sale Margin, Status (Paid/Verified) & Reference: APV/Trx Columns */
                                             <table className="min-w-full divide-y divide-slate-700">
                                                 <thead className="bg-slate-900/50">
                                                     <tr>
@@ -20681,13 +21107,14 @@
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Profit</th>
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
                                                         <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reference: APV/Trx</th>
                                                         <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody className="divide-y divide-slate-700">
                                                     {sortedDetailSales.length === 0 ? (
                                                         <tr>
-                                                            <td colSpan="14" className="px-4 py-8 text-center text-slate-500">
+                                                            <td colSpan="15" className="px-4 py-8 text-center text-slate-500">
                                                                 No sales found matching the current filters.
                                                             </td>
                                                         </tr>
@@ -20696,7 +21123,8 @@
                                                         const discountPctVal = Number(sale.manualDiscountPct) > 0 && !(Number(sale.redemptionAmount) > 0)
                                                             ? Number(sale.manualDiscountPct)
                                                             : (subtotalVal > 0 && discountAmt > 0 ? ((discountAmt / subtotalVal) * 100) : 0);
-                                                        const isBank = sale.paymentMethod === 'KHQR' || sale.paymentMethod === 'Bank' || sale.paymentMethod === 'KHQR (ABA)';
+                                                        const bankMeta = resolveSaleBankVerifyMeta(sale);
+                                                        const isBank = bankMeta.isBank;
                                                         const isExpanded = !!expandedReceiptIds[sale.id];
                                                         const totalQty = (sale.items || []).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
                                                         const firstItemName = sale.items?.[0]?.name || 'No items';
@@ -20763,11 +21191,54 @@
                                                                             {receiptMarginPct.toFixed(1)}%
                                                                         </span>
                                                                     </td>
-                                                                    <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
-                                                                        {sale.status === 'void' 
-                                                                            ? <span className="bg-red-900/50 text-red-300 px-2 py-1 rounded text-xs font-bold">VOID</span>
-                                                                            : <span className="bg-green-900/50 text-green-300 px-2 py-1 rounded text-xs font-bold">PAID</span>
-                                                                        }
+                                                                    <td
+                                                                        className="px-4 py-3 text-sm text-center whitespace-nowrap"
+                                                                        onMouseEnter={(e) => handleShowSaleHoverPopover(e, sale, bankMeta, { discountVal: discountAmt, subtotalVal, revenueVal: sale.grandTotal, costVal: receiptCost, profitVal: receiptProfit, marginPct: receiptMarginPct })}
+                                                                        onMouseLeave={handleHideSaleHoverPopover}
+                                                                    >
+                                                                        {sale.status === 'void' ? (
+                                                                            <span className="bg-red-900/50 text-red-300 border border-red-500/40 px-2.5 py-1 rounded-lg text-[11px] font-black uppercase cursor-help">
+                                                                                VOID
+                                                                            </span>
+                                                                        ) : isBank ? (
+                                                                            bankMeta.isVerified ? (
+                                                                                <span className="inline-flex items-center gap-1 bg-emerald-900/60 text-emerald-300 border border-emerald-500/50 px-2.5 py-1 rounded-lg text-[11px] font-black uppercase shadow-sm cursor-help">
+                                                                                    <i className="fas fa-check-double text-[10px] text-emerald-400"></i>
+                                                                                    <span>PAID / VERIFIED</span>
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="inline-flex items-center gap-1 bg-amber-900/50 text-amber-300 border border-amber-500/40 px-2.5 py-1 rounded-lg text-[11px] font-black uppercase cursor-help">
+                                                                                    <i className="fas fa-clock text-[10px] text-amber-400"></i>
+                                                                                    <span>PAID / UNVERIFIED</span>
+                                                                                </span>
+                                                                            )
+                                                                        ) : (
+                                                                            <span className="bg-green-900/50 text-green-300 border border-green-500/40 px-2.5 py-1 rounded-lg text-[11px] font-black uppercase cursor-help">
+                                                                                PAID
+                                                                            </span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td
+                                                                        className="px-4 py-3 text-xs font-mono whitespace-nowrap cursor-help"
+                                                                        onMouseEnter={(e) => handleShowSaleHoverPopover(e, sale, bankMeta, { discountVal: discountAmt, subtotalVal, revenueVal: sale.grandTotal, costVal: receiptCost, profitVal: receiptProfit, marginPct: receiptMarginPct })}
+                                                                        onMouseLeave={handleHideSaleHoverPopover}
+                                                                    >
+                                                                        {isBank ? (
+                                                                            (bankMeta.apv || bankMeta.trxId) ? (
+                                                                                <div className="leading-tight">
+                                                                                    <div className="text-amber-400 font-bold">
+                                                                                        APV: {bankMeta.apv || '-'}
+                                                                                    </div>
+                                                                                    <div className="text-[10px] text-slate-400">
+                                                                                        Trx: {bankMeta.trxId || '-'}
+                                                                                    </div>
+                                                                                </div>
+                                                                            ) : (
+                                                                                <span className="text-slate-500 italic">No APV/Trx</span>
+                                                                            )
+                                                                        ) : (
+                                                                            <span className="text-slate-600">—</span>
+                                                                        )}
                                                                     </td>
                                                                     <td className="px-4 py-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
                                                                         <div className="flex items-center justify-center gap-2">
@@ -20791,17 +21262,24 @@
                                                                 {/* Expanded Itemized Breakdown Row */}
                                                                 {isExpanded && (
                                                                     <tr className="bg-slate-900/70">
-                                                                        <td colSpan="14" className="px-6 py-3 border-l-4 border-l-blue-500">
+                                                                        <td colSpan="15" className="px-6 py-3 border-l-4 border-l-blue-500">
                                                                             <div className="bg-slate-800/90 rounded-lg p-3 border border-slate-700">
                                                                                 <div className="flex flex-wrap justify-between items-center mb-2 pb-1.5 border-b border-slate-700 text-xs text-slate-400">
                                                                                     <span className="font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
                                                                                         <i className="fas fa-shopping-basket"></i>
                                                                                         Itemized Breakdown — Receipt #{sale.receiptNo}
                                                                                     </span>
-                                                                                    <span>
-                                                                                        Customer: <strong className="text-slate-200">{sale.customerName || 'Walk-in'}</strong>
-                                                                                        {sale.abaApv && <span className="ml-3 text-sky-400 font-mono">APV: {sale.abaApv}</span>}
-                                                                                    </span>
+                                                                                    <div className="flex flex-wrap items-center gap-3">
+                                                                                        <span>
+                                                                                            Customer: <strong className="text-slate-200">{sale.customerName || 'Walk-in'}</strong>
+                                                                                        </span>
+                                                                                        {isBank && (bankMeta.apv || bankMeta.trxId) && (
+                                                                                            <span className="text-sky-400 font-mono">
+                                                                                                APV: <strong>{bankMeta.apv || '-'}</strong> | Trx: <strong>{bankMeta.trxId || '-'}</strong>
+                                                                                                {bankMeta.payer ? ` (${bankMeta.payer})` : ''}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
                                                                                 </div>
                                                                                 <table className="w-full text-xs">
                                                                                     <thead className="text-slate-400 uppercase border-b border-slate-700">
@@ -20902,14 +21380,14 @@
                                                                         {overallMarginPct.toFixed(1)}%
                                                                     </span>
                                                                 </td>
-                                                                <td colSpan="2"></td>
+                                                                <td colSpan="3"></td>
                                                             </tr>
                                                         </tfoot>
                                                     );
                                                 })()}
                                             </table>
                                         ) : (
-                                            /* MODE 2: Flat Line-Items Table with Dedicated Product, QTY, Net Profit & Sale Margin Columns */
+                                            /* MODE 2: Flat Line-Items Table with Dedicated Product, QTY, Net Profit, Sale Margin, Status (Paid/Verified) & Reference: APV/Trx Columns */
                                             <table className="min-w-full divide-y divide-slate-700">
                                                 <thead className="bg-slate-900/50">
                                                     <tr>
@@ -20926,18 +21404,20 @@
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Sale Margin</th>
                                                         <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Payment</th>
                                                         <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reference: APV/Trx</th>
                                                         <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Receipt</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody className="divide-y divide-slate-700">
                                                     {saleByItems.length === 0 ? (
                                                         <tr>
-                                                            <td colSpan="14" className="px-4 py-8 text-center text-slate-500">
+                                                            <td colSpan="15" className="px-4 py-8 text-center text-slate-500">
                                                                 No line items found matching the current filters.
                                                             </td>
                                                         </tr>
                                                     ) : saleByItems.map((item) => {
-                                                        const isBank = item.paymentMethod === 'KHQR' || item.paymentMethod === 'Bank' || item.paymentMethod === 'KHQR (ABA)';
+                                                        const bankMeta = item.bankMeta || { isBank: false, isVerified: false, apv: '', trxId: '', payer: '', channel: '' };
+                                                        const isBank = bankMeta.isBank;
                                                         return (
                                                             <tr key={item.uniqueKey} className={`hover:bg-slate-700/50 ${item.status === 'void' ? 'opacity-50' : ''}`}>
                                                                 <td className="px-4 py-3 text-sm text-slate-400 whitespace-nowrap">{safeFormatDateTime(item.date, '-')}</td>
@@ -20974,11 +21454,45 @@
                                                                         {isBank ? 'BANK' : (item.paymentMethod || 'Cash')}
                                                                     </span>
                                                                 </td>
-                                                                <td className="px-4 py-3 text-sm text-center whitespace-nowrap">
-                                                                    {item.status === 'void'
-                                                                        ? <span className="bg-red-900/50 text-red-300 px-2 py-0.5 rounded text-xs font-bold">VOID</span>
-                                                                        : <span className="bg-green-900/50 text-green-300 px-2 py-0.5 rounded text-xs font-bold">PAID</span>
-                                                                    }
+                                                                <td
+                                                                    className="px-4 py-3 text-sm text-center whitespace-nowrap cursor-help"
+                                                                    onMouseEnter={(e) => handleShowSaleHoverPopover(e, item.saleObj, bankMeta, computeSaleFinancials(item.saleObj))}
+                                                                    onMouseLeave={handleHideSaleHoverPopover}
+                                                                >
+                                                                    {item.status === 'void' ? (
+                                                                        <span className="bg-red-900/50 text-red-300 border border-red-500/40 px-2 py-0.5 rounded text-[11px] font-black uppercase">VOID</span>
+                                                                    ) : isBank ? (
+                                                                        bankMeta.isVerified ? (
+                                                                            <span className="inline-flex items-center gap-1 bg-emerald-900/60 text-emerald-300 border border-emerald-500/50 px-2 py-0.5 rounded text-[11px] font-black uppercase">
+                                                                                <i className="fas fa-check-double text-[9px] text-emerald-400"></i>
+                                                                                <span>PAID / VERIFIED</span>
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="inline-flex items-center gap-1 bg-amber-900/50 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded text-[11px] font-black uppercase">
+                                                                                <span>PAID / UNVERIFIED</span>
+                                                                            </span>
+                                                                        )
+                                                                    ) : (
+                                                                        <span className="bg-green-900/50 text-green-300 border border-green-500/40 px-2 py-0.5 rounded text-[11px] font-black uppercase">PAID</span>
+                                                                    )}
+                                                                </td>
+                                                                <td
+                                                                    className="px-4 py-3 text-xs font-mono whitespace-nowrap cursor-help"
+                                                                    onMouseEnter={(e) => handleShowSaleHoverPopover(e, item.saleObj, bankMeta, computeSaleFinancials(item.saleObj))}
+                                                                    onMouseLeave={handleHideSaleHoverPopover}
+                                                                >
+                                                                    {isBank ? (
+                                                                        (bankMeta.apv || bankMeta.trxId) ? (
+                                                                            <div className="leading-tight">
+                                                                                <div className="text-amber-400 font-bold">APV: {bankMeta.apv || '-'}</div>
+                                                                                <div className="text-[10px] text-slate-400">Trx: {bankMeta.trxId || '-'}</div>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <span className="text-slate-500 italic">No APV/Trx</span>
+                                                                        )
+                                                                    ) : (
+                                                                        <span className="text-slate-600">—</span>
+                                                                    )}
                                                                 </td>
                                                                 <td className="px-4 py-3 text-center whitespace-nowrap">
                                                                     <div className="flex items-center justify-center gap-2">
@@ -21031,7 +21545,7 @@
                                                                         {totalLineMarginPct.toFixed(1)}%
                                                                     </span>
                                                                 </td>
-                                                                <td colSpan="3"></td>
+                                                                <td colSpan="4"></td>
                                                             </tr>
                                                         </tfoot>
                                                     );
@@ -21396,9 +21910,10 @@
                                                 {paginatedBankStateData.map(b => {
                                                     const shopObj = resolveShopForBankPayment(b);
                                                     const shopName = shopObj ? shopObj.name : (b.merchantName || 'Unknown');
-                                                    const isClaimed = !!b.claimedByOrderId;
-                                                    const saleMatch = salesData.find(s => s.id === b.claimedByOrderId);
-                                                    const displayInvoice = b.claimedByInvoiceNo || saleMatch?.receiptNo || b.claimedByOrderId || '';
+                                                    // VLOOKUP against Sale Detail Report `Reference: APV/Trx` column
+                                                    const vlookup = vlookupBankVerification(b);
+                                                    const isClaimed = vlookup.isVerified;
+                                                    const displayInvoice = vlookup.invoiceNo || '';
                                                     
                                                     return (
                                                         <tr key={b.id} className="hover:bg-slate-700/50">
@@ -21428,12 +21943,27 @@
                                                                 <div className="text-[10px] text-slate-500">Trx: {b.trxId || '-'}</div>
                                                             </td>
                                                             <td className="px-4 py-3 text-sm font-mono text-slate-300">
-                                                                {displayInvoice || '-'}
+                                                                {vlookup.matchedSale ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => setViewReceipt(vlookup.matchedSale)}
+                                                                        className="text-blue-400 hover:text-blue-300 hover:underline font-bold inline-flex items-center gap-1"
+                                                                        title="Matched via VLOOKUP in Sale Detail Report — Click to view receipt"
+                                                                    >
+                                                                        <i className="fas fa-receipt text-[10px]"></i>
+                                                                        <span>{displayInvoice}</span>
+                                                                    </button>
+                                                                ) : (
+                                                                    displayInvoice || '-'
+                                                                )}
                                                             </td>
                                                             <td className="px-4 py-3 text-center">
                                                                 {isClaimed ? (
                                                                     <div className="flex flex-col items-center">
-                                                                        <span className="px-2 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-500/50 text-[10px] font-black uppercase mb-1">
+                                                                        <span
+                                                                            className="px-2 py-0.5 rounded bg-emerald-900/50 text-emerald-300 border border-emerald-500/50 text-[10px] font-black uppercase mb-1"
+                                                                            title={displayInvoice ? `VLOOKUP Matched to Sale Detail Receipt #${displayInvoice}` : 'Verified'}
+                                                                        >
                                                                             <i className="fas fa-check-double mr-1"></i> Verified
                                                                         </span>
                                                                     </div>
