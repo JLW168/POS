@@ -5293,6 +5293,7 @@
     // --- PHASE 1 & 2: POS Terminal Component ---
     const POSTerminal = ({ userProfile }) => {
         const { products, shops, customers, loyaltyRules, systemConfig, devices, currentDeviceId } = useData(); // <-- ADDED loyaltyRules, devices & currentDeviceId
+        const canEditLineItem = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
         const [cart, setCart] = useState([]);
         const [searchTerm, setSearchTerm] = useState('');
         
@@ -7487,16 +7488,18 @@
                                     <div key={item.productId} className="bg-slate-700/40 p-2.5 rounded-xl border border-slate-700/60 hover:border-slate-600 transition-colors">
                                         <div className="flex justify-between items-center gap-2">
                                             <div 
-                                                className="flex-1 min-w-0 pr-1 cursor-pointer group/item"
-                                                onClick={() => setEditingCartItem(item)}
-                                                title="Tap to open NumPad, override price, or add note"
+                                                className={`flex-1 min-w-0 pr-1 ${canEditLineItem ? 'cursor-pointer group/item' : ''}`}
+                                                onClick={() => canEditLineItem && setEditingCartItem(item)}
+                                                title={canEditLineItem ? "Tap to open NumPad, override price, or add note" : ""}
                                             >
-                                                <div className="text-slate-100 font-bold text-xs sm:text-sm truncate group-hover/item:text-blue-400 transition-colors flex items-center gap-1.5">
+                                                <div className={`text-slate-100 font-bold text-xs sm:text-sm truncate flex items-center gap-1.5 ${canEditLineItem ? 'group-hover/item:text-blue-400 transition-colors' : ''}`}>
                                                     <span className="truncate">{item.name}</span>
                                                     {isCartItemNoStock && (
                                                         <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 shadow-sm shadow-red-500/60"></span>
                                                     )}
-                                                    <i className="fas fa-calculator text-[10px] text-slate-500 opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"></i>
+                                                    {canEditLineItem && (
+                                                        <i className="fas fa-calculator text-[10px] text-slate-500 opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"></i>
+                                                    )}
                                                 </div>
                                                 <div className="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap mt-0.5">
                                                     <span className={hasCustomPrice ? "text-amber-400 font-bold" : ""}>
@@ -7515,9 +7518,9 @@
                                                     <button type="button" onClick={() => updateQty(item.productId, -1)} className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition">-</button>
                                                     <button
                                                         type="button"
-                                                        onClick={() => setEditingCartItem(item)}
-                                                        className="min-w-[2.2rem] h-6 sm:h-7 px-1.5 bg-slate-900/90 hover:bg-blue-600/30 text-center text-xs sm:text-sm font-extrabold text-blue-300 hover:text-white rounded-lg border border-slate-700 hover:border-blue-400 transition flex items-center justify-center"
-                                                        title="Tap for Touch NumPad & Price Override"
+                                                        onClick={() => canEditLineItem && setEditingCartItem(item)}
+                                                        className={`min-w-[2.2rem] h-6 sm:h-7 px-1.5 bg-slate-900/90 text-center text-xs sm:text-sm font-extrabold rounded-lg border border-slate-700 transition flex items-center justify-center ${canEditLineItem ? 'hover:bg-blue-600/30 text-blue-300 hover:text-white hover:border-blue-400 cursor-pointer' : 'text-slate-300 cursor-default'}`}
+                                                        title={canEditLineItem ? "Tap for Touch NumPad & Price Override" : ""}
                                                     >
                                                         {item.quantity}
                                                     </button>
@@ -7533,8 +7536,8 @@
                                         </div>
                                         {item.note && (
                                             <div 
-                                                onClick={() => setEditingCartItem(item)}
-                                                className="mt-1.5 text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1.5 cursor-pointer hover:bg-amber-500/20"
+                                                onClick={() => canEditLineItem && setEditingCartItem(item)}
+                                                className={`mt-1.5 text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1.5 ${canEditLineItem ? 'cursor-pointer hover:bg-amber-500/20' : ''}`}
                                             >
                                                 <i className="fas fa-sticky-note text-[10px]"></i>
                                                 <span className="truncate">{item.note}</span>
@@ -21037,139 +21040,85 @@
                                                 AI Velocity &amp; Margin Scoring evaluates Quantity Sold (55%), Revenue Share (35%), and Profit Margin (10%) to judge Hot Sale items and vendors.
                                             </p>
                                         </div>
-
-                                        {/* 1-Click Horizon Period Selector: 1M | 3M | 6M | 1Y | Custom */}
-                                        <div className="flex flex-wrap items-center gap-1.5 bg-slate-900/90 p-1.5 rounded-2xl border border-slate-700 shrink-0">
-                                            {[
-                                                { id: '1month', label: '1 Month' },
-                                                { id: '3months', label: '3 Months' },
-                                                { id: '6months', label: '6 Months' },
-                                                { id: '1year', label: '1 Year' },
-                                                { id: 'custom', label: 'Custom' }
-                                            ].map(period => {
-                                                const isActive = dateRangePreset === period.id;
-                                                return (
-                                                    <button
-                                                        key={period.id}
-                                                        type="button"
-                                                        onClick={() => setDateRange(period.id)}
-                                                        className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all ${
-                                                            isActive
-                                                                ? 'bg-gradient-to-r from-orange-500 to-rose-600 text-white shadow-md shadow-orange-950/50'
-                                                                : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                                                        }`}
-                                                    >
-                                                        {period.label}
-                                                    </button>
-                                                );
-                                            })}
-                                        </div>
                                     </div>
 
-                                    {/* Inline Custom Date Pickers when 'custom' is active */}
-                                    {dateRangePreset === 'custom' && (
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 pb-1 border-b border-slate-700/70 animate-fade-in-up">
-                                            <div>
-                                                <label className="block text-[11px] font-bold uppercase text-slate-400 mb-1">Custom Start Date</label>
-                                                <input
-                                                    type="date"
-                                                    value={startDate}
-                                                    onChange={e => setStartDate(e.target.value)}
-                                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-orange-500 outline-none text-xs sm:text-sm"
-                                                    style={{ colorScheme: 'dark' }}
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="block text-[11px] font-bold uppercase text-slate-400 mb-1">Custom End Date</label>
-                                                <input
-                                                    type="date"
-                                                    value={endDate}
-                                                    onChange={e => setEndDate(e.target.value)}
-                                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-orange-500 outline-none text-xs sm:text-sm"
-                                                    style={{ colorScheme: 'dark' }}
-                                                />
-                                            </div>
-                                        </div>
-                                    )}
-
                                     {/* Top 4 Hot-Sale Highlight KPI Cards */}
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-3.5">
+                                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3 pt-3.5">
                                         {/* #1 Hot Sale Product */}
-                                        <div className="bg-gradient-to-br from-orange-950/40 via-slate-900 to-slate-900 p-3.5 rounded-2xl border border-orange-500/40 relative overflow-hidden">
-                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-orange-300 mb-1">
-                                                <span>🔥 #1 Hot Sale Product</span>
+                                        <div className="bg-gradient-to-br from-orange-950/40 via-slate-900 to-slate-900 p-2.5 sm:p-3.5 rounded-2xl border border-orange-500/40 relative overflow-hidden flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-orange-300 mb-1">
+                                                <span className="truncate pr-1">🔥 #1 Hot Product</span>
                                                 {productStats[0] && (
-                                                    <span className="px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40">
-                                                        Score: {productStats[0].hotScore}/100
+                                                    <span className="px-1.5 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/40 shrink-0">
+                                                        {productStats[0].hotScore}pt
                                                     </span>
                                                 )}
                                             </div>
                                             {productStats[0] ? (
                                                 <>
-                                                    <div className="text-sm sm:text-base font-black text-white truncate" title={productStats[0].name}>
+                                                    <div className="text-xs sm:text-base font-black text-white truncate" title={productStats[0].name}>
                                                         {productStats[0].name}
                                                     </div>
-                                                    <div className="flex items-center justify-between text-xs mt-1.5 font-mono">
-                                                        <span className="text-orange-300 font-bold">{khrFormatter.format(productStats[0].qty)} sold ({productStats[0].dailyVelocity.toFixed(1)}/d)</span>
+                                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[10px] sm:text-xs mt-1.5 font-mono gap-0.5">
+                                                        <span className="text-orange-300 font-bold">{khrFormatter.format(productStats[0].qty)} sold</span>
                                                         <span className="text-emerald-400 font-black">៛{khrFormatter.format(productStats[0].revenue)}</span>
                                                     </div>
                                                 </>
                                             ) : (
-                                                <div className="text-xs text-slate-500 py-2">No sales in selected period</div>
+                                                <div className="text-[10px] text-slate-500 py-2">No sales in period</div>
                                             )}
                                         </div>
 
                                         {/* #1 Hot Sale Vendor */}
-                                        <div className="bg-gradient-to-br from-indigo-950/40 via-slate-900 to-slate-900 p-3.5 rounded-2xl border border-indigo-500/40 relative overflow-hidden">
-                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-300 mb-1">
-                                                <span>🏆 #1 Hot Sale Vendor</span>
+                                        <div className="bg-gradient-to-br from-indigo-950/40 via-slate-900 to-slate-900 p-2.5 sm:p-3.5 rounded-2xl border border-indigo-500/40 relative overflow-hidden flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-indigo-300 mb-1">
+                                                <span className="truncate pr-1">🏆 #1 Hot Vendor</span>
                                                 {vendorHotStats[0] && (
-                                                    <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                                                        {vendorHotStats[0].revSharePct.toFixed(1)}% Share
+                                                    <span className="px-1.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shrink-0">
+                                                        {vendorHotStats[0].revSharePct.toFixed(0)}%
                                                     </span>
                                                 )}
                                             </div>
                                             {vendorHotStats[0] ? (
                                                 <>
-                                                    <div className="text-sm sm:text-base font-black text-white truncate" title={vendorHotStats[0].vendorName}>
+                                                    <div className="text-xs sm:text-base font-black text-white truncate" title={vendorHotStats[0].vendorName}>
                                                         {vendorHotStats[0].vendorName}
                                                     </div>
-                                                    <div className="flex items-center justify-between text-xs mt-1.5 font-mono">
-                                                        <span className="text-indigo-300 font-bold">{khrFormatter.format(vendorHotStats[0].qty)} units • {vendorHotStats[0].uniqueProductsCount} SKUs</span>
+                                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[10px] sm:text-xs mt-1.5 font-mono gap-0.5">
+                                                        <span className="text-indigo-300 font-bold">{khrFormatter.format(vendorHotStats[0].qty)} units</span>
                                                         <span className="text-emerald-400 font-black">៛{khrFormatter.format(vendorHotStats[0].revenue)}</span>
                                                     </div>
                                                 </>
                                             ) : (
-                                                <div className="text-xs text-slate-500 py-2">No vendor data in period</div>
+                                                <div className="text-[10px] text-slate-500 py-2">No vendor data</div>
                                             )}
                                         </div>
 
                                         {/* Hot Sale Items Count */}
-                                        <div className="bg-slate-900/90 p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
-                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
-                                                <span>Hot Sale Breakdown</span>
-                                                <i className="fas fa-bolt text-amber-400"></i>
+                                        <div className="bg-slate-900/90 p-2.5 sm:p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1">
+                                                <span className="truncate">Hot Breakdown</span>
+                                                <i className="fas fa-bolt text-amber-400 shrink-0"></i>
                                             </div>
-                                            <div className="flex items-baseline gap-2 my-1">
-                                                <span className="text-xl font-black text-orange-400">{smartProductAndVendorAnalytics.hotProductsCount} Hot Items</span>
-                                                <span className="text-xs text-slate-500">/ {productStats.length} total</span>
+                                            <div className="flex items-baseline gap-1.5 my-0.5 sm:my-1">
+                                                <span className="text-base sm:text-xl font-black text-orange-400 truncate">{smartProductAndVendorAnalytics.hotProductsCount} Hot Items</span>
                                             </div>
-                                            <div className="text-[11px] text-slate-400 font-mono">
-                                                {smartProductAndVendorAnalytics.hotVendorsCount} Hot Vendors of {vendorHotStats.length} active
+                                            <div className="text-[10px] sm:text-[11px] text-slate-400 font-mono truncate">
+                                                / {productStats.length} total active
                                             </div>
                                         </div>
 
                                         {/* Period Velocity & Net Profit */}
-                                        <div className="bg-slate-900/90 p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
-                                            <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
-                                                <span>Period Velocity &amp; Profit</span>
-                                                <i className="fas fa-chart-line text-emerald-400"></i>
+                                        <div className="bg-slate-900/90 p-2.5 sm:p-3.5 rounded-2xl border border-slate-700/80 flex flex-col justify-between">
+                                            <div className="flex items-center justify-between text-[9px] sm:text-[10px] font-black uppercase tracking-wider text-slate-400 mb-1">
+                                                <span className="truncate">Period Profit</span>
+                                                <i className="fas fa-chart-line text-emerald-400 shrink-0"></i>
                                             </div>
-                                            <div className="text-xl font-black text-emerald-400 my-1 font-mono">
+                                            <div className="text-base sm:text-xl font-black text-emerald-400 my-0.5 sm:my-1 font-mono truncate">
                                                 ៛{khrFormatter.format(smartProductAndVendorAnalytics.grandTotalProfit)}
                                             </div>
-                                            <div className="text-[11px] text-slate-400 font-mono">
-                                                {khrFormatter.format(smartProductAndVendorAnalytics.grandTotalQty)} units ({(smartProductAndVendorAnalytics.grandTotalQty / activePeriodDays).toFixed(1)}/day)
+                                            <div className="text-[10px] sm:text-[11px] text-slate-400 font-mono truncate">
+                                                {khrFormatter.format(smartProductAndVendorAnalytics.grandTotalQty)} units
                                             </div>
                                         </div>
                                     </div>
@@ -29727,27 +29676,23 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                     <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
                         <div>
                             <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-                                <i className="fas fa-receipt text-amber-400"></i>
-                                <span>Receipt Template Configuration</span>
+                                <i className="fas fa-receipt text-amber-500"></i>
+                                <span>Receipt Template Scope</span>
                             </h3>
-                            <p className="text-xs text-slate-400 mt-0.5">
-                                Customize thermal receipt layout, paper width, header branding, dynamic fields, and QR footer per shop or globally.
-                            </p>
+                            <p className="text-xs text-slate-400 mt-1">Select 'Global Template' for all branches, or choose a specific branch to override.</p>
                         </div>
-                        <div className="w-full sm:w-72 shrink-0">
-                            <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
-                                <i className="fas fa-store text-amber-400 mr-1.5"></i>Receipt Template Scope
-                            </label>
+                        <div className="w-full sm:w-auto relative">
                             <select
                                 value={selectedShopId}
                                 onChange={(e) => setSelectedShopId(e.target.value)}
-                                className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 focus:ring-2 focus:ring-amber-500 outline-none text-sm font-bold cursor-pointer"
+                                className="w-full sm:w-auto bg-slate-900 text-white pl-4 pr-10 py-2.5 rounded-xl border border-slate-600 focus:ring-2 focus:ring-amber-500 outline-none transition text-sm font-bold cursor-pointer appearance-none"
                             >
-                                <option value="All">🌐 All Branches (Global Default)</option>
-                                {(shops || []).map(s => (
-                                    <option key={s.id} value={s.id}>🏪 {s.name}</option>
+                                <option value="All">Global Template (Default)</option>
+                                {shops.filter(s => userProfile?.role === 'Admin' || (userProfile?.assignedShops || []).includes(s.id)).map(s => (
+                                    <option key={s.id} value={s.id}>{s.name} (Override)</option>
                                 ))}
                             </select>
+                            <i className="fas fa-chevron-down absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none text-xs"></i>
                         </div>
                     </div>
                 </Card>
