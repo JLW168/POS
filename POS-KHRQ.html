@@ -613,23 +613,35 @@
                 }
             }, [shops, selectedShopId, shopsLoading]);
 
-            // Screen Wake Lock so customer counter display never sleeps
+            // Aggressive Screen Wake Lock (Ensures device never sleeps, bolstered with user gesture triggers)
             useEffect(() => {
                 let wakeLock = null;
                 const requestWakeLock = async () => {
                     try {
-                        if ('wakeLock' in navigator) {
+                        if ('wakeLock' in navigator && (!wakeLock || wakeLock.released !== false)) {
                             wakeLock = await navigator.wakeLock.request('screen');
                         }
                     } catch (e) {}
                 };
+                
+                // Initial attempt
                 requestWakeLock();
+                
+                // Re-request on visibility changes or any physical screen tap (required by iOS/Android strict policies)
                 const handleVis = () => {
                     if (document.visibilityState === 'visible') requestWakeLock();
                 };
+                
                 document.addEventListener('visibilitychange', handleVis);
+                document.addEventListener('click', requestWakeLock, { passive: true });
+                document.addEventListener('touchstart', requestWakeLock, { passive: true });
+                window.addEventListener('focus', requestWakeLock);
+
                 return () => {
                     document.removeEventListener('visibilitychange', handleVis);
+                    document.removeEventListener('click', requestWakeLock);
+                    document.removeEventListener('touchstart', requestWakeLock);
+                    window.removeEventListener('focus', requestWakeLock);
                     if (wakeLock) wakeLock.release().catch(() => {});
                 };
             }, []);
