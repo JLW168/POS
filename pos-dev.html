@@ -9154,6 +9154,7 @@
         // 1. COMPLETED SHIFT SUMMARY VIEW
         if (closedShiftData) {
             const closeTimeStr = safeFormatDateTime(closedShiftData.endTimeMs);
+            const openTimeStr = safeFormatDateTime(closedShiftData.startTime || closedShiftData.createdAt, 'Unknown');
             return (
                 <Modal show={true} onClose={onClose} maxWidth="max-w-md">
                     <ModalHeader title="Shift Closed Successfully" onClose={onClose} />
@@ -9170,7 +9171,7 @@
                             <div className="bg-[#1e293b] rounded-xl p-4 border border-slate-700 space-y-2.5 text-xs sm:text-sm shadow-inner">
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Cashier:</span> <span className="font-bold text-white">{closedShiftData.closedBy}</span></div>
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Shift:</span> <span className="font-bold text-blue-400">{closedShiftData.shiftName || 'AM'} Shift</span></div>
-                                <div className="flex justify-between items-center"><span className="text-slate-400">Opened:</span> <span className="font-mono text-slate-200">{formattedStartTime}</span></div>
+                                <div className="flex justify-between items-center"><span className="text-slate-400">Opened:</span> <span className="font-mono text-slate-200">{openTimeStr}</span></div>
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Closed:</span> <span className="font-mono text-slate-200">{closeTimeStr}</span></div>
                                 <div className="border-b border-slate-700/60 my-1.5"></div>
                                 <div className="flex justify-between items-center"><span className="text-slate-400">Total Net Sale:</span> <span className="font-black text-emerald-400 text-base">៛{khrFormatter.format(closedShiftData.stats.net)}</span></div>
@@ -18373,6 +18374,9 @@
         const [clearedCartsLoading, setClearedCartsLoading] = useState(false);
         const [expandedClearedCartId, setExpandedClearedCartId] = useState(null);
 
+        // --- NEW: Cash Drop Sub-Tab State ---
+        const [cashDropSubTab, setCashDropSubTab] = useState('summary');
+
         // Create a quick lookup map for product details (like vendorName)
         const productMap = useMemo(() => {
             if (!products) return new Map();
@@ -20264,18 +20268,20 @@
             else if (activeTab === 'cash-drop') {
                 const data = shiftsData.filter(s => s.status === 'closed').map(s => {
                     const shop = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
+                    const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
+                    const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
+                                        ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
                     return {
                         'Date & Time': safeFormatDateTime(s.endTime || s.startTime, ''),
                         'Shop Name': shop,
                         'Shift Name': s.shiftName || '-',
                         'Staff Name': s.closedBy || s.cashierName,
+                        'NetSale (Drop)': calcNetSale,
                         'Cash (KHR)': s.closeInputCashKHR || 0,
                         'Cash (USD)': s.closeInputCashUSD || 0,
                         'Bank (KHR)': s.closeInputBankKHR || 0,
                         'Bank (USD)': s.closeInputBankUSD || 0,
-                        'Total Discount (KHR)': s.statsDiscount || 0,
-                        'Total Net Sale (KHR)': s.statsNet || s.totalSales || 0,
-                        'Sale Margin (%)': s.statsMargin || 0
+                        'System Net Sale (KHR)': s.statsNet || s.totalSales || 0
                     };
                 });
                 ws = XLSX.utils.json_to_sheet(data);
@@ -22223,49 +22229,142 @@
 
                         {/* NEW: Phase 6 - Cash Drop Close Report */}
                         {activeTab === 'cash-drop' && (
-                            <TableCard title="Cash Drop Close Report">
-                                {shiftsLoading ? <p className="text-center p-4">Loading reports...</p> : shiftsData.filter(s => s.status === 'closed').length === 0 ? <p className="text-center p-4 text-slate-400">No closed shifts found in this period.</p> : (
-                                    <div className="overflow-x-auto">
-                                        <table className="min-w-full divide-y divide-slate-700">
-                                            <thead className="bg-slate-900/50">
-                                                <tr>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date &amp; Time</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
-                                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (KHR)</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (USD)</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (KHR)</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (USD)</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Discount</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Net Sale</th>
-                                                    <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Margin</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-700">
-                                                {shiftsData.filter(s => s.status === 'closed').map(s => {
-                                                    const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
-                                                    return (
-                                                        <tr key={s.id} className="hover:bg-slate-700/50">
-                                                            <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
-                                                            <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
-                                                            <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono text-emerald-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono text-emerald-300">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono text-sky-300">{usdFormatter.format(s.closeInputBankUSD || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono text-rose-400">៛{khrFormatter.format(s.statsDiscount || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono font-bold text-white">៛{khrFormatter.format(s.statsNet || s.totalSales || 0)}</td>
-                                                            <td className="px-4 py-3 text-sm text-right font-mono font-bold text-cyan-400">{Number(s.statsMargin || 0).toFixed(2)}%</td>
+                            <div className="space-y-4 animate-fade-in-up">
+                                <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700 inline-flex shadow-sm">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCashDropSubTab('summary')}
+                                        className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'summary' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                                    >
+                                        <i className="fas fa-th-large"></i> Total Summary
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setCashDropSubTab('details')}
+                                        className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'details' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                                    >
+                                        <i className="fas fa-list"></i> Detailed List
+                                    </button>
+                                </div>
+
+                                {shiftsLoading ? (
+                                    <div className="flex justify-center p-8"><div className="loader"></div></div>
+                                ) : shiftsData.filter(s => s.status === 'closed').length === 0 ? (
+                                    <Card className="p-8 text-center text-slate-400">
+                                        <i className="fas fa-cash-register text-4xl mb-3 opacity-50 block"></i>
+                                        <p>No closed shifts found in this period.</p>
+                                    </Card>
+                                ) : cashDropSubTab === 'summary' ? (
+                                    <div className="space-y-4">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                            {Object.values(shiftsData.filter(s => s.status === 'closed').reduce((acc, s) => {
+                                                const shopId = s.shopId;
+                                                if (!acc[shopId]) {
+                                                    acc[shopId] = { shopName: shops.find(sh => sh.id === shopId)?.name || 'Unknown', totalNetSale: 0, shiftCount: 0 };
+                                                }
+                                                const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
+                                                const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
+                                                                    ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                                                acc[shopId].totalNetSale += calcNetSale;
+                                                acc[shopId].shiftCount += 1;
+                                                return acc;
+                                            }, {})).map((summary, idx) => (
+                                                <Card key={idx} className="p-6 flex flex-col justify-center border-emerald-500/30 bg-gradient-to-br from-slate-800 to-emerald-950/20 relative overflow-hidden">
+                                                    <div className="absolute -right-4 -bottom-4 opacity-10">
+                                                        <i className="fas fa-coins text-8xl text-emerald-500"></i>
+                                                    </div>
+                                                    <h4 className="text-emerald-400 font-bold mb-1 flex items-center gap-2 relative z-10"><i className="fas fa-store"></i> {summary.shopName}</h4>
+                                                    <p className="text-3xl font-black text-white my-2 tracking-tight relative z-10">៛{khrFormatter.format(summary.totalNetSale)}</p>
+                                                    <p className="text-xs text-slate-400 font-medium relative z-10">Total NetSale Drop • {summary.shiftCount} Shift(s)</p>
+                                                </Card>
+                                            ))}
+                                        </div>
+                                        <TableCard title="Transaction Report">
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full divide-y divide-slate-700">
+                                                    <thead className="bg-slate-900/50">
+                                                        <tr>
+                                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
+                                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase bg-emerald-950/30 text-emerald-400 border-l border-r border-emerald-500/20">NetSale</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash KHR</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash USD</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank KHR</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank USD</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">SystemNet</th>
                                                         </tr>
-                                                    );
-                                                })}
-                                            </tbody>
-                                        </table>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-700">
+                                                        {shiftsData.filter(s => s.status === 'closed').map(s => {
+                                                            const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
+                                                            const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
+                                                            const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
+                                                                                ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                                                            return (
+                                                                <tr key={s.id} className="hover:bg-slate-700/50">
+                                                                    <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
+                                                                    <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-black text-emerald-400 bg-emerald-950/10 border-l border-r border-emerald-500/10 shadow-inner">៛{khrFormatter.format(calcNetSale)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">{usdFormatter.format(s.closeInputBankUSD || 0)}</td>
+                                                                    <td className="px-4 py-3 text-sm text-right font-mono font-bold text-slate-400">៛{khrFormatter.format(s.statsNet || s.totalSales || 0)}</td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </TableCard>
                                     </div>
+                                ) : (
+                                    <TableCard title="Cash Drop Detailed List">
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full divide-y divide-slate-700">
+                                                <thead className="bg-slate-900/50">
+                                                    <tr>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date &amp; Time</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
+                                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase bg-emerald-950/30 text-emerald-400 border-l border-r border-emerald-500/20">NetSale</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (KHR)</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (USD)</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (KHR)</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (USD)</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">System Net</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-700">
+                                                    {shiftsData.filter(s => s.status === 'closed').map(s => {
+                                                        const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
+                                                        const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
+                                                        const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
+                                                                            ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                                                        return (
+                                                            <tr key={s.id} className="hover:bg-slate-700/50">
+                                                                <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
+                                                                <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
+                                                                <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-black text-emerald-400 bg-emerald-950/10 border-l border-r border-emerald-500/10 shadow-inner">៛{khrFormatter.format(calcNetSale)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">{usdFormatter.format(s.closeInputBankUSD || 0)}</td>
+                                                                <td className="px-4 py-3 text-sm text-right font-mono font-bold text-slate-400">៛{khrFormatter.format(s.statsNet || s.totalSales || 0)}</td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </TableCard>
                                 )}
-                            </TableCard>
+                            </div>
                         )}
 
                         {/* NEW: Phase 7 - Bank Statement (Telegram Feed) */}
@@ -22785,23 +22884,42 @@
             if (!editData) return;
             setIsSubmitting(true);
 
-            const actCash = Number(editData.actualCash) || 0;
-            const actBank = Number(editData.actualKHQR) || 0;
-            const expCash = Number(editData.expectedCash) || 0;
-            const expBank = Number(editData.expectedKHQR) || 0;
-            const diffCash = actCash - expCash;
-            const diffBank = actBank - expBank;
-            const totalDiff = diffCash + diffBank;
-
-            const updatedFields = {
+            let updatedFields = {
                 shiftName: editData.shiftName || '',
                 startCash: Number(editData.startCash) || 0,
-                actualCash: actCash,
-                actualKHQR: actBank,
-                differenceCash: diffCash,
-                differenceKHQR: diffBank,
-                difference: totalDiff
             };
+
+            if (editData.status === 'closed') {
+                const rate = Number(editData.closeExchangeRate) || Number(editData.exchangeRate) || 4000;
+                const cKhr = Number(editData.closeInputCashKHR) || 0;
+                const cUsd = Number(editData.closeInputCashUSD) || 0;
+                const bKhr = Number(editData.closeInputBankKHR) || 0;
+                const bUsd = Number(editData.closeInputBankUSD) || 0;
+
+                const actCash = cKhr + (cUsd * rate);
+                const actBank = bKhr + (bUsd * rate);
+                const expCash = Number(editData.expectedCash) || 0;
+                const expBank = Number(editData.expectedKHQR) || 0;
+
+                const diffCash = actCash - expCash;
+                const diffBank = actBank - expBank;
+                const totalDiff = diffCash + diffBank;
+
+                updatedFields = {
+                    ...updatedFields,
+                    closeInputCashKHR: cKhr,
+                    closeInputCashUSD: cUsd,
+                    closeInputBankKHR: bKhr,
+                    closeInputBankUSD: bUsd,
+                    closeExchangeRate: rate,
+                    closeNote: editData.closeNote || '',
+                    actualCash: actCash,
+                    actualKHQR: actBank,
+                    differenceCash: diffCash,
+                    differenceKHQR: diffBank,
+                    difference: totalDiff
+                };
+            }
 
             // 1. Save edit locally & apply to UI state in 0ms
             try {
@@ -22842,38 +22960,121 @@
                 />
 
                 {editData && (
-                    <Modal show={true} onClose={() => setEditData(null)} maxWidth="max-w-md">
-                        <ModalHeader title="Edit Shift Record" onClose={() => setEditData(null)} />
-                        <form onSubmit={handleUpdateShift}>
+                    <Modal show={true} onClose={() => setEditData(null)} maxWidth="max-w-2xl">
+                        <ModalHeader title="Edit Shift Reconciliation" onClose={() => setEditData(null)} />
+                        <form onSubmit={handleUpdateShift} className="flex flex-col flex-1 min-h-0 overflow-hidden">
                             <ModalBody>
-                                <div className="space-y-4">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-300 mb-1">Shift Name</label>
-                                        <input type="text" value={editData.shiftName || ''} onChange={(e) => setEditData({ ...editData, shiftName: e.target.value })} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-300 mb-1">Start Cash (៛)</label>
-                                        <input type="number" value={editData.startCash || ''} onChange={(e) => setEditData({ ...editData, startCash: e.target.value })} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-300 mb-1">Actual Cash Drop (៛)</label>
-                                            <input type="number" value={editData.actualCash || ''} onChange={(e) => setEditData({ ...editData, actualCash: e.target.value })} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" />
+                                <div className="space-y-5">
+                                    {/* Info header */}
+                                    <div className="flex items-center justify-between bg-slate-900/60 p-3 rounded-lg border border-slate-700">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                                <i className="fas fa-file-invoice-dollar"></i>
+                                            </div>
+                                            <div>
+                                                <div className="text-sm font-bold text-white">Shift ID: {editData.id.slice(0,8).toUpperCase()}</div>
+                                                <div className="text-xs text-slate-400">{editData.cashierName} • {safeFormatDateTime(editData.startTime)}</div>
+                                            </div>
                                         </div>
-                                        <div>
-                                            <label className="block text-sm font-medium text-slate-300 mb-1">Actual Bank Drop (៛)</label>
-                                            <input type="number" value={editData.actualKHQR || ''} onChange={(e) => setEditData({ ...editData, actualKHQR: e.target.value })} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" />
+                                        <div className="text-right">
+                                            <div className={`text-xs font-bold uppercase px-2 py-0.5 rounded-full inline-block ${editData.status === 'closed' ? 'bg-slate-700 text-slate-300' : 'bg-green-500/20 text-green-400'}`}>
+                                                {editData.status}
+                                            </div>
                                         </div>
                                     </div>
-                                    <div className="text-xs text-slate-400 bg-slate-900/50 p-2 rounded-lg border border-slate-700">
-                                        Note: Editing these values will automatically recalculate the shift variance.
+
+                                    {/* Opening Configuration */}
+                                    <div>
+                                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1 flex items-center gap-2">
+                                            <i className="fas fa-door-open text-blue-400"></i> Opening Configuration
+                                        </h4>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                            <div className="bg-slate-900/30 p-3 rounded-lg border border-slate-700/50">
+                                                <label className="block text-xs font-medium text-slate-400 mb-1">Shift Name (e.g. AM, PM)</label>
+                                                <input type="text" value={editData.shiftName || ''} onChange={(e) => setEditData({ ...editData, shiftName: e.target.value })} className="w-full bg-slate-800 text-white px-3 py-2 rounded border border-slate-600 focus:border-blue-500 outline-none text-sm" />
+                                            </div>
+                                            <div className="bg-slate-900/30 p-3 rounded-lg border border-slate-700/50">
+                                                <label className="block text-xs font-medium text-slate-400 mb-1">Starting Float Cash (៛)</label>
+                                                <div className="relative">
+                                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-bold">៛</span>
+                                                    <input type="number" value={editData.startCash ?? ''} onChange={(e) => setEditData({ ...editData, startCash: e.target.value })} className="w-full bg-slate-800 text-white pl-8 pr-3 py-2 rounded border border-slate-600 focus:border-emerald-500 outline-none text-sm font-mono text-right font-bold" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    {editData.status === 'closed' && (
+                                        <>
+                                            {/* Exchange Rate */}
+                                            <div>
+                                                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1 flex items-center gap-2">
+                                                    <i className="fas fa-exchange-alt text-amber-400"></i> Exchange Rate Config
+                                                </h4>
+                                                <div className="bg-slate-900/30 p-3 rounded-lg border border-slate-700/50 max-w-sm">
+                                                    <label className="block text-xs font-medium text-slate-400 mb-1">Applied Rate ($1 = ៛)</label>
+                                                    <div className="flex items-center gap-2">
+                                                        <input type="number" value={editData.closeExchangeRate || editData.exchangeRate || 4000} onChange={(e) => setEditData({ ...editData, closeExchangeRate: e.target.value })} className="w-full bg-slate-800 text-amber-400 px-3 py-2 rounded border border-slate-600 focus:border-amber-500 outline-none text-sm font-mono font-bold text-center" />
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Drop Declarations */}
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                {/* Cash Drop */}
+                                                <div>
+                                                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1 flex items-center gap-2">
+                                                        <i className="fas fa-money-bill-wave text-emerald-400"></i> Physical Cash Drop
+                                                    </h4>
+                                                    <div className="bg-slate-900/40 p-4 rounded-xl border border-slate-700 space-y-3">
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-slate-400 mb-1">Cash KHR (៛)</label>
+                                                            <input type="number" value={editData.closeInputCashKHR ?? ''} onChange={(e) => setEditData({ ...editData, closeInputCashKHR: e.target.value })} className="w-full bg-slate-800 text-white px-3 py-2 rounded border border-slate-600 focus:border-emerald-500 outline-none text-sm font-mono text-right font-bold" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-slate-400 mb-1">Cash USD ($)</label>
+                                                            <input type="number" step="0.01" value={editData.closeInputCashUSD ?? ''} onChange={(e) => setEditData({ ...editData, closeInputCashUSD: e.target.value })} className="w-full bg-slate-800 text-white px-3 py-2 rounded border border-slate-600 focus:border-emerald-500 outline-none text-sm font-mono text-right font-bold" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Bank Drop */}
+                                                <div>
+                                                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1 flex items-center gap-2">
+                                                        <i className="fas fa-university text-sky-400"></i> Bank / KHQR Drop
+                                                    </h4>
+                                                    <div className="bg-slate-900/40 p-4 rounded-xl border border-slate-700 space-y-3">
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-slate-400 mb-1">Bank KHR (៛)</label>
+                                                            <input type="number" value={editData.closeInputBankKHR ?? ''} onChange={(e) => setEditData({ ...editData, closeInputBankKHR: e.target.value })} className="w-full bg-slate-800 text-white px-3 py-2 rounded border border-slate-600 focus:border-sky-500 outline-none text-sm font-mono text-right font-bold" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-slate-400 mb-1">Bank USD ($)</label>
+                                                            <input type="number" step="0.01" value={editData.closeInputBankUSD ?? ''} onChange={(e) => setEditData({ ...editData, closeInputBankUSD: e.target.value })} className="w-full bg-slate-800 text-white px-3 py-2 rounded border border-slate-600 focus:border-sky-500 outline-none text-sm font-mono text-right font-bold" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Note & Info */}
+                                            <div>
+                                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1">
+                                                    <i className="fas fa-comment-alt text-slate-500"></i> Handover / Correction Note
+                                                </label>
+                                                <textarea value={editData.closeNote || ''} onChange={(e) => setEditData({ ...editData, closeNote: e.target.value })} rows="2" className="w-full bg-slate-900/40 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm resize-none"></textarea>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/10 p-2.5 rounded-lg border border-amber-500/20">
+                                        <i className="fas fa-info-circle shrink-0"></i>
+                                        <span>Editing these values will automatically recalculate the shift variance (over/short) upon saving.</span>
                                     </div>
                                 </div>
                             </ModalBody>
                             <ModalFooter>
-                                <button type="button" onClick={() => setEditData(null)} className="bg-slate-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-slate-500 transition">Cancel</button>
-                                <button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 transition flex items-center gap-2">
-                                    {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-save"></i>} Update
+                                <button type="button" onClick={() => setEditData(null)} className="bg-slate-700 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-slate-600 transition text-sm">Cancel</button>
+                                <button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white font-bold py-2.5 px-8 rounded-lg hover:bg-blue-500 transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/20 disabled:opacity-50">
+                                    {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check-double"></i>} Commit Changes
                                 </button>
                             </ModalFooter>
                         </form>
