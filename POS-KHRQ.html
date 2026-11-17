@@ -536,7 +536,6 @@
 
             const [isDetectingLocation, setIsDetectingLocation] = useState(false);
             const gpsAttemptedRef = useRef(false);
-            const [nearestShopOutsideRadius, setNearestShopOutsideRadius] = useState(null);
 
             const [selectedShopId, setSelectedShopId] = useState(() => {
                 if (urlShopId) {
@@ -592,14 +591,9 @@
                                     }
                                 });
 
-                                // Auto-pair if the nearest shop is within a 1.0-kilometer radius
-                                if (nearestShop) {
-                                    if (minDistance <= 1.0) {
-                                        setSelectedShopId(nearestShop.id);
-                                        try { localStorage.setItem('solaris_display_shop_id', nearestShop.id); } catch (e) {}
-                                    } else {
-                                        setNearestShopOutsideRadius({ shop: nearestShop, distance: minDistance });
-                                    }
+                                // Strict 1.0km Auto-pair threshold
+                                if (nearestShop && minDistance <= 1.0) {
+                                    handleSelectBranch(nearestShop.id);
                                 }
                                 setIsDetectingLocation(false);
                             },
@@ -613,35 +607,31 @@
                 }
             }, [shops, selectedShopId, shopsLoading]);
 
-            // Aggressive Screen Wake Lock (Ensures device never sleeps, bolstered with user gesture triggers)
+            // AGGRESSIVE SCREEN WAKE LOCK: Ensures the Customer Display NEVER sleeps or locks!
             useEffect(() => {
                 let wakeLock = null;
                 const requestWakeLock = async () => {
                     try {
-                        if ('wakeLock' in navigator && (!wakeLock || wakeLock.released !== false)) {
+                        if ('wakeLock' in navigator && !wakeLock) {
                             wakeLock = await navigator.wakeLock.request('screen');
+                            wakeLock.addEventListener('release', () => { wakeLock = null; });
                         }
                     } catch (e) {}
                 };
                 
-                // Initial attempt
                 requestWakeLock();
                 
-                // Re-request on visibility changes or any physical screen tap (required by iOS/Android strict policies)
-                const handleVis = () => {
-                    if (document.visibilityState === 'visible') requestWakeLock();
-                };
+                const handleInteraction = () => requestWakeLock();
+                const handleVis = () => { if (document.visibilityState === 'visible') requestWakeLock(); };
                 
                 document.addEventListener('visibilitychange', handleVis);
-                document.addEventListener('click', requestWakeLock, { passive: true });
-                document.addEventListener('touchstart', requestWakeLock, { passive: true });
-                window.addEventListener('focus', requestWakeLock);
-
+                document.addEventListener('touchstart', handleInteraction, {passive: true});
+                document.addEventListener('click', handleInteraction, {passive: true});
+                
                 return () => {
                     document.removeEventListener('visibilitychange', handleVis);
-                    document.removeEventListener('click', requestWakeLock);
-                    document.removeEventListener('touchstart', requestWakeLock);
-                    window.removeEventListener('focus', requestWakeLock);
+                    document.removeEventListener('touchstart', handleInteraction);
+                    document.removeEventListener('click', handleInteraction);
                     if (wakeLock) wakeLock.release().catch(() => {});
                 };
             }, []);
@@ -688,7 +678,6 @@
                                 setAuthReady(true);
                             }
                         } catch (anonErr) {
-                            // Anonymous auth may be disabled in Firebase Console; proceed and allow staff login if rules require it
                             if (isMounted) {
                                 setAuthReady(true);
                             }
@@ -769,50 +758,6 @@
                 try { localStorage.setItem('solaris_display_shop_id', shopId); } catch (e) {}
             };
 
-            const handleAutoDetectGPS = () => {
-                if (!shops.length || shopsLoading) return;
-                const hasCoordinates = shops.some(s => s.latitude && s.longitude);
-                if (hasCoordinates && navigator.geolocation) {
-                    setIsDetectingLocation(true);
-                    setNearestShopOutsideRadius(null);
-                    
-                    navigator.geolocation.getCurrentPosition(
-                        (position) => {
-                            const { latitude, longitude } = position.coords;
-                            let nearestShop = null;
-                            let minDistance = Infinity;
-
-                            shops.forEach(shop => {
-                                if (shop.latitude && shop.longitude) {
-                                    const dist = calculateHaversineDistance(
-                                        latitude, longitude, 
-                                        parseFloat(shop.latitude), parseFloat(shop.longitude)
-                                    );
-                                    if (dist < minDistance) {
-                                        minDistance = dist;
-                                        nearestShop = shop;
-                                    }
-                                }
-                            });
-
-                            if (nearestShop) {
-                                if (minDistance <= 1.0) {
-                                    handleSelectBranch(nearestShop.id);
-                                } else {
-                                    setNearestShopOutsideRadius({ shop: nearestShop, distance: minDistance });
-                                }
-                            }
-                            setIsDetectingLocation(false);
-                        },
-                        (error) => {
-                            console.warn("GPS Auto-detect warning:", error);
-                            setIsDetectingLocation(false);
-                        },
-                        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
-                    );
-                }
-            };
-
             const currentShopObj = useMemo(() => {
                 return shops.find(s => s.id === selectedShopId) || null;
             }, [shops, selectedShopId]);
@@ -835,6 +780,16 @@
             // Subscribe to Branch Display Session (`system_settings/khqr_display_{selectedShopId}`)
             useEffect(() => {
                 if (!selectedShopId || !authReady) return;
+
+                // BUG FIX 1: WAKE UP CLOUD POS TERMINAL
+                // Send a tiny ping to Firestore so the POS Terminal knows a standalone display just attached via GPS
+                try {
+                    db.collection('system_settings').doc(`khqr_display_${selectedShopId}`).set({
+                        _displayPingMs: Date.now(),
+                        _displayDeviceId: deviceId
+                    }, { merge: true });
+                } catch(e) {}
+
                 const unsub = db.collection('system_settings').doc(`khqr_display_${selectedShopId}`).onSnapshot(snap => {
                     if (snap.exists) {
                         const data = snap.data() || {};
@@ -892,8 +847,16 @@
                                 }
                             }
                         };
-                        // Request immediate sync from any open POS Terminal tab
-                        displayBus.postMessage({ type: 'REQUEST_POS_SYNC', deviceId });
+                        
+                        // BUG FIX 2: WAKE UP LOCAL POS TERMINAL
+                        // Explicitly send the selectedShopId. When GPS finishes pairing, this re-runs and 
+                        // forces the POS Terminal to instantly broadcast the active cart without needing a click!
+                        displayBus.postMessage({ 
+                            type: 'REQUEST_POS_SYNC', 
+                            deviceId: deviceId,
+                            shopId: selectedShopId
+                        });
+                        
                     } catch (e) {}
                 }
 
@@ -936,7 +899,7 @@
                 };
             }, [selectedShopId, deviceId]);
             
-            // --- NEW: 1ms Auto-Dismiss Thank You Modal Override ---
+            // --- 1ms Auto-Dismiss Thank You Modal Override ---
             const [overrideToIdle, setOverrideToIdle] = useState(false);
             
             useEffect(() => {
@@ -1111,87 +1074,50 @@
                                     <div className="text-center py-6 text-slate-400 text-xs bg-slate-950/50 rounded-2xl border border-slate-800">
                                         <i className="fas fa-spinner fa-spin mr-2 text-blue-400"></i> Connecting to cloud branches...
                                     </div>
+                                ) : shops.length > 0 ? (
+                                    shops.map(s => (
+                                        <button
+                                            key={s.id}
+                                            type="button"
+                                            onClick={() => handleSelectBranch(s.id)}
+                                            className={`w-full p-3.5 rounded-2xl border text-left transition flex items-center justify-between ${
+                                                selectedShopId === s.id
+                                                    ? 'bg-blue-600/20 border-blue-500 text-white shadow-lg'
+                                                    : 'bg-slate-800/70 hover:bg-slate-800 border-slate-700 text-slate-200'
+                                            }`}
+                                        >
+                                            <div>
+                                                <div className="font-bold text-sm">{s.name}</div>
+                                                <div className="text-[11px] text-slate-400">{s.location || `Branch ID: ${s.mappedShop || s.id}`}</div>
+                                            </div>
+                                            <i className={`fas ${selectedShopId === s.id ? 'fa-check-circle text-blue-400' : 'fa-chevron-right text-slate-500'}`}></i>
+                                        </button>
+                                    ))
                                 ) : (
-                                    <>
-                                        {!isDetectingLocation && shops.length > 0 && (
+                                    /* Manual Branch ID Fallback Input so user is never blocked */
+                                    <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 space-y-2">
+                                        <div className="text-[11px] text-slate-400">
+                                            Or enter your <strong>Branch ID</strong> directly (or open POS Terminal in another tab to auto-detect):
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="text"
+                                                value={manualShopIdInput}
+                                                onChange={e => setManualShopIdInput(e.target.value.trim())}
+                                                placeholder="Paste Branch / Shop ID..."
+                                                className="flex-1 bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-700 text-xs font-mono outline-none focus:border-blue-500"
+                                            />
                                             <button
                                                 type="button"
-                                                onClick={handleAutoDetectGPS}
-                                                className="w-full mb-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-sky-400 font-bold text-xs border border-slate-700 transition flex items-center justify-center gap-2"
+                                                onClick={() => {
+                                                    if (manualShopIdInput) handleSelectBranch(manualShopIdInput);
+                                                }}
+                                                className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shrink-0"
                                             >
-                                                <i className="fas fa-location-crosshairs"></i> Re-Scan Nearest Branch (GPS)
+                                                Pair
                                             </button>
-                                        )}
-
-                                        {nearestShopOutsideRadius && (
-                                            <div className="bg-emerald-500/10 border border-emerald-500/40 rounded-2xl p-3.5 space-y-3 mb-2 animate-fade-scale mt-2">
-                                                <div className="flex items-start gap-3">
-                                                    <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                                                        <i className="fas fa-map-marker-alt"></i>
-                                                    </div>
-                                                    <div>
-                                                        <h4 className="text-sm font-bold text-white">Nearest Branch Found</h4>
-                                                        <p className="text-xs text-emerald-300/80 mt-0.5 leading-relaxed">
-                                                            Detected <strong>{nearestShopOutsideRadius.shop.name}</strong> approx {nearestShopOutsideRadius.distance.toFixed(1)}km away.
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleSelectBranch(nearestShopOutsideRadius.shop.id)}
-                                                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition"
-                                                >
-                                                    1-Click Pair with {nearestShopOutsideRadius.shop.name}
-                                                </button>
-                                            </div>
-                                        )}
-
-                                        {shops.length > 0 ? (
-                                            shops.map(s => (
-                                                <button
-                                                    key={s.id}
-                                                    type="button"
-                                                    onClick={() => handleSelectBranch(s.id)}
-                                                    className={`w-full p-3.5 rounded-2xl border text-left transition flex items-center justify-between mt-2 ${
-                                                        selectedShopId === s.id
-                                                            ? 'bg-blue-600/20 border-blue-500 text-white shadow-lg'
-                                                            : 'bg-slate-800/70 hover:bg-slate-800 border-slate-700 text-slate-200'
-                                                    }`}
-                                                >
-                                                    <div>
-                                                        <div className="font-bold text-sm">{s.name}</div>
-                                                        <div className="text-[11px] text-slate-400">{s.location || `Branch ID: ${s.mappedShop || s.id}`}</div>
-                                                    </div>
-                                                    <i className={`fas ${selectedShopId === s.id ? 'fa-check-circle text-blue-400' : 'fa-chevron-right text-slate-500'}`}></i>
-                                                </button>
-                                            ))
-                                        ) : (
-                                            /* Manual Branch ID Fallback Input so user is never blocked */
-                                            <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 space-y-2 mt-2">
-                                                <div className="text-[11px] text-slate-400">
-                                                    Or enter your <strong>Branch ID</strong> directly (or open POS Terminal in another tab to auto-detect):
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <input
-                                                        type="text"
-                                                        value={manualShopIdInput}
-                                                        onChange={e => setManualShopIdInput(e.target.value.trim())}
-                                                        placeholder="Paste Branch / Shop ID..."
-                                                        className="flex-1 bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-700 text-xs font-mono outline-none focus:border-blue-500"
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            if (manualShopIdInput) handleSelectBranch(manualShopIdInput);
-                                                        }}
-                                                        className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shrink-0"
-                                                    >
-                                                        Pair
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </>
+                                        </div>
+                                    </div>
                                 )}
                             </div>
 
