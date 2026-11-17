@@ -5317,9 +5317,9 @@
         // --- NEW: Universal Catalog View Mode (Grid vs List/Table across Mobile, Tablet & Desktop) ---
         const [catalogViewMode, setCatalogViewMode] = useState(() => {
             try {
-                return localStorage.getItem('pos_catalogViewMode') || (window.innerWidth < 1024 ? 'grid' : 'list');
+                return localStorage.getItem('pos_catalogViewMode') || 'list';
             } catch (e) {
-                return 'grid';
+                return 'list';
             }
         });
 
@@ -5370,7 +5370,6 @@
         const [heldTicketsLoading, setHeldTicketsLoading] = useState(true);
         const heldTicketsCount = heldTickets.length;
         const [editingCartItem, setEditingCartItem] = useState(null); // <-- TOUCH NUMPAD & LINE-ITEM OVERRIDE MODAL
-        const [showCameraScanner, setShowCameraScanner] = useState(false); // <-- MOBILE CAMERA BARCODE/QR SCANNER
 
         // --- SHARED TODAY'S SALES CACHE (Eliminates 3 duplicate listeners on 'sales') ---
         const [todaySales, setTodaySales] = useState([]);
@@ -5979,7 +5978,7 @@
         };
 
         // --- GLOBAL BARCODE SCANNER LISTENER (<35ms burst detection) ---
-        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showCameraScanner || showQuickGroupModal;
+        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showQuickGroupModal;
 
         useEffect(() => {
             const handleGlobalKeyDown = (e) => {
@@ -6044,7 +6043,7 @@
                             setSearchTerm(preBurstSearchTerm || '');
                             setHighlightedIndex(0);
                         } else {
-                            triggerStockWarning(`Scanned barcode "${scannedCode}" not found in product catalog.`);
+                            showPosAlert("Product Not Found", `Scanned barcode "${scannedCode}" not found in product catalog.`, true);
                             setSearchTerm('');
                         }
                         return;
@@ -6055,7 +6054,7 @@
 
             window.addEventListener('keydown', handleGlobalKeyDown, true);
             return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
-        }, [isAnyPosModalOpen, searchTerm, productByCodeOrBarcodeMap, addToCart, triggerStockWarning]);
+        }, [isAnyPosModalOpen, searchTerm, productByCodeOrBarcodeMap, addToCart, showPosAlert]);
 
         const cartTotal = cart.reduce((sum, item) => sum + (item.price * (Number(item.quantity) || 0)), 0);
         const cartTotalCost = cart.reduce((sum, item) => sum + (item.cost * (Number(item.quantity) || 0)), 0);
@@ -6238,29 +6237,6 @@
                 executeRestoreTicket(ticket);
             }
         };
-
-        // --- NEW: Handle Mobile Camera Barcode / QR Scan Result ---
-        const handleCameraScanSuccess = useCallback((decodedText) => {
-            if (!decodedText) return false;
-            const trimmed = decodedText.trim();
-            if (!trimmed) return false;
-
-            if (!currentShift) {
-                setShowCameraScanner(false);
-                setShowShiftModal(true);
-                return false;
-            }
-
-            const exactMatch = productByCodeOrBarcodeMap.get(trimmed.toLowerCase());
-
-            if (exactMatch) {
-                addToCart(exactMatch);
-                return { found: true, product: exactMatch };
-            } else {
-                triggerStockWarning(`Scanned code "${trimmed}" not found in product catalog.`);
-                return { found: false, code: trimmed };
-            }
-        }, [productByCodeOrBarcodeMap, currentShift, addToCart, triggerStockWarning]);
 
         // --- PHASE 2: Transaction Logic (Optimized for Quota & Speed) ---
         const handleProcessSale = async (paymentDetails) => {
@@ -6796,23 +6772,6 @@
                     />
                 )}
 
-                {/* NEW: Mobile Camera Barcode & QR Scanner Modal */}
-                {showCameraScanner && (
-                    <MobileCameraScannerModal
-                        onScan={handleCameraScanSuccess}
-                        onClose={() => {
-                            setShowCameraScanner(false);
-                            refocusSearchInput();
-                        }}
-                        cartItemCount={cartItemCount}
-                        cartTotal={cartTotal}
-                        onViewCart={() => {
-                            setShowCameraScanner(false);
-                            setActiveMobileTab('cart');
-                        }}
-                    />
-                )}
-
                 {/* NEW: Quick Access Product Group Creator / Editor Modal */}
                 {showQuickGroupModal && (
                     <QuickAccessGroupModal
@@ -6890,23 +6849,6 @@
                                     )}
                                 </div>
 
-                                {/* Camera Barcode & QR Scan Button */}
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        if (!currentShift) {
-                                            setShowShiftModal(true);
-                                        } else {
-                                            setShowCameraScanner(true);
-                                        }
-                                    }}
-                                    className="bg-blue-600 hover:bg-blue-500 active:scale-95 text-white px-3 sm:px-3.5 py-2 rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/25 border border-blue-400/30 transition shrink-0"
-                                    title="Scan Barcode / QR Code with Camera"
-                                >
-                                    <i className="fas fa-camera text-sm sm:text-base"></i>
-                                    <span className="text-xs font-bold hidden sm:inline xl:inline">Scan</span>
-                                </button>
-
                                 {/* LOCKED SHOP SELECTOR */}
                                 <div className="relative shrink-0">
                                     <select 
@@ -6933,15 +6875,14 @@
                                         const targetUrl = `https://jlw168.github.io/App-Center/PO_Stand.html?shopId=${encodeURIComponent(selectedShopId)}&shopName=${encodeURIComponent(shopName)}`;
                                         window.open(targetUrl, '_blank', 'noopener');
                                     }}
-                                    className="px-2.5 sm:px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-xl border border-indigo-500/40 flex items-center gap-1.5 text-xs font-bold shrink-0 transition"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-xl border border-indigo-500/40 flex items-center justify-center shrink-0 transition"
                                     title="Open Customer-Facing Live Cart & KHQR Display in New Window"
                                 >
                                     <i className="fas fa-tv"></i>
-                                    <span className="hidden xl:inline">Customer Display</span>
                                 </button>
 
                                 <div 
-                                    className={`px-2.5 py-2 rounded-xl font-bold flex items-center gap-1.5 text-xs border transition-all shrink-0 ${
+                                    className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center border transition-all shrink-0 ${
                                         !isOnline 
                                             ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 animate-pulse shadow-lg shadow-amber-900/20' 
                                             : (pendingSyncCount > 0 || isSyncing)
@@ -6956,52 +6897,43 @@
                                                 : 'Online — Real-time cloud sync active'
                                     }
                                 >
-                                    <span className={`w-2 h-2 rounded-full ${
-                                        !isOnline 
-                                            ? 'bg-amber-400 animate-ping' 
-                                            : (pendingSyncCount > 0 || isSyncing)
-                                                ? 'bg-blue-400 animate-ping'
-                                                : 'bg-emerald-400'
-                                    }`}></span>
-                                    <i className={`fas ${
-                                        !isOnline 
-                                            ? 'fa-wifi-slash' 
-                                            : (pendingSyncCount > 0 || isSyncing)
-                                                ? 'fa-sync fa-spin'
-                                                : 'fa-wifi'
-                                    }`}></i>
-                                    <span className="hidden xl:inline">
-                                        {!isOnline ? 'Offline' : (pendingSyncCount > 0 || isSyncing) ? 'Syncing' : 'Online'}
-                                    </span>
-                                    {pendingSyncCount > 0 && (
-                                        <span className="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-400 text-slate-950">
-                                            {pendingSyncCount} Queued
-                                        </span>
-                                    )}
+                                    <div className="relative flex items-center justify-center w-full h-full">
+                                        <i className={`fas ${
+                                            !isOnline 
+                                                ? 'fa-wifi-slash' 
+                                                : (pendingSyncCount > 0 || isSyncing)
+                                                    ? 'fa-sync fa-spin'
+                                                    : 'fa-wifi'
+                                        }`}></i>
+                                        {pendingSyncCount > 0 && (
+                                            <span className="absolute -top-1.5 -right-1.5 px-1 py-0.5 text-[9px] font-extrabold rounded-full bg-amber-400 text-slate-950 min-w-[16px] text-center shadow-sm">
+                                                {pendingSyncCount}
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
 
                                 <button 
                                     onClick={() => setShowShiftModal(true)}
-                                    className={`px-2.5 sm:px-3 py-2 rounded-xl font-bold flex items-center gap-1.5 text-xs transition shrink-0 ${currentShift ? 'bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30' : 'bg-red-600 text-white animate-pulse'}`}
+                                    className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition shrink-0 ${currentShift ? 'bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30' : 'bg-red-600 text-white animate-pulse shadow-lg shadow-red-900/20'}`}
                                     title={currentShift ? `Shift Open (${currentDevice?.name})` : "Shift Closed - Click to Open"}
                                 >
                                     <i className="fas fa-clock"></i>
-                                    <span className="hidden sm:inline">{currentShift ? "Shift Open" : "Open Shift"}</span>
                                 </button>
 
                                 <button 
                                     onClick={() => setShowSalesHistory(true)}
-                                    className="px-2.5 sm:px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center gap-1.5 text-xs font-semibold shrink-0 transition"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="View Today's Receipts & Void"
                                 >
-                                    <i className="fas fa-history text-blue-400"></i> <span className="hidden sm:inline">History</span>
+                                    <i className="fas fa-history text-blue-400"></i>
                                 </button>
                                 <button 
                                     onClick={() => setShowDailyReport(true)}
-                                    className="px-2.5 sm:px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center gap-1.5 text-xs font-semibold shrink-0 transition"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="Daily Sales Summary"
                                 >
-                                    <i className="fas fa-chart-pie text-emerald-400"></i> <span className="hidden sm:inline">Report</span>
+                                    <i className="fas fa-chart-pie text-emerald-400"></i>
                                 </button>
                                 <button 
                                     onClick={() => {
@@ -7011,10 +6943,10 @@
                                             setShowBankAutoSum(true);
                                         }
                                     }}
-                                    className="px-2.5 sm:px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center gap-1.5 text-xs font-semibold shrink-0 transition"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="View Live Bank Payments for Current Shift"
                                 >
-                                    <i className="fas fa-university text-amber-400"></i> <span className="hidden sm:inline">Bank Sum</span>
+                                    <i className="fas fa-university text-amber-400"></i>
                                 </button>
                             </div>
                         </div>
@@ -7792,628 +7724,6 @@
                         </div>
                     </ModalFooter>
                 </form>
-            </Modal>
-        );
-    };
-
-    // --- NEW: Search & Quick-Add Customer Modal Component ---
-    const AddCustomerModal = ({ onClose, onSave, shops, defaultShopId }) => {
-        const { customers } = useData();
-        const [searchQuery, setSearchQuery] = useState('');
-        const [mode, setMode] = useState('search'); // 'search' | 'create'
-        const [name, setName] = useState('');
-        const [phone, setPhone] = useState('');
-        const [email, setEmail] = useState('');
-        const [shopId, setShopId] = useState(defaultShopId || '');
-        const [loading, setLoading] = useState(false);
-        const [errorMsg, setErrorMsg] = useState('');
-
-        const filteredCustomers = useMemo(() => {
-            if (!customers) return [];
-            const q = searchQuery.trim().toLowerCase();
-            if (!q) {
-                return [...customers].slice(0, 30);
-            }
-            return customers.filter(c =>
-                (c.name || '').toLowerCase().includes(q) ||
-                String(c.phone || '').toLowerCase().includes(q) ||
-                (c.email || '').toLowerCase().includes(q)
-            ).slice(0, 40);
-        }, [customers, searchQuery]);
-
-        const handleSwitchToCreate = () => {
-            const trimmed = searchQuery.trim();
-            // Auto-fill phone if query is digits, otherwise auto-fill name
-            const isPhoneLike = /^[0-9+\-\s()]{3,}$/.test(trimmed);
-            if (isPhoneLike) {
-                setPhone(trimmed);
-                setName('');
-            } else {
-                setName(trimmed);
-                setPhone('');
-            }
-            setErrorMsg('');
-            setMode('create');
-        };
-
-        const handleSubmit = async (e) => {
-            e.preventDefault();
-            if (!name.trim() || !phone.trim()) {
-                setErrorMsg('Please enter both Customer Name and Phone Number.');
-                return;
-            }
-            setLoading(true);
-            setErrorMsg('');
-            try {
-                const docRef = await db.collection("customers").add({
-                    name: name.trim(),
-                    phone: phone.trim(),
-                    email: email.trim(),
-                    points: 0,
-                    visitCount: 0,
-                    totalSpent: 0,
-                    registeredShopId: shopId,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
-                });
-                onSave({
-                    id: docRef.id,
-                    name: name.trim(),
-                    phone: phone.trim(),
-                    email: email.trim(),
-                    points: 0,
-                    registeredShopId: shopId
-                });
-            } catch (error) {
-                setErrorMsg("Failed to add customer: " + error.message);
-                setLoading(false);
-            }
-        };
-
-        return (
-            <Modal show={true} onClose={onClose} maxWidth="max-w-lg">
-                <ModalHeader
-                    title={mode === 'search' ? "Search or Select Customer" : "Register New Customer"}
-                    onClose={onClose}
-                />
-                {mode === 'search' ? (
-                    <>
-                        <ModalBody>
-                            <div className="space-y-3">
-                                {/* Search Input Bar */}
-                                <div className="flex gap-2">
-                                    <div className="relative flex-1">
-                                        <input
-                                            type="text"
-                                            value={searchQuery}
-                                            onChange={e => setSearchQuery(e.target.value)}
-                                            placeholder="Search by customer name or phone number..."
-                                            className="w-full bg-slate-900 text-white pl-9 pr-8 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none text-sm"
-                                            autoFocus
-                                        />
-                                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-                                        {searchQuery && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setSearchQuery('')}
-                                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                                            >
-                                                <i className="fas fa-times-circle text-xs"></i>
-                                            </button>
-                                        )}
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={handleSwitchToCreate}
-                                        className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 shadow-md transition active:scale-95"
-                                    >
-                                        <i className="fas fa-user-plus"></i>
-                                        <span>Add New</span>
-                                    </button>
-                                </div>
-
-                                {/* Walk-in Quick Option */}
-                                <button
-                                    type="button"
-                                    onClick={() => onSave({ id: '' })}
-                                    className="w-full p-2.5 rounded-xl bg-slate-900/50 hover:bg-slate-700/60 border border-slate-700 text-left flex items-center justify-between transition text-xs text-slate-300"
-                                >
-                                    <span className="flex items-center gap-2 font-semibold">
-                                        <i className="fas fa-walking text-slate-400"></i>
-                                        Walk-in Customer (No Member)
-                                    </span>
-                                    <span className="text-[10px] uppercase font-bold text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Default</span>
-                                </button>
-
-                                {/* Customer Results List */}
-                                <div className="border border-slate-700 rounded-xl bg-slate-900/60 max-h-72 overflow-y-auto divide-y divide-slate-800">
-                                    {filteredCustomers.length > 0 ? (
-                                        filteredCustomers.map(c => (
-                                            <div
-                                                key={c.id}
-                                                onClick={() => onSave(c)}
-                                                className="p-3 hover:bg-blue-600/20 cursor-pointer transition flex items-center justify-between gap-3 group"
-                                            >
-                                                <div className="flex items-center gap-3 min-w-0">
-                                                    <div className="w-9 h-9 rounded-full bg-slate-800 group-hover:bg-blue-600 text-blue-400 group-hover:text-white font-bold text-xs flex items-center justify-center border border-slate-700 shrink-0 transition">
-                                                        {(c.name || 'U').charAt(0).toUpperCase()}
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                    <div className="text-sm font-bold text-white group-hover:text-blue-300 truncate">
-                                                        {c.name}
-                                                    </div>
-                                                    <div className="text-xs text-slate-400 truncate mt-0.5">
-                                                        {c.phone} {c.email ? `• ${c.email}` : ''}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div className="text-right shrink-0">
-                                                <div className="text-[10px] font-bold text-slate-500 uppercase">Points</div>
-                                                <div className="text-sm font-black text-amber-400">{c.points || 0}</div>
-                                            </div>
-                                        </div>
-                                    ))
-                                ) : (
-                                    <div className="p-6 text-center space-y-3">
-                                            <div className="w-12 h-12 rounded-full bg-slate-800 text-slate-400 flex items-center justify-center mx-auto border border-slate-700">
-                                                <i className="fas fa-user-plus text-lg text-emerald-400"></i>
-                                            </div>
-                                            <div>
-                                                <p className="text-sm font-bold text-slate-200">
-                                                    No customer found for "{searchQuery}"
-                                                </p>
-                                                <p className="text-xs text-slate-400 mt-0.5">
-                                                    Create a new member account in 1 click with this info pre-filled.
-                                                </p>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={handleSwitchToCreate}
-                                                className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs inline-flex items-center gap-2 shadow-lg shadow-emerald-900/30 transition active:scale-95"
-                                            >
-                                                <i className="fas fa-plus-circle"></i>
-                                                <span>Add "{searchQuery}" as New Customer</span>
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </ModalBody>
-                        <ModalFooter>
-                            <button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-slate-500 text-sm">
-                                Close
-                            </button>
-                        </ModalFooter>
-                    </>
-                ) : (
-                    <form onSubmit={handleSubmit}>
-                        <ModalBody>
-                            <div className="space-y-4">
-                                <button
-                                    type="button"
-                                    onClick={() => setMode('search')}
-                                    className="text-xs font-bold text-blue-400 hover:text-blue-300 flex items-center gap-1.5"
-                                >
-                                    <i className="fas fa-arrow-left"></i>
-                                    <span>Back to Customer Search</span>
-                                </button>
-
-                                {errorMsg && (
-                                    <div className="p-3 bg-red-500/20 border border-red-500/50 rounded-lg text-red-200 text-xs flex items-center gap-2">
-                                        <i className="fas fa-exclamation-circle"></i>
-                                        <span>{errorMsg}</span>
-                                    </div>
-                                )}
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-300 mb-1">Customer Name <span className="text-red-400">*</span></label>
-                                    <input
-                                        type="text"
-                                        required
-                                        value={name}
-                                        onChange={e => setName(e.target.value)}
-                                        className="w-full bg-slate-700 text-white px-3 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none"
-                                        placeholder="e.g. Sokha"
-                                        autoFocus={!name}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-300 mb-1">Contact / Phone Number <span className="text-red-400">*</span></label>
-                                    <input
-                                        type="tel"
-                                        required
-                                        value={phone}
-                                        onChange={e => setPhone(e.target.value)}
-                                        className="w-full bg-slate-700 text-white px-3 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none"
-                                        placeholder="e.g. 012 345 678"
-                                        autoFocus={!!name && !phone}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-300 mb-1">Email (Optional)</label>
-                                    <input
-                                        type="email"
-                                        value={email}
-                                        onChange={e => setEmail(e.target.value)}
-                                        className="w-full bg-slate-700 text-white px-3 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none"
-                                        placeholder="e.g. client@example.com"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-slate-300 mb-1">Registered Shop</label>
-                                    <select
-                                        value={shopId}
-                                        onChange={e => setShopId(e.target.value)}
-                                        className="w-full bg-slate-700 text-white px-3 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none"
-                                    >
-                                        <option value="">Unknown / General</option>
-                                        {shops && shops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                    </select>
-                                </div>
-                            </div>
-                        </ModalBody>
-                        <ModalFooter>
-                            <button type="button" onClick={() => setMode('search')} className="bg-slate-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-slate-500">
-                                Back
-                            </button>
-                            <button type="submit" disabled={loading} className="bg-emerald-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-emerald-500 flex items-center gap-2 shadow-lg shadow-emerald-900/30">
-                                {loading ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check"></i>}
-                                {loading ? 'Saving...' : 'Save & Select Customer'}
-                            </button>
-                        </ModalFooter>
-                    </form>
-                )}
-            </Modal>
-        );
-    };
-
-    // --- NEW: Mobile Camera Barcode & QR Code Scanner Modal ---
-    const MobileCameraScannerModal = ({ onScan, onClose, cartItemCount, cartTotal, onViewCart }) => {
-        const [continuousMode, setContinuousMode] = useState(true);
-        const [cameraFacing, setCameraFacing] = useState('environment'); // 'environment' (back) or 'user' (front)
-        const [torchOn, setTorchOn] = useState(false);
-        const [torchSupported, setTorchSupported] = useState(false);
-        const [scanFeedback, setScanFeedback] = useState(null);
-        const [cameraError, setCameraError] = useState('');
-        const [isStarting, setIsStarting] = useState(true);
-        const [manualCode, setManualCode] = useState('');
-
-        const scannerRef = useRef(null);
-        const lastScanRef = useRef({ code: '', time: 0 });
-        const onScanRef = useRef(onScan);
-        const continuousModeRef = useRef(continuousMode);
-
-        useEffect(() => {
-            onScanRef.current = onScan;
-        }, [onScan]);
-
-        useEffect(() => {
-            continuousModeRef.current = continuousMode;
-        }, [continuousMode]);
-
-        // Web Audio API Beep for tactile POS scanner feedback
-        const playBeep = useCallback((isSuccess = true) => {
-            try {
-                const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                if (!AudioCtx) return;
-                const ctx = new AudioCtx();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-
-                osc.type = isSuccess ? 'sine' : 'sawtooth';
-                osc.frequency.setValueAtTime(isSuccess ? 1480 : 320, ctx.currentTime);
-                gain.gain.setValueAtTime(0.15, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + (isSuccess ? 0.12 : 0.25));
-
-                osc.start();
-                osc.stop(ctx.currentTime + (isSuccess ? 0.12 : 0.25));
-            } catch (e) {
-                // Ignore audio context restriction errors
-            }
-        }, []);
-
-        useEffect(() => {
-            let html5QrCode = null;
-            let isMounted = true;
-
-            const startScanner = async () => {
-                setIsStarting(true);
-                setCameraError('');
-                setTorchSupported(false);
-                setTorchOn(false);
-
-                try {
-                    if (typeof Html5Qrcode === 'undefined') {
-                        throw new Error("Scanner library failed to load. Please check your internet connection.");
-                    }
-
-                    html5QrCode = new Html5Qrcode("pos-camera-reader");
-                    scannerRef.current = html5QrCode;
-
-                    const config = {
-                        fps: 15,
-                        qrbox: { width: 250, height: 170 },
-                        aspectRatio: 1.0,
-                        disableFlip: false
-                    };
-
-                    await html5QrCode.start(
-                        { facingMode: cameraFacing },
-                        config,
-                        (decodedText) => {
-                            if (!isMounted) return;
-                            const now = Date.now();
-                            // Prevent duplicate rapid scans of the same barcode within 1.5 seconds
-                            if (
-                                lastScanRef.current.code === decodedText &&
-                                now - lastScanRef.current.time < 1500
-                            ) {
-                                return;
-                            }
-                            lastScanRef.current = { code: decodedText, time: now };
-
-                            if (navigator.vibrate) {
-                                navigator.vibrate(60);
-                            }
-
-                            const result = onScanRef.current(decodedText);
-                            if (result && result.found) {
-                                playBeep(true);
-                                setScanFeedback({
-                                    type: 'success',
-                                    title: result.product.name,
-                                    subtitle: `Added • ៛${new Intl.NumberFormat('en-US').format(result.product.price)}`
-                                });
-                                if (!continuousModeRef.current) {
-                                    setTimeout(() => {
-                                        if (isMounted) onClose();
-                                    }, 350);
-                                }
-                            } else {
-                                playBeep(false);
-                                setScanFeedback({
-                                    type: 'error',
-                                    title: 'Product Not Found',
-                                    subtitle: `Code: ${decodedText}`
-                                });
-                            }
-                        },
-                        () => {
-                            // Frame scan error (normal when no barcode in view)
-                        }
-                    );
-
-                    if (isMounted) {
-                        setIsStarting(false);
-                        // Check if camera supports flashlight/torch
-                        try {
-                            const capabilities = html5QrCode.getRunningTrackCameraCapabilities();
-                            if (capabilities && capabilities.torchFeature && capabilities.torchFeature().isSupported()) {
-                                setTorchSupported(true);
-                            }
-                        } catch (capErr) {
-                            setTorchSupported(false);
-                        }
-                    }
-                } catch (err) {
-                    console.error("Camera Scanner Error:", err);
-                    if (isMounted) {
-                        setIsStarting(false);
-                        setCameraError(
-                            typeof err === 'string'
-                                ? err
-                                : err?.message || "Unable to access camera. Please grant camera permission in your browser settings."
-                        );
-                    }
-                }
-            };
-
-            startScanner();
-
-            return () => {
-                isMounted = false;
-                if (html5QrCode) {
-                    try {
-                        if (html5QrCode.isScanning) {
-                            html5QrCode.stop().then(() => html5QrCode.clear()).catch(() => {});
-                        } else {
-                            html5QrCode.clear();
-                        }
-                    } catch (e) {}
-                }
-            };
-        }, [cameraFacing, playBeep]);
-
-        const toggleTorch = async () => {
-            if (!scannerRef.current || !torchSupported) return;
-            try {
-                const nextState = !torchOn;
-                await scannerRef.current.applyVideoConstraints({
-                    advanced: [{ torch: nextState }]
-                });
-                setTorchOn(nextState);
-            } catch (err) {
-                console.warn("Torch toggle failed:", err);
-            }
-        };
-
-        const handleManualSubmit = (e) => {
-            e.preventDefault();
-            if (!manualCode.trim()) return;
-            const res = onScan(manualCode.trim());
-            if (res && res.found) {
-                playBeep(true);
-                setScanFeedback({
-                    type: 'success',
-                    title: res.product.name,
-                    subtitle: `Added • ៛${new Intl.NumberFormat('en-US').format(res.product.price)}`
-                });
-                setManualCode('');
-                if (!continuousMode) {
-                    onClose();
-                }
-            } else {
-                playBeep(false);
-                setScanFeedback({
-                    type: 'error',
-                    title: 'Product Not Found',
-                    subtitle: `Code: ${manualCode.trim()}`
-                });
-            }
-        };
-
-        return (
-            <Modal show={true} onClose={onClose} maxWidth="max-w-md">
-                <ModalHeader title="Camera Barcode / QR Scanner" onClose={onClose} />
-                <ModalBody>
-                    <div className="space-y-4">
-                        {/* Mode & Camera Controls Bar */}
-                        <div className="flex items-center justify-between gap-2 bg-slate-900/80 p-2.5 rounded-xl border border-slate-700">
-                            <div className="flex items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => setContinuousMode(!continuousMode)}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
-                                        continuousMode
-                                            ? 'bg-emerald-600 text-white shadow-sm'
-                                            : 'bg-slate-800 text-slate-300 border border-slate-600'
-                                    }`}
-                                >
-                                    <i className={`fas ${continuousMode ? 'fa-sync-alt' : 'fa-bullseye'}`}></i>
-                                    <span>{continuousMode ? 'Continuous Scan' : 'Single Scan'}</span>
-                                </button>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                                {torchSupported && (
-                                    <button
-                                        type="button"
-                                        onClick={toggleTorch}
-                                        className={`w-9 h-9 rounded-lg flex items-center justify-center transition border ${
-                                            torchOn
-                                                ? 'bg-yellow-500 text-slate-950 border-yellow-400 shadow-lg shadow-yellow-500/30'
-                                                : 'bg-slate-800 text-slate-300 border-slate-600 hover:text-white'
-                                        }`}
-                                        title="Toggle Flashlight"
-                                    >
-                                        <i className="fas fa-bolt"></i>
-                                    </button>
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={() => setCameraFacing(prev => (prev === 'environment' ? 'user' : 'environment'))}
-                                    className="px-3 h-9 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 text-xs font-bold flex items-center gap-1.5 transition"
-                                    title="Switch Front/Back Camera"
-                                >
-                                    <i className="fas fa-camera-rotate"></i>
-                                    <span>Flip</span>
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Live Camera Viewport */}
-                        <div className="relative bg-black rounded-2xl overflow-hidden border-2 border-slate-700 min-h-[260px] flex items-center justify-center shadow-inner">
-                            <div id="pos-camera-reader" className="w-full"></div>
-
-                            {isStarting && !cameraError && (
-                                <div className="absolute inset-0 bg-slate-950/80 flex flex-col items-center justify-center text-slate-300 gap-3 z-10">
-                                    <div className="loader w-8 h-8"></div>
-                                    <span className="text-xs font-medium">Starting camera...</span>
-                                </div>
-                            )}
-
-                            {cameraError && (
-                                <div className="p-6 text-center space-y-3 z-10">
-                                    <div className="w-12 h-12 rounded-full bg-red-500/20 text-red-400 flex items-center justify-center mx-auto">
-                                        <i className="fas fa-video-slash text-xl"></i>
-                                    </div>
-                                    <p className="text-xs text-red-300 leading-relaxed">{cameraError}</p>
-                                    <button
-                                        type="button"
-                                        onClick={() => setCameraFacing(prev => prev)}
-                                        className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-bold"
-                                    >
-                                        Retry Camera
-                                    </button>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Live Scan Feedback Toast */}
-                        {scanFeedback ? (
-                            <div
-                                className={`p-3 rounded-xl border flex items-center justify-between gap-3 transition-all ${
-                                    scanFeedback.type === 'success'
-                                        ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200'
-                                        : 'bg-red-950/60 border-red-500/50 text-red-200'
-                                }`}
-                            >
-                                <div className="flex items-center gap-3 min-w-0">
-                                    <div
-                                        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
-                                            scanFeedback.type === 'success' ? 'bg-emerald-500 text-slate-950' : 'bg-red-500 text-white'
-                                        }`}
-                                    >
-                                        <i className={`fas ${scanFeedback.type === 'success' ? 'fa-check' : 'fa-exclamation'}`}></i>
-                                    </div>
-                                    <div className="min-w-0">
-                                        <div className="font-bold text-sm truncate text-white">{scanFeedback.title}</div>
-                                        <div className="text-xs opacity-90 truncate">{scanFeedback.subtitle}</div>
-                                    </div>
-                                </div>
-                                <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-black/30 shrink-0">
-                                    Just Scanned
-                                </span>
-                            </div>
-                        ) : (
-                            <div className="text-center text-xs text-slate-400 py-1">
-                                <i className="fas fa-crosshairs mr-1.5 text-blue-400"></i>
-                                Point camera at any 1D Barcode or 2D QR Code
-                            </div>
-                        )}
-
-                        {/* Manual Fallback Code Input */}
-                        <form onSubmit={handleManualSubmit} className="flex gap-2">
-                            <input
-                                type="text"
-                                value={manualCode}
-                                onChange={(e) => setManualCode(e.target.value)}
-                                placeholder="Or type barcode / code manually..."
-                                className="flex-1 bg-slate-900 text-white px-3 py-2 rounded-lg border border-slate-700 focus:border-blue-500 outline-none text-xs"
-                            />
-                            <button
-                                type="submit"
-                                className="px-4 py-2 bg-slate-700 hover:bg-blue-600 text-white text-xs font-bold rounded-lg transition"
-                            >
-                                Add
-                            </button>
-                        </form>
-                    </div>
-                </ModalBody>
-                <ModalFooter>
-                    <div className="w-full flex items-center justify-between gap-3">
-                        <button
-                            type="button"
-                            onClick={onViewCart}
-                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-600/30 text-sm"
-                        >
-                            <i className="fas fa-shopping-cart"></i>
-                            <span>View Cart ({cartItemCount})</span>
-                            {cartTotal > 0 && (
-                                <span className="bg-black/20 px-2 py-0.5 rounded text-xs">
-                                    ៛{new Intl.NumberFormat('en-US', { notation: 'compact' }).format(cartTotal)}
-                                </span>
-                            )}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={onClose}
-                            className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-5 rounded-lg text-sm"
-                        >
-                            Done
-                        </button>
-                    </div>
-                </ModalFooter>
             </Modal>
         );
     };
