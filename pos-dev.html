@@ -25122,6 +25122,25 @@
             }
         };
         
+        const totalCValue = useMemo(() => {
+            let sum = 0;
+            const focusedShopObj = managedShops.find(s => s.id === focusedShopId) || null;
+
+            filteredProducts.forEach(p => {
+                const totalStock = p.stockByShop ? Object.values(p.stockByShop).reduce((a, b) => (Number(a) || 0) + (Number(b) || 0), 0) : 0;
+                const prodFifo = fifoValuationMap?.get(p.id);
+                const focusedShopFifo = focusedShopObj ? prodFifo?.byShop?.[focusedShopObj.id] : null;
+                const baseCost = Number(p.cost) || 0;
+
+                const displayTotalValue = focusedShopObj
+                    ? (focusedShopFifo ? focusedShopFifo.totalFifoValue : ((Number(p.stockByShop?.[focusedShopObj.id]) || 0) * baseCost))
+                    : (prodFifo?.globalFifoValue ?? (totalStock * baseCost));
+                
+                sum += displayTotalValue;
+            });
+            return sum;
+        }, [filteredProducts, fifoValuationMap, focusedShopId, managedShops]);
+
         return (
             <div className="space-y-6">
                 {modal.type === 'message' && <MessageModal {...modal.data} show={true} onClose={() => setModal({ type: null })} />}
@@ -25150,7 +25169,14 @@
                     onClose={() => setProductModal({ show: false, product: null, mode: 'edit' })} 
                 />}
 
-                <TableCard title={`Existing Products - ${filteredProducts.length}`}>
+                <TableCard title={
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                        <span>Existing Products - {filteredProducts.length}</span>
+                        <span className="text-xs sm:text-sm font-mono text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/20 shadow-inner">
+                            SubTotal C.Value: ៛{khrFormatter.format(Math.round(totalCValue))}
+                        </span>
+                    </div>
+                }>
                     {/* Unified Top Filter & Action Bar: 2-Column Search Grid + Shop View Droplist + Icon-Only Actions */}
                     <div className="mb-4 pb-3 border-b border-slate-700/80 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-2.5">
                         <ProductFilters onFilterChange={handleFilterChange} />
