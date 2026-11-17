@@ -592,9 +592,9 @@
                                     }
                                 });
 
-                                // Auto-pair if the nearest shop is within a 2.5-kilometer radius
+                                // Auto-pair if the nearest shop is within a 1.0-kilometer radius
                                 if (nearestShop) {
-                                    if (minDistance <= 2.5) {
+                                    if (minDistance <= 1.0) {
                                         setSelectedShopId(nearestShop.id);
                                         try { localStorage.setItem('solaris_display_shop_id', nearestShop.id); } catch (e) {}
                                     } else {
@@ -784,7 +784,7 @@
                             });
 
                             if (nearestShop) {
-                                if (minDistance <= 2.5) {
+                                if (minDistance <= 1.0) {
                                     handleSelectBranch(nearestShop.id);
                                 } else {
                                     setNearestShopOutsideRadius({ shop: nearestShop, distance: minDistance });
