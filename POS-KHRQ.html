@@ -1,0 +1,1800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Customer Display — Live Cart & ABA KHQR</title>
+
+    <!-- PWA & Full-Screen Kiosk Meta Tags -->
+    <meta name="theme-color" content="#0f172a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="KHQR Display">
+
+    <!-- Dynamic PWA Manifest & Native App Icon Generator -->
+    <script>
+        window.SolarisPWAManager = {
+            deferredPrompt: null,
+            isInstalled: false,
+            listeners: new Set(),
+            subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
+            notify() { this.listeners.forEach(fn => { try { fn(this.getState()); } catch (e) {} }); },
+            getState() {
+                const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone || document.referrer.includes('android-app://');
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                return { canInstallPrompt: !!this.deferredPrompt, isInstalled: isStandalone || this.isInstalled, isIOS };
+            },
+            generateAppIcon(size = 512) {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = size; canvas.height = size;
+                    const ctx = canvas.getContext('2d');
+                    const grad = ctx.createLinearGradient(0, 0, size, size);
+                    grad.addColorStop(0, '#004459'); grad.addColorStop(1, '#020617');
+                    ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+                    ctx.fillStyle = '#ffffff'; ctx.font = `900 ${Math.round(size * 0.2)}px Arial`;
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText('KHQR', size / 2, size * 0.4);
+                    ctx.fillStyle = '#26A9C8'; ctx.font = `900 ${Math.round(size * 0.15)}px Arial`;
+                    ctx.fillText('DISPLAY', size / 2, size * 0.65);
+                    return canvas.toDataURL('image/png');
+                } catch (e) { return ''; }
+            },
+            enterKioskFullscreen() {
+                try {
+                    const docEl = document.documentElement;
+                    if (document.fullscreenElement || document.webkitFullscreenElement) return true;
+                    const req = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.msRequestFullscreen;
+                    if (req) { req.call(docEl).catch(()=>{}); return true; }
+                } catch (e) {} return false;
+            },
+            exitKioskFullscreen() {
+                try {
+                    if (document.fullscreenElement || document.webkitFullscreenElement) {
+                        const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+                        if (exit) exit.call(document).catch(()=>{});
+                    }
+                } catch (e) {}
+            },
+            init(appName = 'KHQR Display') {
+                const icon192 = this.generateAppIcon(192);
+                const icon512 = this.generateAppIcon(512);
+                if (icon192) {
+                    let appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+                    if (!appleIcon) { appleIcon = document.createElement('link'); appleIcon.rel = 'apple-touch-icon'; document.head.appendChild(appleIcon); }
+                    appleIcon.href = icon192;
+                }
+                const manifestObj = {
+                    name: appName, short_name: 'KHQR Display', display: 'standalone', background_color: '#020617', theme_color: '#0f172a',
+                    icons: [{ src: icon192, sizes: '192x192', type: 'image/png', purpose: 'any maskable' }, { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }]
+                };
+                try {
+                    const blob = new Blob([JSON.stringify(manifestObj)], { type: 'application/manifest+json' });
+                    let manifestLink = document.querySelector('link[rel="manifest"]');
+                    if (!manifestLink) { manifestLink = document.createElement('link'); manifestLink.rel = 'manifest'; document.head.appendChild(manifestLink); }
+                    manifestLink.href = URL.createObjectURL(blob);
+                } catch (e) {}
+            }
+        };
+        window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.SolarisPWAManager.deferredPrompt = e; window.SolarisPWAManager.notify(); });
+        window.addEventListener('appinstalled', () => { window.SolarisPWAManager.deferredPrompt = null; window.SolarisPWAManager.isInstalled = true; window.SolarisPWAManager.notify(); });
+        window.addEventListener('DOMContentLoaded', () => window.SolarisPWAManager.init());
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+    <!-- Google Fonts: Inter & Noto Sans Khmer -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+Khmer:wght@400;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- React 18 & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+    <!-- Firebase Compat SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+    <!-- QR Code Generator -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', 'Noto Sans Khmer', sans-serif;
+            background-color: #020617;
+            color: #f8fafc;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior: none;
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        @keyframes fadeInScale {
+            from {
+                opacity: 0;
+                transform: translateY(10px) scale(0.98);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .animate-fade-scale {
+            animation: fadeInScale 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        @keyframes pulseHighlight {
+            0% { background-color: rgba(59, 130, 246, 0.32); }
+            100% { background-color: rgba(30, 41, 59, 0.55); }
+        }
+        .item-row-flash {
+            animation: pulseHighlight 1.1s ease-out forwards;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // --- 1. FIREBASE INITIALIZATION ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAsw_K2LarDunqh9ePnSRuMjXrzd6WZ1EI",
+            authDomain: "posystem-3e373.firebaseapp.com",
+            projectId: "posystem-3e373",
+            storageBucket: "posystem-3e373.appspot.com",
+            messagingSenderId: "783169032599",
+            appId: "1:783169032599:web:d44e8956e790a7f9b3b4d2",
+            measurementId: "G-G6B8H6HSQC"
+        };
+
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        db.settings({
+            experimentalForceLongPolling: true,
+            useFetchStreams: false
+        });
+
+        // --- 2. EMVCo DYNAMIC KHQR & QR RENDERER ENGINE ---
+        const DisplayKHQREngine = {
+            _qrCache: new Map(),
+
+            crc16(str) {
+                let crc = 0xFFFF;
+                for (let i = 0; i < str.length; i++) {
+                    crc ^= (str.charCodeAt(i) & 0xFF) << 8;
+                    for (let j = 0; j < 8; j++) {
+                        if ((crc & 0x8000) !== 0) {
+                            crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
+                        } else {
+                            crc = (crc << 1) & 0xFFFF;
+                        }
+                    }
+                }
+                return crc.toString(16).toUpperCase().padStart(4, '0');
+            },
+
+            parseTLV(payload) {
+                const result = [];
+                if (!payload || typeof payload !== 'string') return result;
+                let idx = 0;
+                while (idx + 4 <= payload.length) {
+                    const tag = payload.slice(idx, idx + 2);
+                    const len = parseInt(payload.slice(idx + 2, idx + 4), 10);
+                    if (isNaN(len) || len < 0 || idx + 4 + len > payload.length) break;
+                    const value = payload.slice(idx + 4, idx + 4 + len);
+                    result.push({ tag, length: len, value });
+                    idx += 4 + len;
+                }
+                return result;
+            },
+
+            formatTLV(tag, value) {
+                const valStr = String(value ?? '');
+                const lenStr = String(valStr.length).padStart(2, '0');
+                return `${tag}${lenStr}${valStr}`;
+            },
+
+            extractMerchantInfoFromEMV(emvPayload) {
+                if (!emvPayload || typeof emvPayload !== 'string' || !emvPayload.startsWith('000201')) {
+                    return { merchantName: null, merchantCity: null, mid: null };
+                }
+                const parsed = this.parseTLV(emvPayload);
+                const tag29Or30 = parsed.find(t => t.tag === '30' || t.tag === '29');
+                const tag59 = parsed.find(t => t.tag === '59');
+                const tag60 = parsed.find(t => t.tag === '60');
+                let mid = null;
+                if (tag29Or30 && tag29Or30.value) {
+                    const subTags = this.parseTLV(tag29Or30.value);
+                    const midSub02 = subTags.find(st => st.tag === '02');
+                    const midSub01 = subTags.find(st => st.tag === '01');
+                    const rawMid = (midSub02 && midSub02.value) ? midSub02.value : (midSub01 ? midSub01.value : null);
+                    if (rawMid) {
+                        const digits = String(rawMid).replace(/\D/g, '');
+                        mid = digits.length >= 9 ? digits : String(rawMid).trim();
+                    }
+                }
+                return {
+                    merchantName: tag59?.value ? String(tag59.value).trim() : null,
+                    merchantCity: tag60?.value ? String(tag60.value).trim() : null,
+                    mid
+                };
+            },
+
+            generateDynamicKHQR(basePayload, amountValue, invoiceNo = '', currency = 'KHR', customTimestamps = null) {
+                if (!basePayload || typeof basePayload !== 'string' || !basePayload.startsWith('000201')) {
+                    return null;
+                }
+                const parsed = this.parseTLV(basePayload);
+                if (parsed.length < 4) return null;
+
+                const isUsd = String(currency || 'KHR').toUpperCase() === 'USD';
+                const targetCurrencyCode = isUsd ? '840' : '116';
+                const rawNum = Number(amountValue) || 0;
+                const formattedAmountStr = isUsd
+                    ? (rawNum > 0 ? rawNum.toFixed(2) : '')
+                    : (Math.round(rawNum) > 0 ? String(Math.round(rawNum)) : '');
+                const hasPositiveAmount = rawNum > 0 && formattedAmountStr.length > 0;
+
+                const cleanInvoice = String(invoiceNo || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 25);
+
+                const nowMs = (customTimestamps && Number(customTimestamps.createdAtMs) > 0)
+                    ? Math.floor(Number(customTimestamps.createdAtMs))
+                    : Date.now();
+                const expMs = (customTimestamps && Number(customTimestamps.expiresAtMs) > nowMs)
+                    ? Math.floor(Number(customTimestamps.expiresAtMs))
+                    : (nowMs + 15 * 60 * 1000);
+
+                const tag99Value = this.formatTLV('00', String(nowMs)) + this.formatTLV('01', String(expMs));
+                const filtered = parsed.filter(t => t.tag !== '63' && t.tag !== '99');
+
+                const resultTags = [];
+                let hasTag01 = false;
+                let hasTag53 = false;
+                let hasTag54 = false;
+                let hasTag62 = false;
+
+                filtered.forEach(item => {
+                    if (item.tag === '01') {
+                        hasTag01 = true;
+                        resultTags.push({ tag: '01', value: hasPositiveAmount ? '12' : item.value });
+                    } else if (item.tag === '53') {
+                        hasTag53 = true;
+                        resultTags.push({ tag: '53', value: targetCurrencyCode });
+                    } else if (item.tag === '54') {
+                        hasTag54 = true;
+                        if (hasPositiveAmount) {
+                            resultTags.push({ tag: '54', value: formattedAmountStr });
+                        }
+                    } else if (item.tag === '62') {
+                        hasTag62 = true;
+                        if (cleanInvoice) {
+                            const subTags = this.parseTLV(item.value).filter(st => st.tag !== '01');
+                            subTags.unshift({ tag: '01', value: cleanInvoice });
+                            const rebuilt62 = subTags.map(st => this.formatTLV(st.tag, st.value)).join('');
+                            resultTags.push({ tag: '62', value: rebuilt62 });
+                        } else {
+                            resultTags.push({ tag: '62', value: item.value });
+                        }
+                    } else {
+                        resultTags.push({ tag: item.tag, value: item.value });
+                    }
+                });
+
+                if (!hasTag01) {
+                    resultTags.splice(1, 0, { tag: '01', value: hasPositiveAmount ? '12' : '11' });
+                }
+                if (!hasTag53) {
+                    const idx52 = resultTags.findIndex(t => t.tag === '52');
+                    const pos = idx52 !== -1 ? idx52 + 1 : resultTags.length;
+                    resultTags.splice(pos, 0, { tag: '53', value: targetCurrencyCode });
+                }
+                if (!hasTag54 && hasPositiveAmount) {
+                    const idx53 = resultTags.findIndex(t => t.tag === '53');
+                    const pos = idx53 !== -1 ? idx53 + 1 : resultTags.length;
+                    resultTags.splice(pos, 0, { tag: '54', value: formattedAmountStr });
+                }
+                if (!hasTag62 && cleanInvoice) {
+                    resultTags.push({ tag: '62', value: this.formatTLV('01', cleanInvoice) });
+                }
+                if (hasPositiveAmount) {
+                    resultTags.push({ tag: '99', value: tag99Value });
+                }
+
+                const bodyWithoutCrc = resultTags.map(t => this.formatTLV(t.tag, t.value)).join('') + '6304';
+                const crcHex = this.crc16(bodyWithoutCrc);
+                return bodyWithoutCrc + crcHex;
+            },
+
+            renderInstantQRDataURL(payloadText, sizePx = 420, marginModules = 1, ecLevel = 'H') {
+                const clean = String(payloadText || '').trim();
+                if (!clean) return '';
+                const key = `${clean}__${sizePx}__${marginModules}__${ecLevel}`;
+                if (this._qrCache.has(key)) return this._qrCache.get(key);
+
+                try {
+                    if (typeof window.qrcode === 'function') {
+                        const qr = window.qrcode(0, ecLevel);
+                        qr.addData(clean);
+                        qr.make();
+                        const count = qr.getModuleCount();
+                        const total = count + marginModules * 2;
+                        const canvas = document.createElement('canvas');
+                        canvas.width = sizePx;
+                        canvas.height = sizePx;
+                        const ctx = canvas.getContext('2d');
+                        ctx.fillStyle = '#FFFFFF';
+                        ctx.fillRect(0, 0, sizePx, sizePx);
+                        const scale = sizePx / total;
+                        ctx.fillStyle = '#000000';
+                        for (let r = 0; r < count; r++) {
+                            for (let c = 0; c < count; c++) {
+                                if (qr.isDark(r, c)) {
+                                    const x = Math.floor((c + marginModules) * scale);
+                                    const y = Math.floor((r + marginModules) * scale);
+                                    const w = Math.ceil((c + marginModules + 1) * scale) - x;
+                                    const h = Math.ceil((r + marginModules + 1) * scale) - y;
+                                    ctx.fillRect(x, y, w, h);
+                                }
+                            }
+                        }
+                        const dataUrl = canvas.toDataURL('image/png');
+                        this._qrCache.set(key, dataUrl);
+                        return dataUrl;
+                    }
+                } catch (e) {}
+                return '';
+            }
+        };
+
+        // --- 3. DEVICE IDENTITY & HARDWARE FINGERPRINT HELPER ---
+        const getOrCreateDisplayDeviceId = () => {
+            const storageKey = 'solaris_khqr_display_device_id';
+            try {
+                let existing = localStorage.getItem(storageKey);
+                if (existing && existing.startsWith('SLR-DEV-')) return existing;
+                const randomHex = Array.from({ length: 6 }, () =>
+                    '0123456789ABCDEF'[Math.floor(Math.random() * 16)]
+                ).join('');
+                const created = `SLR-DEV-${randomHex}`;
+                localStorage.setItem(storageKey, created);
+                return created;
+            } catch (e) {
+                return 'SLR-DEV-TEMP01';
+            }
+        };
+
+        const detectDeviceModelSummary = () => {
+            const ua = navigator.userAgent || '';
+            const w = window.screen?.width || window.innerWidth;
+            const h = window.screen?.height || window.innerHeight;
+            let platform = 'Counter Display';
+            if (/iPad/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) platform = 'iPad Display';
+            else if (/iPhone/i.test(ua)) platform = 'iPhone Display';
+            else if (/Android/i.test(ua)) platform = 'Android Display';
+            else if (/Windows/i.test(ua)) platform = 'Windows Display';
+            else if (/Macintosh/i.test(ua)) platform = 'Mac Display';
+            return `${platform} (${w}×${h})`;
+        };
+
+        // --- 4. GPS & HAVERSINE DISTANCE HELPER ---
+        const calculateHaversineDistance = (lat1, lon1, lat2, lon2) => {
+            const R = 6371; // Radius of the Earth in km
+            const dLat = (lat2 - lat1) * (Math.PI / 180);
+            const dLon = (lon2 - lon1) * (Math.PI / 180);
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c; // Distance in km
+        };
+
+        // --- 5. SOUND CHIME HELPER ---
+        const playDisplaySound = (type = 'item') => {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                const ctx = new AudioCtx();
+                const playTone = (freq, start, dur, gainVal = 0.12) => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+                    gain.gain.setValueAtTime(gainVal, ctx.currentTime + start);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(ctx.currentTime + start);
+                    osc.stop(ctx.currentTime + start + dur);
+                };
+                if (type === 'paid') {
+                    playTone(880, 0, 0.16, 0.18);
+                    playTone(1174.66, 0.13, 0.35, 0.2);
+                } else if (type === 'qr') {
+                    playTone(659.25, 0, 0.12, 0.14);
+                    playTone(880, 0.1, 0.22, 0.14);
+                } else {
+                    playTone(1046.5, 0, 0.07, 0.06);
+                }
+            } catch (e) {}
+        };
+
+        // --- NEW: REUSABLE UI MODALS FOR STANDALONE APP ---
+        const Modal = ({ children, show, maxWidth = 'max-w-md' }) => {
+            if (!show) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-scale">
+                    <div className={`bg-slate-900 border border-slate-700 rounded-3xl shadow-2xl w-full ${maxWidth} flex flex-col overflow-hidden`}>
+                        {children}
+                    </div>
+                </div>
+            );
+        };
+        const ModalHeader = ({ title, onClose }) => (
+            <div className="px-5 py-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
+                <h3 className="text-lg font-bold text-white">{title}</h3>
+                <button onClick={onClose} className="text-slate-400 hover:text-white transition w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center"><i className="fas fa-times"></i></button>
+            </div>
+        );
+        const ModalBody = ({ children }) => <div className="p-5 overflow-y-auto max-h-[70vh]">{children}</div>;
+        const ModalFooter = ({ children }) => <div className="p-4 border-t border-slate-800 bg-slate-950/30 flex justify-end gap-3">{children}</div>;
+
+        const InstallAppModal = ({ show, onClose, appName = 'KHQR Display' }) => {
+            const [pwaState, setPwaState] = useState(() => window.SolarisPWAManager ? window.SolarisPWAManager.getState() : { canInstallPrompt: false, isInstalled: false, isIOS: false });
+            useEffect(() => {
+                if (!window.SolarisPWAManager) return;
+                return window.SolarisPWAManager.subscribe(setPwaState);
+            }, []);
+            if (!show) return null;
+            return (
+                <Modal show={show} maxWidth="max-w-md">
+                    <ModalHeader title="Install Customer Display" onClose={onClose} />
+                    <ModalBody>
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-4 bg-slate-800 p-4 rounded-xl border border-slate-700">
+                                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-600 to-emerald-500 flex items-center justify-center shadow-lg shrink-0">
+                                    <i className="fas fa-tv text-white text-xl"></i>
+                                </div>
+                                <div>
+                                    <h4 className="text-base font-bold text-white">{appName}</h4>
+                                    <p className="text-xs text-slate-400 mt-1">Install for 1-tap full-screen kiosk access.</p>
+                                </div>
+                            </div>
+                            {pwaState.canInstallPrompt && (
+                                <button type="button" onClick={async () => {
+                                    if (window.SolarisPWAManager?.deferredPrompt) {
+                                        window.SolarisPWAManager.deferredPrompt.prompt();
+                                        await window.SolarisPWAManager.deferredPrompt.userChoice;
+                                        window.SolarisPWAManager.deferredPrompt = null;
+                                        window.SolarisPWAManager.notify();
+                                        onClose();
+                                    }
+                                }} className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition flex justify-center items-center gap-2">
+                                    <i className="fas fa-download"></i> Install Now
+                                </button>
+                            )}
+                            <div className="text-xs text-slate-400 space-y-2 bg-slate-950/50 p-4 rounded-xl border border-slate-800">
+                                <p><i className="fab fa-apple text-slate-300 mr-2"></i> iOS/iPad: Tap <b>Share</b> <i className="fas fa-arrow-up-from-bracket mx-1"></i> &gt; <b>Add to Home Screen</b>.</p>
+                                <p><i className="fab fa-android text-emerald-400 mr-2"></i> Android: Menu <i className="fas fa-ellipsis-vertical mx-1"></i> &gt; <b>Install app</b>.</p>
+                            </div>
+                            <button type="button" onClick={() => { window.SolarisPWAManager?.enterKioskFullscreen(); onClose(); }} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm rounded-xl border border-slate-600 transition flex justify-center items-center gap-2">
+                                <i className="fas fa-expand"></i> Enter Full-Screen Now
+                            </button>
+                        </div>
+                    </ModalBody>
+                </Modal>
+            );
+        };
+
+        // --- 5. MAIN STANDALONE CUSTOMER DISPLAY APPLICATION ---
+        function CustomerDisplayApp() {
+            const [deviceId] = useState(() => getOrCreateDisplayDeviceId());
+
+            // Parse URL parameters for instant zero-query branch pairing (?shopId=...&shopName=...)
+            const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
+            const urlShopId = urlParams.get('shopId') || '';
+            const urlShopName = urlParams.get('shopName') || '';
+
+            const [shops, setShops] = useState(() => {
+                try {
+                    const cached = localStorage.getItem('solaris_cached_shops_list');
+                    if (cached) {
+                        const parsed = JSON.parse(cached);
+                        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+                    }
+                } catch (e) {}
+                return [];
+            });
+            const [shopsLoading, setShopsLoading] = useState(true);
+            const [firestoreAuthError, setFirestoreAuthError] = useState('');
+            const [authUser, setAuthUser] = useState(null);
+            const [authReady, setAuthReady] = useState(false);
+
+            // 1-Time Staff Auth Form State (used if Firestore rules require staff login on standalone device)
+            const [loginEmail, setLoginEmail] = useState('');
+            const [loginPassword, setLoginPassword] = useState('');
+            const [loginLoading, setLoginLoading] = useState(false);
+            const [loginError, setLoginError] = useState('');
+            const [manualShopIdInput, setManualShopIdInput] = useState('');
+
+            const [isDetectingLocation, setIsDetectingLocation] = useState(false);
+            const gpsAttemptedRef = useRef(false);
+            const [nearestShopOutsideRadius, setNearestShopOutsideRadius] = useState(null);
+
+            const [selectedShopId, setSelectedShopId] = useState(() => {
+                if (urlShopId) {
+                    try { localStorage.setItem('solaris_display_shop_id', urlShopId); } catch (e) {}
+                    return urlShopId;
+                }
+                return localStorage.getItem('solaris_display_shop_id') || '';
+            });
+            const [showSetupModal, setShowSetupModal] = useState(false);
+
+            // Live Session State from `system_settings/khqr_display_{shopId}` or BroadcastChannel
+            const [sessionData, setSessionData] = useState(null);
+            // Device Registry Security State from `system_settings/khqr_devices_registry`
+            const [registryState, setRegistryState] = useState({ devices: {}, blockedDeviceIds: [] });
+
+            // Local Customer Currency Toggle on Active KHQR Screen ('KHR' | 'USD')
+            const [displayCurrency, setDisplayCurrency] = useState('KHR');
+            const [remainingSec, setRemainingSec] = useState(120);
+            const [clockStr, setClockStr] = useState('');
+            const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+            const [isFullscreen, setIsFullscreen] = useState(false);
+            const [showInstallModal, setShowInstallModal] = useState(false);
+
+            const cartListEndRef = useRef(null);
+            const prevStatusRef = useRef('IDLE');
+            const prevItemCountRef = useRef(0);
+
+            // Auto-detect nearest branch via GPS (Runs once if no shop is selected)
+            useEffect(() => {
+                if (!selectedShopId && shops.length > 0 && !shopsLoading && !gpsAttemptedRef.current) {
+                    const hasCoordinates = shops.some(s => s.latitude && s.longitude);
+                    
+                    if (hasCoordinates && navigator.geolocation) {
+                        gpsAttemptedRef.current = true;
+                        setIsDetectingLocation(true);
+                        
+                        navigator.geolocation.getCurrentPosition(
+                            (position) => {
+                                const { latitude, longitude } = position.coords;
+                                let nearestShop = null;
+                                let minDistance = Infinity;
+
+                                shops.forEach(shop => {
+                                    if (shop.latitude && shop.longitude) {
+                                        const dist = calculateHaversineDistance(
+                                            latitude, longitude, 
+                                            parseFloat(shop.latitude), parseFloat(shop.longitude)
+                                        );
+                                        if (dist < minDistance) {
+                                            minDistance = dist;
+                                            nearestShop = shop;
+                                        }
+                                    }
+                                });
+
+                                // Auto-pair if the nearest shop is within a 2.5-kilometer radius
+                                if (nearestShop) {
+                                    if (minDistance <= 2.5) {
+                                        setSelectedShopId(nearestShop.id);
+                                        try { localStorage.setItem('solaris_display_shop_id', nearestShop.id); } catch (e) {}
+                                    } else {
+                                        setNearestShopOutsideRadius({ shop: nearestShop, distance: minDistance });
+                                    }
+                                }
+                                setIsDetectingLocation(false);
+                            },
+                            (error) => {
+                                console.warn("GPS Auto-detect warning:", error);
+                                setIsDetectingLocation(false);
+                            },
+                            { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+                        );
+                    }
+                }
+            }, [shops, selectedShopId, shopsLoading]);
+
+            // Screen Wake Lock so customer counter display never sleeps
+            useEffect(() => {
+                let wakeLock = null;
+                const requestWakeLock = async () => {
+                    try {
+                        if ('wakeLock' in navigator) {
+                            wakeLock = await navigator.wakeLock.request('screen');
+                        }
+                    } catch (e) {}
+                };
+                requestWakeLock();
+                const handleVis = () => {
+                    if (document.visibilityState === 'visible') requestWakeLock();
+                };
+                document.addEventListener('visibilitychange', handleVis);
+                return () => {
+                    document.removeEventListener('visibilitychange', handleVis);
+                    if (wakeLock) wakeLock.release().catch(() => {});
+                };
+            }, []);
+
+            // Live Clock & Online Status
+            useEffect(() => {
+                const updateClock = () => {
+                    setClockStr(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+                };
+                updateClock();
+                const t = setInterval(updateClock, 1000);
+                const onOnline = () => setIsOnline(true);
+                const onOffline = () => setIsOnline(false);
+                const onFs = () => setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
+                window.addEventListener('online', onOnline);
+                window.addEventListener('offline', onOffline);
+                document.addEventListener('fullscreenchange', onFs);
+                document.addEventListener('webkitfullscreenchange', onFs);
+                return () => {
+                    clearInterval(t);
+                    window.removeEventListener('online', onOnline);
+                    window.removeEventListener('offline', onOffline);
+                    document.removeEventListener('fullscreenchange', onFs);
+                    document.removeEventListener('webkitfullscreenchange', onFs);
+                };
+            }, []);
+
+            // Step 1: Bootstrap Firebase Authentication (Persist Session Locally for Standalone Kiosk)
+            useEffect(() => {
+                let isMounted = true;
+                auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
+
+                const unsubAuth = auth.onAuthStateChanged(async (user) => {
+                    if (!isMounted) return;
+                    if (user) {
+                        setAuthUser(user);
+                        setAuthReady(true);
+                        setFirestoreAuthError('');
+                    } else {
+                        try {
+                            const anonCred = await auth.signInAnonymously();
+                            if (isMounted) {
+                                setAuthUser(anonCred.user);
+                                setAuthReady(true);
+                            }
+                        } catch (anonErr) {
+                            // Anonymous auth may be disabled in Firebase Console; proceed and allow staff login if rules require it
+                            if (isMounted) {
+                                setAuthReady(true);
+                            }
+                        }
+                    }
+                });
+
+                return () => {
+                    isMounted = false;
+                    unsubAuth();
+                };
+            }, []);
+
+            // Step 2: Load Branches from Firestore `shops` (with local cache fallback & timeout guard)
+            useEffect(() => {
+                if (!authReady) return;
+                setShopsLoading(true);
+
+                // Safety timeout so UI never spins forever if offline or blocked
+                const fallbackTimer = setTimeout(() => {
+                    setShopsLoading(false);
+                }, 3500);
+
+                const unsub = db.collection('shops').onSnapshot(snap => {
+                    clearTimeout(fallbackTimer);
+                    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    if (list.length > 0) {
+                        setShops(list);
+                        try {
+                            localStorage.setItem('solaris_cached_shops_list', JSON.stringify(list));
+                        } catch (e) {}
+                    }
+                    setShopsLoading(false);
+                    setFirestoreAuthError('');
+
+                    if (!selectedShopId && list.length === 1) {
+                        setSelectedShopId(list[0].id);
+                        try { localStorage.setItem('solaris_display_shop_id', list[0].id); } catch (e) {}
+                    }
+                }, err => {
+                    clearTimeout(fallbackTimer);
+                    console.warn("Shops listener warning:", err);
+                    setShopsLoading(false);
+                    if (err?.code === 'permission-denied' || /insufficient permissions/i.test(err?.message || '')) {
+                        setFirestoreAuthError('PERMISSION_DENIED');
+                    } else {
+                        setFirestoreAuthError(err?.message || 'Unable to reach cloud branch list.');
+                    }
+                });
+
+                return () => {
+                    clearTimeout(fallbackTimer);
+                    unsub();
+                };
+            }, [authReady, authUser?.uid]);
+
+            // 1-Time Staff Login Handler (authorizes standalone tablet/phone display permanently)
+            const handleDisplayStaffLogin = async (e) => {
+                e.preventDefault();
+                if (!loginEmail.trim() || !loginPassword) return;
+                setLoginLoading(true);
+                setLoginError('');
+                try {
+                    await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+                    const cred = await auth.signInWithEmailAndPassword(loginEmail.trim(), loginPassword);
+                    setAuthUser(cred.user);
+                    setFirestoreAuthError('');
+                    setLoginPassword('');
+                } catch (err) {
+                    setLoginError('Invalid email or password. Please use a valid POS staff/admin login.');
+                } finally {
+                    setLoginLoading(false);
+                }
+            };
+
+            const handleSelectBranch = (shopId) => {
+                setSelectedShopId(shopId);
+                try { localStorage.setItem('solaris_display_shop_id', shopId); } catch (e) {}
+            };
+
+            const handleAutoDetectGPS = () => {
+                if (!shops.length || shopsLoading) return;
+                const hasCoordinates = shops.some(s => s.latitude && s.longitude);
+                if (hasCoordinates && navigator.geolocation) {
+                    setIsDetectingLocation(true);
+                    setNearestShopOutsideRadius(null);
+                    
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            const { latitude, longitude } = position.coords;
+                            let nearestShop = null;
+                            let minDistance = Infinity;
+
+                            shops.forEach(shop => {
+                                if (shop.latitude && shop.longitude) {
+                                    const dist = calculateHaversineDistance(
+                                        latitude, longitude, 
+                                        parseFloat(shop.latitude), parseFloat(shop.longitude)
+                                    );
+                                    if (dist < minDistance) {
+                                        minDistance = dist;
+                                        nearestShop = shop;
+                                    }
+                                }
+                            });
+
+                            if (nearestShop) {
+                                if (minDistance <= 2.5) {
+                                    handleSelectBranch(nearestShop.id);
+                                } else {
+                                    setNearestShopOutsideRadius({ shop: nearestShop, distance: minDistance });
+                                }
+                            }
+                            setIsDetectingLocation(false);
+                        },
+                        (error) => {
+                            console.warn("GPS Auto-detect warning:", error);
+                            setIsDetectingLocation(false);
+                        },
+                        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+                    );
+                }
+            };
+
+            const currentShopObj = useMemo(() => {
+                return shops.find(s => s.id === selectedShopId) || null;
+            }, [shops, selectedShopId]);
+
+            // Subscribe to Central Device Security Registry (`system_settings/khqr_devices_registry`)
+            useEffect(() => {
+                if (!authReady) return;
+                const unsub = db.collection('system_settings').doc('khqr_devices_registry').onSnapshot(snap => {
+                    if (snap.exists) {
+                        const d = snap.data() || {};
+                        setRegistryState({
+                            devices: d.devices || {},
+                            blockedDeviceIds: Array.isArray(d.blockedDeviceIds) ? d.blockedDeviceIds : []
+                        });
+                    }
+                }, () => {});
+                return () => unsub();
+            }, [authReady, authUser?.uid]);
+
+            // Subscribe to Branch Display Session (`system_settings/khqr_display_{selectedShopId}`)
+            useEffect(() => {
+                if (!selectedShopId || !authReady) return;
+                const unsub = db.collection('system_settings').doc(`khqr_display_${selectedShopId}`).onSnapshot(snap => {
+                    if (snap.exists) {
+                        const data = snap.data() || {};
+                        setSessionData(data);
+                        if (data.selectedCurrency) {
+                            setDisplayCurrency(data.selectedCurrency);
+                        }
+                        // If shop metadata came in the session payload, cache it so branch list stays populated
+                        if (data.shopId && data.shopName) {
+                            setShops(prev => {
+                                if (prev.some(s => s.id === data.shopId)) return prev;
+                                const updated = [...prev, { id: data.shopId, name: data.shopName }];
+                                try { localStorage.setItem('solaris_cached_shops_list', JSON.stringify(updated)); } catch (e) {}
+                                return updated;
+                            });
+                        }
+                    } else {
+                        setSessionData(prev => prev || { status: 'IDLE', shopId: selectedShopId, shopName: urlShopName || undefined });
+                    }
+                }, err => {
+                    console.warn("Display session listener warning:", err);
+                    if (err?.code === 'permission-denied') {
+                        setFirestoreAuthError('PERMISSION_DENIED');
+                    }
+                });
+                return () => unsub();
+            }, [selectedShopId, authReady, authUser?.uid, urlShopName]);
+
+            // Instant Cross-Tab BroadcastChannel Listener + LocalStorage Storage Event Listener (0ms Dual-Screen Sync)
+            useEffect(() => {
+                let displayBus = null;
+                if (typeof BroadcastChannel !== 'undefined') {
+                    try {
+                        displayBus = new BroadcastChannel('solaris_khqr_display_bus');
+                        displayBus.onmessage = (ev) => {
+                            const msg = ev?.data;
+                            if (!msg) return;
+                            if (msg.type === 'POS_SHOPS_SYNC' && Array.isArray(msg.shops) && msg.shops.length > 0) {
+                                setShops(msg.shops);
+                                setShopsLoading(false);
+                                try { localStorage.setItem('solaris_cached_shops_list', JSON.stringify(msg.shops)); } catch (e) {}
+                            }
+                            if (msg.type === 'POS_DISPLAY_SESSION' && msg.payload) {
+                                const incomingShopId = msg.payload.shopId;
+                                // Auto-pair if no shop selected yet or if matching selectedShopId
+                                if (!selectedShopId && incomingShopId) {
+                                    setSelectedShopId(incomingShopId);
+                                    try { localStorage.setItem('solaris_display_shop_id', incomingShopId); } catch (e) {}
+                                }
+                                if (!selectedShopId || incomingShopId === selectedShopId) {
+                                    setSessionData(msg.payload);
+                                    if (msg.payload.selectedCurrency) {
+                                        setDisplayCurrency(msg.payload.selectedCurrency);
+                                    }
+                                }
+                            }
+                        };
+                        // Request immediate sync from any open POS Terminal tab
+                        displayBus.postMessage({ type: 'REQUEST_POS_SYNC', deviceId });
+                    } catch (e) {}
+                }
+
+                const handleStorageEvent = (e) => {
+                    if (e.key === 'solaris_cached_shops_list' && e.newValue) {
+                        try {
+                            const parsed = JSON.parse(e.newValue);
+                            if (Array.isArray(parsed) && parsed.length > 0) {
+                                setShops(parsed);
+                                setShopsLoading(false);
+                            }
+                        } catch (err) {}
+                    }
+                    if (selectedShopId && e.key === `solaris_khqr_display_session_${selectedShopId}` && e.newValue) {
+                        try {
+                            const parsed = JSON.parse(e.newValue);
+                            if (parsed) {
+                                setSessionData(parsed);
+                                if (parsed.selectedCurrency) setDisplayCurrency(parsed.selectedCurrency);
+                            }
+                        } catch (err) {}
+                    }
+                };
+                window.addEventListener('storage', handleStorageEvent);
+
+                // Also load any locally cached session for the selected branch immediately
+                if (selectedShopId) {
+                    try {
+                        const localSession = localStorage.getItem(`solaris_khqr_display_session_${selectedShopId}`);
+                        if (localSession) {
+                            const parsed = JSON.parse(localSession);
+                            if (parsed) setSessionData(prev => prev || parsed);
+                        }
+                    } catch (e) {}
+                }
+
+                return () => {
+                    if (displayBus) displayBus.close();
+                    window.removeEventListener('storage', handleStorageEvent);
+                };
+            }, [selectedShopId, deviceId]);
+            
+            // --- NEW: 1ms Auto-Dismiss Thank You Modal Override ---
+            const [overrideToIdle, setOverrideToIdle] = useState(false);
+            
+            useEffect(() => {
+                if (sessionData?.status === 'PAID') {
+                    // Flash the PAID status for exactly 1 millisecond, then force back to IDLE
+                    const timer = setTimeout(() => {
+                        setOverrideToIdle(true);
+                    }, 1); 
+                    return () => clearTimeout(timer);
+                } else {
+                    setOverrideToIdle(false);
+                }
+            }, [sessionData?.status]);
+
+            const currentStatus = overrideToIdle ? 'IDLE' : (sessionData?.status || 'IDLE');
+            const isIdle = currentStatus === 'IDLE';
+
+            // --- DERIVED RENDER VARIABLES ---
+            const resolvedShopName = sessionData?.shopName || currentShopObj?.name || 'POS Terminal';
+            const resolvedExchangeRate = Number(sessionData?.exchangeRate || 4000);
+            
+            // Strictly enforce cart zero-out when IDLE so old discounts/totals don't linger
+            const cartItems = isIdle ? [] : (Array.isArray(sessionData?.items) ? sessionData.items : []);
+            const totalItemQty = isIdle ? 0 : (Number(sessionData?.itemCount) || cartItems.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0));
+            
+            const subtotalKhr = isIdle ? 0 : (Number(sessionData?.subtotalKhr) || cartItems.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.quantity) || 1)), 0));
+            const discountKhr = isIdle ? 0 : (Number(sessionData?.discountKhr) || 0);
+            const amountKhr = isIdle ? 0 : (Number(sessionData?.amountKhr) || Math.max(0, subtotalKhr - discountKhr));
+            const amountUsd = isIdle ? 0 : (Number(sessionData?.amountUsd) || Number((amountKhr / resolvedExchangeRate).toFixed(2)));
+
+            const baseEmvPayload = sessionData?.baseEmvPayload || '';
+            const staticQrImage = sessionData?.staticQrImage || '';
+            const accountName = sessionData?.accountName || 'MERCHANT';
+            const khrAccount = sessionData?.khrAccount || '070 268 811';
+            const usdAccount = sessionData?.usdAccount || '077 268 811';
+            
+            const emvInfo = useMemo(() => DisplayKHQREngine.extractMerchantInfoFromEMV(baseEmvPayload), [baseEmvPayload]);
+            const displayMid = emvInfo.mid || '122042911473233';
+
+            const activeQrImageUrl = useMemo(() => {
+                if (sessionData?.status !== 'ACTIVE') return '';
+                const targetAmt = displayCurrency === 'USD' ? amountUsd : amountKhr;
+                const dynamicPayload = DisplayKHQREngine.generateDynamicKHQR(
+                    baseEmvPayload,
+                    targetAmt,
+                    sessionData?.invoiceNo || '',
+                    displayCurrency,
+                    { createdAtMs: sessionData?.initiatedAt, expiresAtMs: sessionData?.expiresAt }
+                );
+                if (dynamicPayload) {
+                    return DisplayKHQREngine.renderInstantQRDataURL(dynamicPayload, 420, 1, 'H');
+                }
+                return staticQrImage;
+            }, [sessionData, displayCurrency, amountUsd, amountKhr, baseEmvPayload, staticQrImage]);
+
+            const toggleFullScreen = () => {
+                try {
+                    if (!document.fullscreenElement) {
+                        document.documentElement.requestFullscreen?.().catch(()=>{});
+                    } else {
+                        document.exitFullscreen?.().catch(()=>{});
+                    }
+                } catch (e) {}
+            };
+
+            // Live KHQR Expiration Timer
+            useEffect(() => {
+                if (sessionData?.status !== 'ACTIVE' || !sessionData?.expiresAt) {
+                    setRemainingSec(120);
+                    return;
+                }
+                const tick = () => {
+                    const secsLeft = Math.max(0, Math.ceil((sessionData.expiresAt - Date.now()) / 1000));
+                    setRemainingSec(secsLeft);
+                };
+                tick();
+                const timer = setInterval(tick, 1000);
+                return () => clearInterval(timer);
+            }, [sessionData?.status, sessionData?.expiresAt]);
+
+            // --- SCREEN 1: INITIAL BRANCH PAIRING WIZARD (IF NO SHOP SELECTED OR SETUP MODAL OPEN) ---
+            if (!selectedShopId || showSetupModal || (firestoreAuthError === 'PERMISSION_DENIED' && !sessionData)) {
+                return (
+                    <div className="h-screen w-screen bg-slate-950 flex items-center justify-center p-4 overflow-y-auto">
+                        <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-6 sm:p-7 shadow-2xl space-y-5 animate-fade-scale my-auto">
+                            <div className="text-center">
+                                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-emerald-500 text-white flex items-center justify-center mx-auto mb-3 shadow-lg">
+                                    <i className="fas fa-tv text-2xl"></i>
+                                </div>
+                                <h1 className="text-xl sm:text-2xl font-black text-white">Customer Display Setup</h1>
+                                <p className="text-xs text-slate-400 mt-1">
+                                    Select the store branch this counter display is paired with.
+                                </p>
+                            </div>
+
+                            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex items-center justify-between text-xs">
+                                <span className="text-slate-400 font-semibold">Hardware Device ID:</span>
+                                <span className="font-mono font-black text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/30">
+                                    {deviceId}
+                                </span>
+                            </div>
+
+                            {/* 1-Time Staff Authorization Form if Firestore Security Rules require authenticated staff */}
+                            {(firestoreAuthError === 'PERMISSION_DENIED' || (shops.length === 0 && !shopsLoading)) && (
+                                <form onSubmit={handleDisplayStaffLogin} className="bg-slate-950/90 border border-amber-500/40 rounded-2xl p-4 space-y-3">
+                                    <div className="flex items-start gap-2.5">
+                                        <i className="fas fa-shield-halved text-amber-400 mt-0.5"></i>
+                                        <div>
+                                            <div className="text-xs font-black text-amber-300 uppercase tracking-wider">
+                                                1-Time Cloud Authorization Required
+                                            </div>
+                                            <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                                                Sign in once with your POS account to unlock live cloud branch sync on this display device.
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {loginError && (
+                                        <div className="p-2 rounded-xl bg-red-500/15 border border-red-500/40 text-red-300 text-[11px] font-bold">
+                                            <i className="fas fa-exclamation-circle mr-1"></i>{loginError}
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-2">
+                                        <input
+                                            type="email"
+                                            required
+                                            value={loginEmail}
+                                            onChange={e => setLoginEmail(e.target.value)}
+                                            placeholder="POS Staff / Admin Email"
+                                            className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-xs font-semibold"
+                                        />
+                                        <input
+                                            type="password"
+                                            required
+                                            value={loginPassword}
+                                            onChange={e => setLoginPassword(e.target.value)}
+                                            placeholder="Password"
+                                            className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-xs font-semibold"
+                                        />
+                                    </div>
+
+                                    <button
+                                        type="submit"
+                                        disabled={loginLoading}
+                                        className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shadow-lg transition flex items-center justify-center gap-2 disabled:opacity-50"
+                                    >
+                                        {loginLoading ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-unlock-keyhole"></i>}
+                                        <span>{loginLoading ? 'Authorizing Display...' : 'Sign In & Load Branches'}</span>
+                                    </button>
+                                </form>
+                            )}
+
+                            {/* Branch Selection List */}
+                            <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                <div className="flex items-center justify-between">
+                                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                                        Select Branch Location ({shops.length})
+                                    </label>
+                                    {authUser && !authUser.isAnonymous && (
+                                        <span className="text-[10px] text-emerald-400 font-semibold truncate max-w-[170px]">
+                                            <i className="fas fa-check-circle mr-1"></i>{authUser.email}
+                                        </span>
+                                    )}
+                                </div>
+
+                                {isDetectingLocation ? (
+                                    <div className="text-center py-6 text-slate-400 text-xs bg-slate-950/50 rounded-2xl border border-slate-800">
+                                        <i className="fas fa-location-crosshairs fa-spin mr-2 text-emerald-400"></i> Auto-detecting nearest branch via GPS...
+                                    </div>
+                                ) : shopsLoading && shops.length === 0 ? (
+                                    <div className="text-center py-6 text-slate-400 text-xs bg-slate-950/50 rounded-2xl border border-slate-800">
+                                        <i className="fas fa-spinner fa-spin mr-2 text-blue-400"></i> Connecting to cloud branches...
+                                    </div>
+                                ) : (
+                                    <>
+                                        {!isDetectingLocation && shops.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={handleAutoDetectGPS}
+                                                className="w-full mb-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-sky-400 font-bold text-xs border border-slate-700 transition flex items-center justify-center gap-2"
+                                            >
+                                                <i className="fas fa-location-crosshairs"></i> Re-Scan Nearest Branch (GPS)
+                                            </button>
+                                        )}
+
+                                        {nearestShopOutsideRadius && (
+                                            <div className="bg-emerald-500/10 border border-emerald-500/40 rounded-2xl p-3.5 space-y-3 mb-2 animate-fade-scale mt-2">
+                                                <div className="flex items-start gap-3">
+                                                    <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                                                        <i className="fas fa-map-marker-alt"></i>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="text-sm font-bold text-white">Nearest Branch Found</h4>
+                                                        <p className="text-xs text-emerald-300/80 mt-0.5 leading-relaxed">
+                                                            Detected <strong>{nearestShopOutsideRadius.shop.name}</strong> approx {nearestShopOutsideRadius.distance.toFixed(1)}km away.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSelectBranch(nearestShopOutsideRadius.shop.id)}
+                                                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition"
+                                                >
+                                                    1-Click Pair with {nearestShopOutsideRadius.shop.name}
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {shops.length > 0 ? (
+                                            shops.map(s => (
+                                                <button
+                                                    key={s.id}
+                                                    type="button"
+                                                    onClick={() => handleSelectBranch(s.id)}
+                                                    className={`w-full p-3.5 rounded-2xl border text-left transition flex items-center justify-between mt-2 ${
+                                                        selectedShopId === s.id
+                                                            ? 'bg-blue-600/20 border-blue-500 text-white shadow-lg'
+                                                            : 'bg-slate-800/70 hover:bg-slate-800 border-slate-700 text-slate-200'
+                                                    }`}
+                                                >
+                                                    <div>
+                                                        <div className="font-bold text-sm">{s.name}</div>
+                                                        <div className="text-[11px] text-slate-400">{s.location || `Branch ID: ${s.mappedShop || s.id}`}</div>
+                                                    </div>
+                                                    <i className={`fas ${selectedShopId === s.id ? 'fa-check-circle text-blue-400' : 'fa-chevron-right text-slate-500'}`}></i>
+                                                </button>
+                                            ))
+                                        ) : (
+                                            /* Manual Branch ID Fallback Input so user is never blocked */
+                                            <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 space-y-2 mt-2">
+                                                <div className="text-[11px] text-slate-400">
+                                                    Or enter your <strong>Branch ID</strong> directly (or open POS Terminal in another tab to auto-detect):
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="text"
+                                                        value={manualShopIdInput}
+                                                        onChange={e => setManualShopIdInput(e.target.value.trim())}
+                                                        placeholder="Paste Branch / Shop ID..."
+                                                        className="flex-1 bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-700 text-xs font-mono outline-none focus:border-blue-500"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            if (manualShopIdInput) handleSelectBranch(manualShopIdInput);
+                                                        }}
+                                                        className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shrink-0"
+                                                    >
+                                                        Pair
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+
+                            {selectedShopId && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowSetupModal(false)}
+                                    className="w-full py-3.5 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-black text-sm shadow-lg transition"
+                                >
+                                    Launch Customer Display
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="h-screen h-[100dvh] w-screen bg-slate-950 text-white flex flex-col overflow-hidden select-none">
+                    {/* TOP STATUS HEADER BAR */}
+                    <header className="h-14 sm:h-16 px-4 sm:px-6 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between shrink-0 z-20">
+                        <div className="flex items-center gap-3 min-w-0">
+                            <div
+                                onDoubleClick={() => setShowSetupModal(true)}
+                                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white font-black text-sm shadow-md cursor-pointer shrink-0"
+                                title="Double-tap to change branch"
+                            >
+                                POS
+                            </div>
+                            <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <h1 className="text-sm sm:text-base font-black text-white truncate">
+                                        {resolvedShopName}
+                                    </h1>
+                                    <span className={`w-2 h-2 rounded-full shrink-0 ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                                </div>
+                                <div className="text-[10px] sm:text-xs text-slate-400 font-mono truncate">
+                                    {deviceId} • Rate: $1 = ៛{resolvedExchangeRate.toLocaleString()}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Center Live State Pill */}
+                        <div className="hidden md:flex items-center gap-2">
+                            {currentStatus === 'CART' && (
+                                <span className="px-3.5 py-1 rounded-full bg-blue-500/20 border border-blue-500/40 text-blue-300 text-xs font-black uppercase tracking-wider flex items-center gap-2 animate-fade-scale">
+                                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping"></span>
+                                    {sessionData?.checkoutStage === 'CASH_PAYMENT' ? 'Cashier Finalizing Payment' : 'Live Order in Progress'}
+                                </span>
+                            )}
+                            {currentStatus === 'ACTIVE' && (
+                                <span className="px-3.5 py-1 rounded-full bg-red-500/20 border border-red-500/40 text-red-300 text-xs font-black uppercase tracking-wider flex items-center gap-2 animate-fade-scale">
+                                    <span className="w-2 h-2 rounded-full bg-red-400 animate-ping"></span>
+                                    Scan ABA KHQR to Pay
+                                </span>
+                            )}
+                            {currentStatus === 'PAID' && (
+                                <span className="px-3.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-black uppercase tracking-wider flex items-center gap-2 animate-fade-scale">
+                                    <i className="fas fa-check-circle text-emerald-400"></i>
+                                    Payment Verified
+                                </span>
+                            )}
+                            {currentStatus === 'IDLE' && (
+                                <span className="px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-bold">
+                                    Ready for Next Customer
+                                </span>
+                            )}
+                        </div>
+
+                        {/* Right Controls: Clock, Install, Branch Switcher & Fullscreen */}
+                        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                            <span className="hidden sm:inline-block text-xs sm:text-sm font-mono font-bold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700">
+                                {clockStr}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setShowInstallModal(true)}
+                                className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 hover:text-emerald-300 border border-emerald-500/40 flex items-center justify-center transition"
+                                title="Install App"
+                            >
+                                <i className="fas fa-download text-xs"></i>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowSetupModal(true)}
+                                className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
+                                title="Change Branch"
+                            >
+                                <i className="fas fa-cog text-xs"></i>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={toggleFullScreen}
+                                className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
+                                title="Toggle Fullscreen"
+                            >
+                                <i className={`fas ${isFullscreen ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* MAIN STAGE BODY */}
+                    <main className="flex-1 overflow-hidden relative flex flex-col">
+                        <InstallAppModal show={showInstallModal} onClose={() => setShowInstallModal(false)} />
+
+                        {/* =====================================================================
+                            STATE 1: LIVE POS CART SCREEN (status === 'CART')
+                           ===================================================================== */}
+                        {currentStatus === 'CART' && (
+                            <div className="flex-1 flex flex-col lg:flex-row gap-4 p-3 sm:p-5 overflow-hidden animate-fade-scale">
+                                {/* Left / Main Column: Line-by-Line Live Cart Items */}
+                                <div className="flex-1 bg-slate-900/90 border border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-2xl min-h-0">
+                                    <div className="px-4 sm:px-6 py-3.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/40 text-blue-400 flex items-center justify-center">
+                                                <i className="fas fa-shopping-basket text-sm"></i>
+                                            </div>
+                                            <div>
+                                                <h2 className="text-sm sm:text-base font-black text-white tracking-tight">
+                                                    Your Order Items
+                                                </h2>
+                                                <p className="text-[11px] text-slate-400">
+                                                    បញ្ជីទំនិញរបស់អ្នក • Live update from cashier
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <span className="px-3 py-1 rounded-xl bg-blue-600 text-white font-black text-xs sm:text-sm shadow">
+                                            {totalItemQty} {totalItemQty === 1 ? 'Item' : 'Items'}
+                                        </span>
+                                    </div>
+
+                                    {/* Scrollable Items List */}
+                                    <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-2.5 min-h-0">
+                                        {cartItems.map((item, idx) => {
+                                            const qty = Number(item.quantity) || 1;
+                                            const price = Number(item.price) || 0;
+                                            const origPrice = Number(item.originalPrice ?? price) || price;
+                                            const lineTotal = price * qty;
+                                            const isFreeReward = lineTotal === 0;
+                                            const isDiscountedItem = origPrice > price && price > 0;
+
+                                            return (
+                                                <div
+                                                    key={`${item.productId || idx}_${qty}_${price}`}
+                                                    className="item-row-flash bg-slate-800/60 border border-slate-700/70 rounded-2xl p-3 sm:p-4 flex items-center justify-between gap-3 transition-all"
+                                                >
+                                                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                                                        <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-blue-600/20 border border-blue-500/40 text-blue-300 font-black text-sm sm:text-base flex items-center justify-center shrink-0">
+                                                            {qty}×
+                                                        </div>
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="text-sm sm:text-lg font-bold text-white truncate flex items-center gap-2">
+                                                                <span className="truncate">{item.name}</span>
+                                                                {isFreeReward && (
+                                                                    <span className="px-2 py-0.5 text-[10px] font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-full shrink-0">
+                                                                        🎁 FREE REWARD
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
+                                                                <span className="font-mono">
+                                                                    ៛{price.toLocaleString()} each
+                                                                </span>
+                                                                {isDiscountedItem && (
+                                                                    <span className="line-through text-slate-500 font-mono text-[11px]">
+                                                                        ៛{origPrice.toLocaleString()}
+                                                                    </span>
+                                                                )}
+                                                                {item.note && (
+                                                                    <span className="text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded text-[10px] truncate">
+                                                                        <i className="fas fa-sticky-note mr-1"></i>{item.note}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="text-right shrink-0">
+                                                        <div className={`text-base sm:text-xl font-black font-mono ${isFreeReward ? 'text-emerald-400' : 'text-white'}`}>
+                                                            {isFreeReward ? 'FREE' : `៛${lineTotal.toLocaleString()}`}
+                                                        </div>
+                                                        {!isFreeReward && (
+                                                            <div className="text-[11px] font-mono text-slate-400">
+                                                                ≈ ${(lineTotal / resolvedExchangeRate).toFixed(2)}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                        <div ref={cartListEndRef}></div>
+                                    </div>
+                                </div>
+
+                                {/* Right / Bottom Column: Customer Loyalty & Grand Total Summary */}
+                                <div className="w-full lg:w-[370px] xl:w-[410px] shrink-0 flex flex-col justify-between gap-4 bg-gradient-to-b from-slate-900 to-slate-900/95 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-2xl">
+                                    <div className="space-y-4">
+                                        {/* Customer & Loyalty Card */}
+                                        {sessionData?.customerName ? (
+                                            <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 space-y-2">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[11px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                                                        <i className="fas fa-crown text-amber-400"></i>
+                                                        Loyalty Member
+                                                    </span>
+                                                    <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 font-black text-xs">
+                                                        <i className="fas fa-star mr-1"></i>
+                                                        {Number(sessionData.customerPoints || 0).toLocaleString()} Pts
+                                                    </span>
+                                                </div>
+                                                <div className="text-base sm:text-lg font-black text-white truncate">
+                                                    {sessionData.customerName}
+                                                </div>
+                                                {sessionData.loyaltyRule && Number(sessionData.loyaltyRule.spendAmountKhr) > 0 && (
+                                                    <div className="text-[10px] text-amber-300/80 font-bold bg-amber-500/10 px-2 py-1 rounded-lg border border-amber-500/20">
+                                                        Active Rule: Spend ៛{Number(sessionData.loyaltyRule.spendAmountKhr).toLocaleString()} = +{sessionData.loyaltyRule.earnPoints} Pt
+                                                    </div>
+                                                )}
+                                                {Number(sessionData.estimatedPointsEarned) > 0 && (
+                                                    <div className="text-xs text-emerald-300 font-bold flex items-center gap-1.5 pt-1 border-t border-amber-500/20">
+                                                        <i className="fas fa-sparkles"></i>
+                                                        <span>Earning +{sessionData.estimatedPointsEarned} Pts on this order!</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <div className="bg-slate-800/60 border border-slate-700/70 rounded-2xl p-3.5 flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                                                    <i className="fas fa-star"></i>
+                                                </div>
+                                                <div className="text-xs text-slate-300 leading-relaxed">
+                                                    <div className="font-bold text-white">Loyalty Rewards Program</div>
+                                                    <div className="text-slate-400">Tell our cashier your phone number to earn points!</div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Subtotal & Discounts Breakdown */}
+                                        <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4 space-y-2.5 text-xs sm:text-sm">
+                                            <div className="flex justify-between text-slate-400">
+                                                <span>Subtotal ({totalItemQty} items)</span>
+                                                <span className="font-mono font-bold text-slate-200">៛{subtotalKhr.toLocaleString()}</span>
+                                            </div>
+                                            {discountKhr > 0 && (
+                                                <div className="flex justify-between text-rose-400 font-bold">
+                                                    <span>
+                                                        Discount / Reward
+                                                        {sessionData?.rewardProductClaimed ? ` (${sessionData.rewardProductClaimed})` : ''}
+                                                    </span>
+                                                    <span className="font-mono">-៛{discountKhr.toLocaleString()}</span>
+                                                </div>
+                                            )}
+                                            <div className="flex justify-between text-slate-400 pt-2 border-t border-slate-800/80 text-xs">
+                                                <span>Exchange Rate</span>
+                                                <span className="font-mono">$1.00 = ៛{resolvedExchangeRate.toLocaleString()}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Prominent Dual-Currency Total Due Card */}
+                                    <div className="bg-gradient-to-br from-emerald-950/90 via-slate-900 to-slate-950 border-2 border-emerald-500/50 rounded-3xl p-5 text-center shadow-2xl space-y-2">
+                                        <div className="text-xs font-black uppercase tracking-widest text-emerald-300">
+                                            Total Amount Due • សរុបត្រូវបង់
+                                        </div>
+                                        <div className="text-4xl sm:text-5xl font-black text-emerald-400 tracking-tight font-mono">
+                                            ៛{amountKhr.toLocaleString()}
+                                        </div>
+                                        <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-sky-500/15 border border-sky-400/30 text-sky-300 font-mono font-black text-lg sm:text-xl">
+                                            <span>≈ ${amountUsd} USD</span>
+                                        </div>
+                                        <div className="pt-2 text-[11px] text-slate-400 flex items-center justify-center gap-2">
+                                            <i className="fas fa-qrcode text-red-400"></i>
+                                            <span>ABA KHQR &amp; Cash Accepted</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* =====================================================================
+                            STATE 2: ACTIVE ABA KHQR CHECKOUT SCREEN (status === 'ACTIVE')
+                           ===================================================================== */}
+                        {currentStatus === 'ACTIVE' && (
+                            <div className="flex-1 flex flex-col lg:flex-row items-center justify-center gap-6 p-4 sm:p-6 overflow-y-auto animate-fade-scale">
+                                {/* Left / Top Panel: Order Summary & Currency Switcher */}
+                                <div className="w-full max-w-md lg:w-80 xl:w-96 flex flex-col gap-4 shrink-0">
+                                    <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 space-y-4 shadow-xl">
+                                        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                                            <div>
+                                                <span className="text-[11px] font-black uppercase tracking-wider text-red-400 block">
+                                                    Please Scan to Pay
+                                                </span>
+                                                <h2 className="text-lg font-black text-white">
+                                                    ស្កេន QR ដើម្បីបង់ប្រាក់
+                                                </h2>
+                                            </div>
+                                            <div className={`px-3 py-1.5 rounded-xl font-mono text-xs font-black border flex items-center gap-1.5 ${
+                                                remainingSec <= 30
+                                                    ? 'bg-red-500/20 text-red-300 border-red-500/40 animate-pulse'
+                                                    : 'bg-slate-800 text-emerald-400 border-slate-700'
+                                            }`}>
+                                                <i className="far fa-clock"></i>
+                                                <span>
+                                                    {remainingSec > 0
+                                                        ? `${String(Math.floor(remainingSec / 60)).padStart(2, '0')}:${String(remainingSec % 60).padStart(2, '0')}`
+                                                        : 'EXPIRED'}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* Interactive Currency Toggle for Customer */}
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                                Tap to Switch QR Currency (KHR / USD)
+                                            </label>
+                                            <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1.5 rounded-2xl border border-slate-800">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setDisplayCurrency('KHR')}
+                                                    className={`py-2.5 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
+                                                        displayCurrency === 'KHR'
+                                                            ? 'bg-[#004459] text-white shadow-lg border border-sky-400/30'
+                                                            : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    <span>🇰🇭 KHR (៛)</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setDisplayCurrency('USD')}
+                                                    className={`py-2.5 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 ${
+                                                        displayCurrency === 'USD'
+                                                            ? 'bg-[#26A9C8] text-white shadow-lg'
+                                                            : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    <span>🇺🇸 USD ($)</span>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Total Amount Highlight */}
+                                        <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 text-center space-y-1">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400">
+                                                Amount to Pay ({displayCurrency})
+                                            </div>
+                                            {displayCurrency === 'KHR' ? (
+                                                <>
+                                                    <div className="text-3xl sm:text-4xl font-black text-emerald-400 font-mono">
+                                                        ៛{amountKhr.toLocaleString()}
+                                                    </div>
+                                                    <div className="text-xs font-mono text-sky-400 font-bold">
+                                                        ≈ ${amountUsd} USD
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <div className="text-3xl sm:text-4xl font-black text-sky-400 font-mono">
+                                                        ${amountUsd}
+                                                    </div>
+                                                    <div className="text-xs font-mono text-emerald-400 font-bold">
+                                                        ≈ ៛{amountKhr.toLocaleString()} KHR
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+
+                                        {/* Compact Items Summary */}
+                                        {cartItems.length > 0 && (
+                                            <div className="border-t border-slate-800 pt-3">
+                                                <div className="text-[11px] font-bold uppercase text-slate-400 mb-2 flex justify-between">
+                                                    <span>Order Summary ({totalItemQty} items)</span>
+                                                    {sessionData?.invoiceNo && <span className="font-mono text-slate-500">{sessionData.invoiceNo}</span>}
+                                                </div>
+                                                <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1 text-xs">
+                                                    {cartItems.map((item, i) => (
+                                                        <div key={i} className="flex justify-between text-slate-300">
+                                                            <span className="truncate pr-2">{item.quantity}× {item.name}</span>
+                                                            <span className="font-mono font-bold text-slate-200 shrink-0">
+                                                                ៛{((Number(item.price) || 0) * (Number(item.quantity) || 1)).toLocaleString()}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Center / Right Panel: Official ABA PAY Standee Card */}
+                                <div className="w-full max-w-full sm:max-w-[360px] rounded-[26px] overflow-hidden shadow-[0_25px_70px_rgba(0,68,89,0.65)] bg-[#004459] p-[6px] sm:p-[8px] relative select-none border border-[#005a75] shrink-0">
+                                    <div
+                                        className="bg-white w-full h-full relative pt-5 pb-4 px-4 sm:px-5 flex flex-col items-center overflow-hidden rounded-[19px]"
+                                        style={{
+                                            clipPath: 'polygon(20px 0, 100% 0, 100% 100%, 0 100%, 0 20px)'
+                                        }}
+                                    >
+                                        {/* ABA PAY Logo */}
+                                        <div className="flex items-center justify-center tracking-tight leading-none">
+                                            <span className="text-[32px] font-black text-[#004861] tracking-[0.04em]">ABA</span>
+                                            <span className="inline-block w-[5px] h-[13px] bg-[#D9232E] -mt-4 mx-[3px] rounded-[1px]"></span>
+                                            <span className="text-[32px] font-black text-[#26A9C8] tracking-[0.06em] ml-1">PAY</span>
+                                        </div>
+
+                                        <div className="text-[13px] italic font-medium text-stone-800 mt-1 mb-2.5 tracking-wide">
+                                            Scan. Pay. Done.
+                                        </div>
+
+                                        {/* Locked Amount Pill */}
+                                        <div className="mb-2.5 px-3.5 py-1 rounded-full bg-stone-100 border border-stone-200 flex items-center gap-2 shadow-inner">
+                                            {displayCurrency === 'KHR' ? (
+                                                <>
+                                                    <span className="text-sm font-black text-[#004861]">
+                                                        {amountKhr.toLocaleString()} ៛
+                                                    </span>
+                                                    <span className="text-stone-300">•</span>
+                                                    <span className="text-xs font-bold text-[#26A9C8]">
+                                                        ≈ ${amountUsd}
+                                                    </span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="text-sm font-black text-[#26A9C8]">
+                                                        ${amountUsd}
+                                                    </span>
+                                                    <span className="text-stone-300">•</span>
+                                                    <span className="text-xs font-bold text-[#004861]">
+                                                        ≈ {amountKhr.toLocaleString()} ៛
+                                                    </span>
+                                                </>
+                                            )}
+                                        </div>
+
+                                        {/* QR Frame */}
+                                        <div className="relative p-3.5 my-0.5 flex items-center justify-center">
+                                            <div className="w-7 h-7 border-t-[3px] border-l-[3px] border-stone-300 rounded-tl-xl absolute top-0 left-0 pointer-events-none"></div>
+                                            <div className="w-7 h-7 border-t-[3px] border-r-[3px] border-stone-300 rounded-tr-xl absolute top-0 right-0 pointer-events-none"></div>
+                                            <div className="w-7 h-7 border-b-[3px] border-l-[3px] border-stone-300 rounded-bl-xl absolute bottom-0 left-0 pointer-events-none"></div>
+                                            <div className="w-7 h-7 border-b-[3px] border-r-[3px] border-stone-300 rounded-br-xl absolute bottom-0 right-0 pointer-events-none"></div>
+
+                                            <div className="relative w-48 h-48 sm:w-56 sm:h-56 flex items-center justify-center bg-white">
+                                                {activeQrImageUrl ? (
+                                                    <>
+                                                        <img
+                                                            src={activeQrImageUrl}
+                                                            alt="ABA KHQR Code"
+                                                            className="w-48 h-48 sm:w-56 sm:h-56 object-contain"
+                                                        />
+                                                        {baseEmvPayload && (
+                                                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                                <div className="w-10 h-10 rounded-full bg-white p-[2.5px] shadow-md flex items-center justify-center">
+                                                                    <div className="w-full h-full rounded-full bg-[#E1232E] flex items-center justify-center">
+                                                                        <svg viewBox="0 0 36 36" className="w-5 h-5 text-white">
+                                                                            <rect x="9.5" y="9.5" width="17" height="17" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2.2" />
+                                                                            <rect x="9.5" y="9.5" width="17" height="17" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2.2" transform="rotate(45 18 18)" />
+                                                                            <path d="M20.5 14.8 A 4.2 4.2 0 1 0 20.5 21.2" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" />
+                                                                        </svg>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                ) : (
+                                                    <div className="w-48 h-48 rounded-xl border-2 border-dashed border-stone-300 flex flex-col items-center justify-center text-stone-400 p-4 text-center text-xs">
+                                                        <i className="fas fa-qrcode text-3xl mb-2 opacity-40"></i>
+                                                        <span>KHQR Not Configured for Branch</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Merchant Name & MID */}
+                                        <div className="mt-2 text-center z-10">
+                                            <div className="text-[15px] font-extrabold text-stone-800 tracking-wide uppercase leading-snug">
+                                                {String(accountName).toUpperCase()}
+                                            </div>
+                                            <div className="text-[10.5px] font-bold text-stone-500 mt-0.5 tracking-wider">
+                                                MID: {displayMid}
+                                            </div>
+                                            <div className="text-[10px] font-mono font-bold text-stone-400 mt-0.5">
+                                                {displayCurrency === 'USD' ? `USD: ${usdAccount}` : `KHR: ${khrAccount}`}
+                                            </div>
+                                        </div>
+
+                                        {/* KHQR Member Footer */}
+                                        <div className="w-full mt-4 pt-2.5 flex items-end justify-start gap-3 z-10 pr-10 border-t border-stone-100">
+                                            <div className="flex flex-col items-start pr-3 border-r border-stone-300">
+                                                <span className="text-[7.5px] italic text-stone-500 leading-none mb-0.5">Member of</span>
+                                                <span className="text-[13px] font-black tracking-wider text-[#E1232E] leading-none">KHQR</span>
+                                            </div>
+                                            <div className="flex flex-col items-start">
+                                                <span className="text-[7.5px] italic text-stone-500 leading-none mb-0.5">Accepted here</span>
+                                                <div className="flex items-center gap-1">
+                                                    <div className="h-[17px] px-1.5 rounded-[3px] bg-[#26A9C8] text-white flex items-center justify-center text-[6.5px] font-black tracking-wider">
+                                                        ABA PAY
+                                                    </div>
+                                                    <div className="h-[17px] px-1.5 rounded-[3px] bg-white border border-stone-200 flex items-center justify-center text-[6.5px] font-black italic text-[#1A1F71]">
+                                                        all banks
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Decorative Red Corner */}
+                                        <div className="absolute -bottom-8 -right-8 w-24 h-24 pointer-events-none z-0">
+                                            <div className="w-full h-full rounded-[22px] border-[12px] border-[#D9232E] transform rotate-[18deg] flex items-center justify-center">
+                                                <div className="w-10 h-10 rounded-[10px] bg-[#D9232E]"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* =====================================================================
+                            STATE 3: CELEBRATORY PAID / THANK YOU SCREEN (status === 'PAID')
+                           ===================================================================== */}
+                        {currentStatus === 'PAID' && (
+                            <div className="flex-1 flex items-center justify-center p-4 sm:p-6 animate-fade-scale">
+                                <div className="bg-white text-slate-900 rounded-[2.2rem] max-w-md w-full p-6 sm:p-8 shadow-[0_25px_80px_rgba(16,185,129,0.45)] border-4 border-emerald-400 text-center relative overflow-hidden">
+                                    <div className="relative w-24 h-24 mx-auto mb-4 flex items-center justify-center">
+                                        <div className="absolute inset-0 rounded-full bg-emerald-400/25 animate-ping"></div>
+                                        <div className="relative w-20 h-20 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-white flex items-center justify-center shadow-lg border-4 border-white">
+                                            <i className="fas fa-check text-4xl"></i>
+                                        </div>
+                                    </div>
+
+                                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-black uppercase tracking-widest mb-2">
+                                        <i className="fas fa-shield-check"></i>
+                                        <span>Payment Verified</span>
+                                    </div>
+
+                                    <h2 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
+                                        Thank You! 🙏✨
+                                    </h2>
+                                    <p className="text-sm font-black text-amber-600 mt-1">
+                                        សូមអរគុណចំពោះការគាំទ្រ!
+                                    </p>
+
+                                    <div className="mt-5 bg-slate-50 rounded-2xl p-4 border border-slate-200 text-left space-y-2.5 text-xs sm:text-sm">
+                                        <div className="flex justify-between items-center border-b border-slate-200 pb-2.5">
+                                            <span className="font-bold text-slate-400 uppercase text-[11px]">Amount Paid</span>
+                                            <span className="text-2xl font-black text-emerald-600 font-mono">
+                                                {sessionData?.amountDisplay || `៛${amountKhr.toLocaleString()}`}
+                                            </span>
+                                        </div>
+                                        {sessionData?.payerDisplay && (
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-slate-500 font-semibold">Paid By</span>
+                                                <span className="font-black text-slate-900 truncate max-w-[210px]">{sessionData.payerDisplay}</span>
+                                            </div>
+                                        )}
+                                        {sessionData?.invoiceNo && (
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-slate-500 font-semibold">Invoice No.</span>
+                                                <span className="font-mono font-bold text-slate-800">{sessionData.invoiceNo}</span>
+                                            </div>
+                                        )}
+                                        {sessionData?.apv && (
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-slate-500 font-semibold">ABA APV</span>
+                                                <span className="font-mono font-black text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">{sessionData.apv}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* =====================================================================
+                            STATE 4: IDLE / WELCOME STANDBY SCREEN (status === 'IDLE')
+                           ===================================================================== */}
+                        {currentStatus === 'IDLE' && (
+                            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center relative overflow-hidden animate-fade-scale">
+                                <div className="absolute -top-32 -left-32 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+                                <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-emerald-600/10 rounded-full blur-3xl pointer-events-none"></div>
+
+                                <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-[2rem] bg-gradient-to-br from-blue-600 via-indigo-700 to-slate-900 border-2 border-blue-400/40 shadow-2xl flex flex-col items-center justify-center mb-6">
+                                    <i className="fas fa-store text-3xl sm:text-4xl text-white mb-1"></i>
+                                    <span className="text-[9px] font-black uppercase tracking-widest text-emerald-300">WELCOME</span>
+                                </div>
+
+                                <h2 className="text-3xl sm:text-5xl font-black text-white tracking-tight mb-2">
+                                    {resolvedShopName}
+                                </h2>
+                                <p className="text-base sm:text-xl font-bold text-amber-400 mb-2">
+                                    សូមស្វាគមន៍មកកាន់ហាងយើងខ្ញុំ 🙏
+                                </p>
+                                <p className="text-xs sm:text-sm text-slate-400 max-w-md leading-relaxed">
+                                    Your order items and dynamic ABA KHQR payment code will appear on this screen automatically as the cashier rings up your ticket.
+                                </p>
+
+                                <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+                                    <div className="px-4 py-2.5 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5 text-xs font-bold text-slate-300">
+                                        <i className="fas fa-shopping-basket text-blue-400"></i>
+                                        <span>Live Order Itemization</span>
+                                    </div>
+                                    <div className="px-4 py-2.5 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5 text-xs font-bold text-slate-300">
+                                        <i className="fas fa-qrcode text-red-400"></i>
+                                        <span>Instant ABA KHQR Checkout</span>
+                                    </div>
+                                    <div className="px-4 py-2.5 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5 text-xs font-bold text-slate-300">
+                                        <i className="fas fa-crown text-amber-400"></i>
+                                        <span>Loyalty Points Rewards</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<CustomerDisplayApp />);
+    </script>
+</body>
+</html>
