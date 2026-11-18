@@ -4968,10 +4968,12 @@
                 </div>
                 
                 <nav className="flex-grow space-y-2 overflow-y-auto no-scrollbar px-1">
-                    <a href="#" onClick={() => setActivePage('pos-terminal')} className={`flex items-center py-3.5 px-4 rounded-xl transition-all duration-200 font-medium ${activePage === 'pos-terminal' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'}`}>
-                        <i className="fas fa-cash-register w-6 text-center text-lg shrink-0"></i>
-                        <span className="ml-3">POS Terminal</span>
-                    </a>
+                    {(userProfile.role === 'Admin' || allowedPages.includes('pos-terminal') || (userProfile.assignedShops && userProfile.assignedShops.length > 0)) && (
+                        <a href="#" onClick={() => setActivePage('pos-terminal')} className={`flex items-center py-3.5 px-4 rounded-xl transition-all duration-200 font-medium ${activePage === 'pos-terminal' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'}`}>
+                            <i className="fas fa-cash-register w-6 text-center text-lg shrink-0"></i>
+                            <span className="ml-3">POS Terminal</span>
+                        </a>
+                    )}
                     
                     {(userProfile.role === 'Admin' || allowedPages.includes('sales-report')) && (
                         <a href="#" onClick={() => setActivePage('sales-report')} className={`flex items-center py-3.5 px-4 rounded-xl transition-all duration-200 font-medium ${activePage === 'sales-report' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/20' : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'}`}>
@@ -31150,9 +31152,9 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                         createdAt: firebase.firestore.FieldValue.serverTimestamp()
                     };
                     if (window.SolarisCollectionMutator) {
-                        window.SolarisCollectionMutator.upsertDoc("users", null, newUserProfile, true);
+                        window.SolarisCollectionMutator.upsertDoc("users", uidToSave, newUserProfile, true);
                     } else {
-                        await db.collection("users").add(newUserProfile);
+                        await db.collection("users").doc(uidToSave).set(newUserProfile);
                     }
                 }
 
@@ -31641,14 +31643,27 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             const emailSnap = await db.collection("users").where("email", "==", firebaseUser.email).get();
                             if (!emailSnap.empty) {
                                 const matchedDoc = emailSnap.docs[0];
-                                await db.collection("users").doc(matchedDoc.id).set({ uid: firebaseUser.uid }, { merge: true });
+                                await db.collection("users").doc(firebaseUser.uid).set({ ...matchedDoc.data(), uid: firebaseUser.uid }, { merge: true });
+                                try { await db.collection("users").doc(matchedDoc.id).delete(); } catch(e){}
                                 querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
                             }
                         }
 
                         if (!querySnapshot.empty) {
                             const userDoc = querySnapshot.docs[0];
-                            const profileObj = { id: userDoc.id, ...userDoc.data() };
+                            const profileObj = { id: userDoc.id, ...userDoc.data(), uid: firebaseUser.uid };
+                            
+                            // Auto-migrate to UID as document ID if it isn't already to satisfy Firestore Security Rules
+                            if (userDoc.id !== firebaseUser.uid) {
+                                try {
+                                    await db.collection("users").doc(firebaseUser.uid).set(profileObj);
+                                    await db.collection("users").doc(userDoc.id).delete();
+                                    profileObj.id = firebaseUser.uid;
+                                } catch (e) {
+                                    console.warn("Migration failed, proceeding with old ID");
+                                }
+                            }
+
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
                             try {
                                 localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
@@ -31666,8 +31681,12 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                 permissions: ['pos-terminal', 'sales-report', 'customer-management', 'inventory', 'settings'],
                                 createdAt: firebase.firestore.FieldValue.serverTimestamp()
                             };
-                            const docRef = await db.collection("users").add(newProfileData);
-                            const profileObj = { id: docRef.id, ...newProfileData };
+                            try {
+                                await db.collection("users").doc(firebaseUser.uid).set(newProfileData);
+                            } catch(e) {
+                                console.warn("Failed to create admin profile doc", e);
+                            }
+                            const profileObj = { id: firebaseUser.uid, ...newProfileData };
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
                             try {
                                 localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
