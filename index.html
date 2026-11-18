@@ -16374,7 +16374,7 @@
         // Determine which Dropdown Value to show visually
         const isPOActive = ['create-po', 'drafts-po', 'active-po', 'auditing-po', 'audited-po', 'loss-breakage', 'waste-analytics'].includes(activeTab);
         const isTransferActive = ['internal-transfer', 'drafts', 'active-transfer', 'transfer-report'].includes(activeTab);
-        const isProductionActive = ['product-list', 'category-list', 'vendor-list'].includes(activeTab);
+        const isProductionActive = ['product-list', 'category-list', 'vendor-list', 'adjust-stock-log'].includes(activeTab);
 
         return (
             <div className="space-y-4">
@@ -16464,6 +16464,7 @@
                                         <option value="product-list">Product List</option>
                                         <option value="category-list">Category List</option>
                                         <option value="vendor-list">Vendor List</option>
+                                        <option value="adjust-stock-log">Adjust Stock Log</option>
                                     </select>
                                     <div className={`absolute inset-y-0 right-0 flex items-center px-1.5 md:px-2 pointer-events-none ${isProductionActive ? 'text-emerald-400' : 'text-slate-400'}`}>
                                         <i className="fas fa-chevron-down text-[10px]"></i>
@@ -16496,6 +16497,406 @@
                 {activeTab === 'product-list' && <ProductList userProfile={userProfile} />}
                 {activeTab === 'category-list' && <CategoryList userProfile={userProfile} />}
                 {activeTab === 'vendor-list' && <VendorList userProfile={userProfile} />}
+                {activeTab === 'adjust-stock-log' && <AdjustStockLogPage userProfile={userProfile} />}
+            </div>
+        );
+    };
+
+    // --- NEW: Adjust Stock Log Page ---
+    const AdjustStockLogPage = ({ userProfile }) => {
+        const { shops, products } = useData();
+        const [logs, setLogs] = useState([]);
+        const [loading, setLoading] = useState(true);
+        const [shopFilter, setShopFilter] = useState('');
+        const [vendorFilter, setVendorFilter] = useState('');
+        const [searchTerm, setSearchTerm] = useState('');
+        
+        // Date Range State
+        const [dateRangePreset, setDateRangePreset] = useState('thisMonth');
+        const [startDate, setStartDate] = useState(() => {
+            const now = new Date();
+            return new Date(now.getFullYear(), now.getMonth(), 1).toLocaleDateString('en-CA');
+        });
+        const [endDate, setEndDate] = useState(() => new Date().toLocaleDateString('en-CA'));
+
+        const setDateRange = (type) => {
+            setDateRangePreset(type);
+            if (type === 'custom') return;
+            const today = new Date();
+            let start = new Date();
+            let end = new Date();
+            if (type === 'today') {
+            } else if (type === 'yesterday') {
+                start.setDate(today.getDate() - 1);
+                end.setDate(today.getDate() - 1);
+            } else if (type === 'thisWeek') {
+                const day = today.getDay();
+                const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+                start.setDate(diff);
+            } else if (type === 'lastWeek') {
+                const day = today.getDay();
+                const diff = today.getDate() - day + (day === 0 ? -6 : 1) - 7;
+                start.setDate(diff);
+                end.setDate(diff + 6);
+            } else if (type === 'thisMonth') {
+                start = new Date(today.getFullYear(), today.getMonth(), 1);
+            } else if (type === 'lastMonth') {
+                start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+                end = new Date(today.getFullYear(), today.getMonth(), 0);
+            } else if (type === 'all') {
+                start = new Date(2020, 0, 1);
+                end = new Date(today.getFullYear() + 1, 11, 31);
+            }
+            setStartDate(start.toLocaleDateString('en-CA'));
+            setEndDate(end.toLocaleDateString('en-CA'));
+        };
+
+        useEffect(() => {
+            setLoading(true);
+            const start = new Date(startDate);
+            start.setHours(0, 0, 0, 0);
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+
+            const unsubscribe = db.collection('productMovement')
+                .where('timestamp', '>=', start)
+                .where('timestamp', '<=', end)
+                .onSnapshot(snap => {
+                    const fetchedLogs = snap.docs
+                        .map(doc => ({ id: doc.id, ...doc.data() }))
+                        .filter(log => log.type === 'Adjustment')
+                        .sort((a, b) => (safeToDate(b.timestamp) || 0) - (safeToDate(a.timestamp) || 0));
+                    setLogs(fetchedLogs);
+                    setLoading(false);
+                }, err => {
+                    console.error("Error fetching adjust stock logs:", err);
+                    setLoading(false);
+                });
+            return () => unsubscribe();
+        }, [startDate, endDate]);
+
+        // Derived Data
+        const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
+        const uniqueVendors = useMemo(() => {
+            const vendorNames = new Set();
+            products.forEach(p => {
+                if (p.vendorName) vendorNames.add(p.vendorName.trim());
+            });
+            return Array.from(vendorNames).sort();
+        }, [products]);
+        
+        // Product Map for vendor lookup
+        const productMap = useMemo(() => {
+            const map = new Map();
+            products.forEach(p => map.set(p.id, p));
+            return map;
+        }, [products]);
+
+        // Filter Logs
+        const filteredLogs = useMemo(() => {
+            let res = logs;
+            
+            if (shopFilter) {
+                const shopName = shops.find(s => s.id === shopFilter)?.name;
+                if (shopName) {
+                    res = res.filter(log => log.from === shopName || log.to === shopName);
+                }
+            } else if (userProfile.role !== 'Admin') {
+                const assignedShopNames = shops.filter(s => (userProfile.assignedShops || []).includes(s.id)).map(s => s.name);
+                res = res.filter(log => assignedShopNames.includes(log.from) || assignedShopNames.includes(log.to));
+            }
+
+            if (vendorFilter) {
+                res = res.filter(log => {
+                    const product = productMap.get(log.productId);
+                    return product && product.vendorName === vendorFilter;
+                });
+            }
+
+            if (searchTerm) {
+                const q = searchTerm.toLowerCase().trim();
+                res = res.filter(log => 
+                    (log.productName || '').toLowerCase().includes(q) ||
+                    (log.productCode || '').toLowerCase().includes(q) ||
+                    (log.referenceNo || '').toLowerCase().includes(q) ||
+                    (log.reason || '').toLowerCase().includes(q)
+                );
+            }
+
+            return res;
+        }, [logs, shopFilter, vendorFilter, searchTerm, shops, userProfile, productMap]);
+
+        const handleExportToExcel = () => {
+            const wb = XLSX.utils.book_new();
+            const ws_data = [];
+            const headerStyle = { font: { bold: true } };
+
+            ws_data.push([{ v: 'Adjust Stock Log Report', s: { font: { sz: 16, bold: true } } }]);
+            ws_data.push([]);
+            ws_data.push([{ v: 'Period:', s: headerStyle }, `${startDate} to ${endDate}`]);
+            ws_data.push([{ v: 'Shop:', s: headerStyle }, shopFilter ? shops.find(s => s.id === shopFilter)?.name : 'All Managed Shops']);
+            ws_data.push([{ v: 'Vendor:', s: headerStyle }, vendorFilter || 'All Vendors']);
+            const tableHeader = ['Date & Time', 'Reference No', 'Shop', 'Product Code', 'Product Name', 'Vendor', 'Action', 'Qty Adjusted', 'Current Stock', 'Reason', 'Note', 'Performed By'];
+            ws_data.push(tableHeader.map(h => ({ v: h, s: headerStyle })));
+
+            filteredLogs.forEach(log => {
+                const resolvedAction = log.actionType || (log.from === 'Adjustment' ? 'add' : 'remove');
+                const actionLabel = resolvedAction === 'add' ? '(+) Add' : resolvedAction === 'remove' ? '(-) Remove' : '(=) Set';
+                const shopName = (log.from && log.from !== 'Adjustment') ? log.from : log.to;
+                const product = productMap.get(log.productId);
+                const shopObj = shops.find(s => s.name === shopName);
+                const currentStock = shopObj && product ? (product.stockByShop?.[shopObj.id] || 0) : 0;
+                
+                ws_data.push([
+                    safeFormatDateTime(log.timestamp, ''),
+                    log.referenceNo || '',
+                    shopName,
+                    log.productCode || '',
+                    log.productName || '',
+                    product?.vendorName || '',
+                    actionLabel,
+                    { t: 'n', v: log.quantityChange, z: '+#,##0;-#,##0;0' },
+                    { t: 'n', v: currentStock, z: '#,##0' },
+                    log.reason || '',
+                    log.note || '',
+                    log.performedBy || ''
+                ]);
+            });
+
+            const ws = XLSX.utils.aoa_to_sheet(ws_data);
+            ws['!cols'] = [ {wch:20}, {wch:15}, {wch:15}, {wch:15}, {wch:30}, {wch:20}, {wch:14}, {wch:12}, {wch:12}, {wch:20}, {wch:25}, {wch:15} ];
+            
+            XLSX.utils.book_append_sheet(wb, ws, 'Adjust Stock Log');
+            XLSX.writeFile(wb, `Adjust_Stock_Log_${startDate}_to_${endDate}.xlsx`);
+        };
+
+        return (
+            <div className="space-y-4">
+                <Card className="p-3 md:p-5">
+                    <div className="space-y-3 sm:space-y-4">
+                        {/* Filter Grid */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 sm:gap-4">
+                            <div className="col-span-2 md:col-span-2">
+                                <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5 truncate">
+                                    <i className="fas fa-search text-purple-400 mr-1.5"></i>Search Logs
+                                </label>
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        value={searchTerm}
+                                        onChange={e => setSearchTerm(e.target.value)}
+                                        placeholder="Search product, code, reference..."
+                                        className="w-full bg-slate-700 text-slate-100 pl-8 pr-7 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none h-[40px]"
+                                    />
+                                    <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                    {searchTerm && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTerm('')}
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                        >
+                                            <i className="fas fa-times-circle text-xs"></i>
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="col-span-1">
+                                <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5">
+                                    <i className="fas fa-calendar-alt text-blue-400 mr-1.5"></i>Date Range
+                                </label>
+                                <div className="relative">
+                                    <select
+                                        value={dateRangePreset}
+                                        onChange={e => setDateRange(e.target.value)}
+                                        className="w-full bg-slate-700 text-slate-100 pl-3 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer font-semibold appearance-none h-[40px]"
+                                    >
+                                        <option value="today">Today</option>
+                                        <option value="yesterday">Yesterday</option>
+                                        <option value="thisWeek">This Week</option>
+                                        <option value="lastWeek">Last Week</option>
+                                        <option value="thisMonth">This Month</option>
+                                        <option value="lastMonth">Last Month</option>
+                                        <option value="all">All Time</option>
+                                        <option value="custom">Custom Range</option>
+                                    </select>
+                                    <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none text-slate-400">
+                                        <i className="fas fa-chevron-down text-xs"></i>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="col-span-1 flex items-end">
+                                 <button 
+                                    type="button"
+                                    onClick={handleExportToExcel} 
+                                    className="w-full bg-green-600 hover:bg-green-700 text-white font-bold px-3.5 sm:px-4 py-2 rounded-xl flex items-center justify-center gap-2 transition h-[40px] shadow-md shadow-green-900/20"
+                                    title="Download current report as Excel"
+                                >
+                                    <i className="fas fa-file-excel text-base"></i>
+                                    <span className="text-xs sm:text-sm">Export</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        {dateRangePreset === 'custom' && (
+                            <div className="grid grid-cols-2 gap-2.5 mt-2.5 pt-2.5 border-t border-slate-700/70 animate-fade-in-up">
+                                <div>
+                                    <label className="block text-[11px] font-semibold text-slate-400 mb-1">Start Date</label>
+                                    <input
+                                        type="date"
+                                        value={startDate}
+                                        onChange={e => { setStartDate(e.target.value); setDateRangePreset('custom'); }}
+                                        className="bg-slate-700 text-slate-100 px-3 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl w-full focus:ring-2 focus:ring-blue-500 outline-none h-[38px]"
+                                        style={{ colorScheme: 'dark' }}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-[11px] font-semibold text-slate-400 mb-1">End Date</label>
+                                    <input
+                                        type="date"
+                                        value={endDate}
+                                        onChange={e => { setEndDate(e.target.value); setDateRangePreset('custom'); }}
+                                        className="bg-slate-700 text-slate-100 px-3 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl w-full focus:ring-2 focus:ring-blue-500 outline-none h-[38px]"
+                                        style={{ colorScheme: 'dark' }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                        
+                        <div className="grid grid-cols-2 gap-2.5 sm:gap-4 pt-2">
+                            <div className="min-w-0">
+                                <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5 truncate">
+                                    <i className="fas fa-store-alt text-orange-400 mr-1.5"></i>Filter by Shop
+                                </label>
+                                <div className="relative">
+                                    <select
+                                        value={shopFilter}
+                                        onChange={e => setShopFilter(e.target.value)}
+                                        className="w-full bg-slate-700 text-slate-100 pl-3 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer font-medium appearance-none truncate h-[40px]"
+                                    >
+                                        <option value="">All Managed Shops</option>
+                                        {managedShops
+                                            .filter(s => userProfile.role === 'Admin' || (userProfile.assignedShops || []).includes(s.id))
+                                            .map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    </select>
+                                    <div className="absolute inset-y-0 right-0 flex items-center px-2.5 pointer-events-none text-slate-400">
+                                        <i className="fas fa-chevron-down text-xs"></i>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="min-w-0">
+                                <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5 truncate">
+                                    <i className="fas fa-truck text-cyan-400 mr-1.5"></i>Filter by Vendor
+                                </label>
+                                <div className="relative">
+                                    <select
+                                        value={vendorFilter}
+                                        onChange={e => setVendorFilter(e.target.value)}
+                                        className="w-full bg-slate-700 text-slate-100 pl-3 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer font-medium appearance-none truncate h-[40px]"
+                                    >
+                                        <option value="">All Vendors</option>
+                                        {uniqueVendors.map(v => <option key={v} value={v}>{v}</option>)}
+                                    </select>
+                                    <div className="absolute inset-y-0 right-0 flex items-center px-2.5 pointer-events-none text-slate-400">
+                                        <i className="fas fa-chevron-down text-xs"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </Card>
+
+                <TableCard title={`Adjust Stock Logs (${filteredLogs.length})`}>
+                    {loading ? (
+                        <div className="flex justify-center p-8"><div className="loader"></div></div>
+                    ) : filteredLogs.length === 0 ? (
+                        <p className="text-center p-4 text-slate-400">No adjustment logs found for the selected filters.</p>
+                    ) : (
+                        <div className="overflow-x-auto -mx-2 sm:mx-0">
+                            <table className="min-w-full divide-y divide-slate-700 whitespace-nowrap">
+                                <thead className="bg-slate-900/50">
+                                    <tr>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date &amp; Time</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Product</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">QTY Change</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Current Stock</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Reason</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Performed By</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-700">
+                                    {filteredLogs.map(log => {
+                                        const resolvedAction = log.actionType || (log.from === 'Adjustment' ? 'add' : 'remove');
+                                        const shopName = (log.from && log.from !== 'Adjustment') ? log.from : log.to;
+                                        const product = productMap.get(log.productId);
+                                        const shopObj = shops.find(s => s.name === shopName);
+                                        const currentStock = shopObj && product ? (product.stockByShop?.[shopObj.id] || 0) : 0;
+                                        
+                                        return (
+                                            <tr key={log.id} className="hover:bg-slate-700/50 transition-colors">
+                                                <td className="px-4 py-3 text-sm text-slate-300 font-mono">
+                                                    {safeFormatDateTime(log.timestamp, '-')}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-slate-200">
+                                                    {shopName}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm">
+                                                    <div className="font-bold text-slate-100">{log.productName}</div>
+                                                    <div className="text-xs text-slate-400 font-mono">{log.productCode}</div>
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-slate-400">
+                                                    {product?.vendorName || '-'}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-center">
+                                                    {resolvedAction === 'add' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                                                            <span className="font-mono font-black">(+)</span> Add
+                                                        </span>
+                                                    )}
+                                                    {resolvedAction === 'remove' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-red-500/15 text-red-400 border border-red-500/30">
+                                                            <span className="font-mono font-black">(-)</span> Remove
+                                                        </span>
+                                                    )}
+                                                    {resolvedAction === 'set' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30">
+                                                            <span className="font-mono font-black">(=)</span> Set
+                                                        </span>
+                                                    )}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-center">
+                                                    <span className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs ${
+                                                        log.quantityChange > 0 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 
+                                                        log.quantityChange < 0 ? 'bg-red-500/15 text-red-400 border border-red-500/30' : 
+                                                        'bg-slate-800 text-slate-300 border border-slate-600'
+                                                    }`}>
+                                                        {log.quantityChange > 0 ? '+' : ''}{log.quantityChange}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-center">
+                                                    <span className="font-mono font-bold text-slate-200">
+                                                        {currentStock}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-sm">
+                                                    <div className="font-medium text-slate-300">{log.reason || 'N/A'}</div>
+                                                    {log.note && <div className="text-[10px] text-amber-300 italic max-w-[200px] truncate" title={log.note}>{log.note}</div>}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm text-slate-400">
+                                                    {log.performedBy || 'System'}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </TableCard>
             </div>
         );
     };
@@ -23073,10 +23474,13 @@
                         productCode: product.code,
                         productName: product.name,
                         type: 'Adjustment', // Specific type for manual adjustments
+                        actionType: actionType, // Explicit action type: 'add' | 'remove' | 'set'
+                        previousStock: currentStock,
+                        newStock: newStockValue,
                         reason: reason,
                         quantityChange: quantityChange,
-                        from: actionType === 'add' ? 'Adjustment' : selectedShop?.name,
-                        to: actionType === 'add' ? selectedShop?.name : 'Adjustment',
+                        from: quantityChange > 0 ? 'Adjustment' : selectedShop?.name,
+                        to: quantityChange > 0 ? selectedShop?.name : 'Adjustment',
                         referenceNo: `ADJ-${new Date().toISOString().slice(0,10)}-${Math.floor(Math.random()*1000)}`,
                         note: note,
                         performedBy: userProfile.name,
@@ -26528,6 +26932,11 @@
             return availableShops[0]?.id || 'All';
         });
 
+        // --- NEW: Device Registration State ---
+        const [showRegisterModal, setShowRegisterModal] = useState(false);
+        const [deviceFormData, setDeviceFormData] = useState({ deviceId: '', shopId: '', note: '' });
+        const [editingDeviceId, setEditingDeviceId] = useState(null);
+
         // --- Real-Time Firestore Subscriptions (onSnapshot via Compat SDK) ---
         const [registryData, setRegistryData] = useState({ devices: {}, blockedDeviceIds: [] });
         const [branchDisplaySessions, setBranchDisplaySessions] = useState({}); // shopId -> session object
@@ -26743,6 +27152,55 @@
             return counts;
         }, [registryData.devices, registryData.blockedDeviceIds, branchDisplaySessions, selectedShopId, nowMs]);
 
+        // --- NEW: Device Registration Handlers ---
+        const handleOpenRegister = () => {
+            setDeviceFormData({ deviceId: '', shopId: '', note: '' });
+            setEditingDeviceId(null);
+            setShowRegisterModal(true);
+        };
+
+        const handleOpenEdit = (dev) => {
+            setDeviceFormData({ deviceId: dev.deviceId, shopId: dev.shopId || '', note: dev.note || '' });
+            setEditingDeviceId(dev.deviceId);
+            setShowRegisterModal(true);
+        };
+
+        const handleSaveDevice = async (e) => {
+            e.preventDefault();
+            if (!deviceFormData.deviceId.trim() || !deviceFormData.shopId) return;
+            setIsExecutingAction(true);
+            try {
+                const registryRef = db.collection('system_settings').doc('khqr_devices_registry');
+                const targetId = deviceFormData.deviceId.trim().toUpperCase();
+                const existing = registryData.devices?.[targetId] || {};
+
+                const updatedDev = {
+                    ...existing,
+                    deviceId: targetId,
+                    shopId: deviceFormData.shopId,
+                    note: deviceFormData.note || '',
+                    registeredAt: editingDeviceId ? (existing.registeredAt || Date.now()) : Date.now(),
+                    registeredBy: currentAdminRecord?.name || 'Admin',
+                    status: existing.status || 'OFFLINE'
+                };
+
+                await registryRef.set({
+                    devices: {
+                        ...(registryData.devices || {}),
+                        [targetId]: updatedDev
+                    },
+                    updatedAt: Date.now()
+                }, { merge: true });
+
+                triggerSecToast(`Device ${targetId} ${editingDeviceId ? 'updated' : 'registered'} successfully.`);
+                setShowRegisterModal(false);
+            } catch (err) {
+                triggerSecToast(`Error saving device: ${err.message}`);
+            } finally {
+                setIsExecutingAction(false);
+            }
+        };
+
         const openSecurityActionModal = (type, payload) => {
             const actorName = currentAdminRecord?.name || currentAdminRecord?.email || 'Admin';
             if (type === 'KICK_DEVICE') {
@@ -26900,7 +27358,6 @@
                         status: 'IDLE',
                         remoteLock: false,
                         lockReason: '',
-                        revokedDevices: [],
                         updatedAt: Date.now()
                     }, { merge: true });
 
@@ -26936,6 +27393,20 @@
                     }
 
                     triggerSecToast(`🟢 Branch display for ${targetShopName} restored to IDLE!`);
+                } else if (type === 'DELETE_DEVICE') {
+                    const targetDeviceId = String(payload.deviceId || '').trim();
+                    
+                    await registryRef.update({
+                        [`devices.${targetDeviceId}`]: firebase.firestore.FieldValue.delete(),
+                        updatedAt: Date.now()
+                    }).catch(async (err) => {
+                        // Fallback if FieldValue.delete() fails on older SDKs
+                        const updatedMap = { ...(registryData.devices || {}) };
+                        delete updatedMap[targetDeviceId];
+                        await registryRef.set({ devices: updatedMap, updatedAt: Date.now() }, { merge: true });
+                    });
+
+                    triggerSecToast(`⚪ Device ${targetDeviceId} unregistered and deleted.`);
                 }
 
                 setSecurityModalAction(null);
@@ -27161,19 +27632,81 @@
                         </div>
                     </div>
 
-                    {/* Live Registered KHQR Display Devices Table */}
+                    {/* NEW: Device Registration Form Modal */}
+                    {showRegisterModal && (
+                        <div className="fixed inset-0 bg-stone-950/75 backdrop-blur-sm z-[260] flex items-center justify-center p-4 animate-fade-in-up">
+                            <form onSubmit={handleSaveDevice} className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl border border-stone-200 relative">
+                                <button type="button" disabled={isExecutingAction} onClick={() => setShowRegisterModal(false)} className="absolute top-4 right-4 w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-500 flex items-center justify-center transition">
+                                    <i className="fa-solid fa-xmark"></i>
+                                </button>
+                                
+                                <h3 className="text-xl font-black text-stone-900 mb-1 flex items-center gap-2">
+                                    <i className="fa-solid fa-tablet-screen-button text-blue-600"></i>
+                                    {editingDeviceId ? 'Edit Device Registration' : 'Register New Device'}
+                                </h3>
+                                <p className="text-xs text-stone-500 mb-5">Manually register a device ID to authorize it for KHQR display.</p>
+
+                                <div className="space-y-4 mb-6">
+                                    <div>
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">Device ID (SLR-DEV-...) *</label>
+                                        <input 
+                                            type="text" 
+                                            required 
+                                            placeholder="e.g. SLR-DEV-123456"
+                                            value={deviceFormData.deviceId}
+                                            onChange={e => setDeviceFormData({ ...deviceFormData, deviceId: e.target.value.toUpperCase() })}
+                                            className="w-full border border-stone-300 rounded-xl px-3.5 py-2.5 text-sm font-bold font-mono text-stone-800 bg-stone-50 outline-none focus:border-blue-600 focus:bg-white transition"
+                                            readOnly={!!editingDeviceId}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">Assign to Shop *</label>
+                                        <select 
+                                            required
+                                            value={deviceFormData.shopId}
+                                            onChange={e => setDeviceFormData({ ...deviceFormData, shopId: e.target.value })}
+                                            className="w-full border border-stone-300 rounded-xl px-3.5 py-2.5 text-sm font-bold text-stone-800 bg-stone-50 outline-none focus:border-blue-600 focus:bg-white transition cursor-pointer"
+                                        >
+                                            <option value="">-- Select Shop --</option>
+                                            {availableShops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">Notes (Optional)</label>
+                                        <input 
+                                            type="text" 
+                                            placeholder="e.g. Front Counter iPad"
+                                            value={deviceFormData.note}
+                                            onChange={e => setDeviceFormData({ ...deviceFormData, note: e.target.value })}
+                                            className="w-full border border-stone-300 rounded-xl px-3.5 py-2.5 text-sm font-medium text-stone-800 bg-stone-50 outline-none focus:border-blue-600 focus:bg-white transition"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="flex gap-2.5">
+                                    <button type="button" disabled={isExecutingAction} onClick={() => setShowRegisterModal(false)} className="flex-1 py-3 rounded-xl font-bold text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 transition">Cancel</button>
+                                    <button type="submit" disabled={isExecutingAction} className="flex-1 py-3 rounded-xl font-black text-xs text-white bg-blue-600 hover:bg-blue-700 shadow-md transition flex items-center justify-center gap-1.5 disabled:opacity-50">
+                                        {isExecutingAction ? <i className="fa-solid fa-spinner fa-spin"></i> : <i className="fa-solid fa-save"></i>}
+                                        <span>{editingDeviceId ? 'Update Device' : 'Register Device'}</span>
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    )}
+
+                    {/* REDESIGNED: Live Registered KHQR Display Devices Table */}
                     <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden">
                         <div className="p-4 border-b border-stone-200 bg-stone-50 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
                             <div>
                                 <h4 className="text-sm font-black text-stone-800 flex items-center gap-2">
-                                    <i className="fa-solid fa-tablet-screen-button text-rose-600"></i>
-                                    <span>Registered Counter KHQR Devices (`SLR-DEV-XXXXXX`)</span>
+                                    <i className="fa-solid fa-tablet-screen-button text-blue-600"></i>
+                                    <span>Device Register Table</span>
                                     <span className="text-xs font-black bg-stone-200 text-stone-700 px-2 py-0.5 rounded-full">
                                         {enrichedDevicesList.length}
                                     </span>
                                 </h4>
                                 <p className="text-[11px] text-stone-500 mt-0.5">
-                                    Devices seen within the last 2 minutes show <b>🟢 ONLINE</b>. Kick & Wipe immediately revokes stolen or unauthorized phones.
+                                    Register and authorize KHQR display tablets. Active devices sync in real-time.
                                 </p>
                             </div>
 
@@ -27181,9 +27714,9 @@
                                 <div className="flex bg-stone-200/70 p-1 rounded-xl border border-stone-300/80 text-[11px] font-black">
                                     {[
                                         { id: 'ALL', label: 'All' },
-                                        { id: 'ONLINE', label: '🟢 Online' },
+                                        { id: 'ONLINE', label: '🟢 Active' },
                                         { id: 'OFFLINE', label: '🟡 Standby' },
-                                        { id: 'REVOKED', label: '🔴 Revoked' }
+                                        { id: 'REVOKED', label: '🔴 Locked' }
                                     ].map(tab => (
                                         <button
                                             key={tab.id}
@@ -27200,25 +27733,24 @@
                                     ))}
                                 </div>
 
-                                <div className="relative flex-1 sm:w-56">
+                                <div className="relative flex-1 sm:w-48">
                                     <i className="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-xs"></i>
                                     <input
                                         type="text"
-                                        placeholder="Search SLR-DEV-..., branch, model..."
-                                        className="w-full border border-stone-300 rounded-xl pl-8 pr-7 py-1.5 text-xs font-bold text-stone-800 bg-white outline-none focus:border-stone-900"
+                                        placeholder="Search devices..."
+                                        className="w-full border border-stone-300 rounded-xl pl-8 pr-7 py-1.5 text-xs font-bold text-stone-800 bg-white outline-none focus:border-blue-600"
                                         value={deviceSearchQuery}
                                         onChange={e => setDeviceSearchQuery(e.target.value)}
                                     />
-                                    {deviceSearchQuery && (
-                                        <button
-                                            type="button"
-                                            onClick={() => setDeviceSearchQuery('')}
-                                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
-                                        >
-                                            <i className="fa-solid fa-xmark text-xs"></i>
-                                        </button>
-                                    )}
                                 </div>
+
+                                <button
+                                    type="button"
+                                    onClick={handleOpenRegister}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-1.5 px-3 rounded-xl transition flex items-center gap-1.5 shadow-sm text-xs shrink-0"
+                                >
+                                    <i className="fas fa-plus"></i> Register
+                                </button>
                             </div>
                         </div>
 
@@ -27226,56 +27758,32 @@
                             <table className="w-full min-w-[950px] text-left text-xs border-collapse">
                                 <thead>
                                     <tr className="bg-stone-100 text-stone-700 uppercase tracking-wider text-[10px] border-b border-stone-200">
-                                        <th className="p-3.5 font-black">Device ID & Version</th>
-                                        <th className="p-3.5 font-black">Branch Name & ID</th>
-                                        <th className="p-3.5 font-black">Hardware / Screen</th>
-                                        <th className="p-3.5 font-black text-center">Live Status Badge</th>
-                                        <th className="p-3.5 font-black">Last Seen</th>
-                                        <th className="p-3.5 font-black text-right">Security Actions</th>
+                                        <th className="p-3.5 font-black">Device Details</th>
+                                        <th className="p-3.5 font-black">Shop Name</th>
+                                        <th className="p-3.5 font-black text-center">Status</th>
+                                        <th className="p-3.5 font-black">Registration Date</th>
+                                        <th className="p-3.5 font-black text-right">Action / Edit</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-stone-200">
                                     {enrichedDevicesList.map(dev => {
                                         const isRevoked = dev.liveStatus.code === 'REVOKED';
                                         return (
-                                            <tr
-                                                key={dev.deviceId}
-                                                className={`transition-colors ${
-                                                    isRevoked ? 'bg-red-50/40 hover:bg-red-50/70' : 'bg-white hover:bg-stone-50'
-                                                }`}
-                                            >
+                                            <tr key={dev.deviceId} className={`transition-colors ${isRevoked ? 'bg-red-50/40 hover:bg-red-50/70' : 'bg-white hover:bg-stone-50'}`}>
                                                 <td className="p-3.5 align-middle">
                                                     <div className="font-mono font-black text-sm text-stone-900 flex items-center gap-2">
-                                                        <i className={`fa-solid fa-mobile-screen ${isRevoked ? 'text-red-500' : 'text-stone-500'}`}></i>
+                                                        <i className={`fa-solid fa-mobile-screen ${isRevoked ? 'text-red-500' : 'text-blue-500'}`}></i>
                                                         <span>{dev.deviceId}</span>
                                                     </div>
-                                                    <div className="text-[10px] font-mono font-bold text-stone-400 mt-0.5">
-                                                        Version: <span className="text-stone-600">{dev.appVersion || 'v1.0'}</span>
+                                                    <div className="text-[10px] text-stone-500 mt-0.5">
+                                                        {dev.note || 'No notes added'}
                                                     </div>
                                                 </td>
 
                                                 <td className="p-3.5 align-middle">
-                                                    <div className="font-black text-stone-800 text-xs">
+                                                    <div className="font-black text-stone-800 text-xs flex items-center gap-1.5">
+                                                        <i className="fa-solid fa-store text-stone-400"></i>
                                                         {dev.resolvedShopName}
-                                                    </div>
-                                                    <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                                                        ({dev.shopId || 'N/A'})
-                                                    </div>
-                                                </td>
-
-                                                <td className="p-3.5 align-middle max-w-[240px]">
-                                                    <div
-                                                        className="font-bold text-stone-800 truncate cursor-help flex items-center gap-1.5"
-                                                        title={dev.userAgent || dev.deviceModel || 'Unknown User-Agent'}
-                                                    >
-                                                        <span>{dev.deviceModel || 'Smartphone Display'}</span>
-                                                        <i className="fa-regular fa-circle-question text-stone-400 text-[10px] shrink-0"></i>
-                                                    </div>
-                                                    <div
-                                                        className="text-[10px] text-stone-400 font-mono truncate mt-0.5"
-                                                        title={dev.userAgent || ''}
-                                                    >
-                                                        {dev.userAgent || 'No User-Agent reported'}
                                                     </div>
                                                 </td>
 
@@ -27283,41 +27791,34 @@
                                                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border shadow-sm ${dev.liveStatus.badgeClass}`}>
                                                         {dev.liveStatus.label}
                                                     </span>
-                                                    {dev.lockReason && (
-                                                        <div className="text-[10px] font-bold text-red-600 mt-1 max-w-[200px] mx-auto truncate" title={dev.lockReason}>
-                                                            {dev.lockReason}
-                                                        </div>
-                                                    )}
+                                                    <div className="text-[9px] font-mono text-stone-400 mt-1">
+                                                        Last heartbeat: {formatRelativeTime(dev.lastSeenAt)}
+                                                    </div>
                                                 </td>
 
                                                 <td className="p-3.5 align-middle whitespace-nowrap">
-                                                    <div className="font-black text-stone-800 text-xs flex items-center gap-1.5">
-                                                        <i className="fa-regular fa-clock text-stone-400 text-[10px]"></i>
-                                                        <span>{formatRelativeTime(dev.lastSeenAt)}</span>
+                                                    <div className="font-black text-stone-800 text-xs">
+                                                        {dev.registeredAt ? safeFormatDateTime(dev.registeredAt, 'N/A') : 'N/A'}
                                                     </div>
-                                                    <div className="text-[10px] font-mono text-stone-400 mt-0.5">
-                                                        {formatExactTimestamp(dev.lastSeenAt)}
+                                                    <div className="text-[10px] text-stone-400 mt-0.5">
+                                                        By: {dev.registeredBy || 'System'}
                                                     </div>
                                                 </td>
 
-                                                <td className="p-3.5 align-middle text-right whitespace-nowrap">
+                                                <td className="p-3.5 align-middle text-right whitespace-nowrap space-x-1.5">
+                                                    <button type="button" onClick={() => handleOpenEdit(dev)} className="w-8 h-8 rounded-lg bg-stone-100 hover:bg-blue-100 text-stone-600 hover:text-blue-600 border border-stone-200 transition" title="Edit Device">
+                                                        <i className="fas fa-edit"></i>
+                                                    </button>
+                                                    <button type="button" onClick={() => openSecurityActionModal('DELETE_DEVICE', dev)} className="w-8 h-8 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-600 border border-stone-200 transition" title="Unregister / Delete">
+                                                        <i className="fas fa-trash"></i>
+                                                    </button>
                                                     {isRevoked ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => openSecurityActionModal('RESTORE_DEVICE', dev)}
-                                                            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[11px] shadow-sm transition inline-flex items-center gap-1.5 active:scale-95"
-                                                        >
-                                                            <i className="fa-solid fa-rotate-left"></i>
-                                                            <span>Restore / Unblock</span>
+                                                        <button type="button" onClick={() => openSecurityActionModal('RESTORE_DEVICE', dev)} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[11px] shadow-sm transition inline-flex items-center gap-1.5 active:scale-95" title="Restore Device">
+                                                            <i className="fa-solid fa-unlock"></i> Unblock
                                                         </button>
                                                     ) : (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => openSecurityActionModal('KICK_DEVICE', dev)}
-                                                            className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-[11px] shadow-sm transition inline-flex items-center gap-1.5 active:scale-95"
-                                                        >
-                                                            <i className="fa-solid fa-ban"></i>
-                                                            <span>Kick & Wipe Device</span>
+                                                        <button type="button" onClick={() => openSecurityActionModal('KICK_DEVICE', dev)} className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-black text-[11px] shadow-sm transition inline-flex items-center gap-1.5 active:scale-95" title="Kick & Lock Device">
+                                                            <i className="fa-solid fa-ban"></i> Lock
                                                         </button>
                                                     )}
                                                 </td>
@@ -27326,13 +27827,13 @@
                                     })}
                                     {enrichedDevicesList.length === 0 && (
                                         <tr>
-                                            <td colSpan="6" className="p-10 text-center text-stone-400">
+                                            <td colSpan="5" className="p-10 text-center text-stone-400">
                                                 <i className="fa-solid fa-mobile-screen-button text-3xl mb-2 opacity-30 block"></i>
                                                 <div className="font-bold text-stone-600 text-sm">
-                                                    No registered KHQR display devices found for this filter.
+                                                    No registered devices found.
                                                 </div>
                                                 <p className="text-xs text-stone-400 mt-1">
-                                                    When a counter smartphone opens <code className="font-mono font-bold">khqr-display.html</code>, its <code className="font-mono font-bold">SLR-DEV-XXXXXX</code> heartbeat will appear here automatically.
+                                                    Click "Register Device" above to add a new KHQR display tablet.
                                                 </p>
                                             </td>
                                         </tr>
@@ -27350,23 +27851,19 @@
                             onSubmit={executeConfirmedSecurityAction}
                             className="bg-white rounded-3xl w-full max-w-md p-6 shadow-2xl border-t-4 border-stone-900 relative"
                         >
-                            <button
-                                type="button"
-                                disabled={isExecutingAction}
-                                onClick={() => setSecurityModalAction(null)}
-                                className="absolute top-4 right-4 w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-500 flex items-center justify-center transition"
-                            >
+                            <button type="button" disabled={isExecutingAction} onClick={() => setSecurityModalAction(null)} className="absolute top-4 right-4 w-8 h-8 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-500 flex items-center justify-center transition">
                                 <i className="fa-solid fa-xmark"></i>
                             </button>
 
                             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-inner ${
-                                securityModalAction.type === 'KICK_DEVICE' || securityModalAction.type === 'LOCK_BRANCH'
+                                securityModalAction.type === 'KICK_DEVICE' || securityModalAction.type === 'LOCK_BRANCH' || securityModalAction.type === 'DELETE_DEVICE'
                                     ? 'bg-red-100 text-red-600'
                                     : 'bg-emerald-100 text-emerald-600'
                             }`}>
                                 <i className={`fa-solid text-2xl ${
                                     securityModalAction.type === 'KICK_DEVICE' ? 'fa-ban' :
                                     securityModalAction.type === 'LOCK_BRANCH' ? 'fa-triangle-exclamation' :
+                                    securityModalAction.type === 'DELETE_DEVICE' ? 'fa-trash' :
                                     'fa-unlock-keyhole'
                                 }`}></i>
                             </div>
@@ -27376,6 +27873,7 @@
                                 {securityModalAction.type === 'LOCK_BRANCH' && 'Emergency Lock & Wipe Entire Branch?'}
                                 {securityModalAction.type === 'RESTORE_DEVICE' && 'Restore & Unblock Device?'}
                                 {securityModalAction.type === 'RESTORE_BRANCH' && 'Restore & Unblock Branch Display?'}
+                                {securityModalAction.type === 'DELETE_DEVICE' && 'Unregister & Delete Device?'}
                             </h3>
 
                             <p className="text-xs text-stone-500 text-center mb-4 leading-relaxed">
@@ -27390,6 +27888,9 @@
                                 )}
                                 {securityModalAction.type === 'RESTORE_BRANCH' && (
                                     <>This will reset <code className="font-mono font-bold text-emerald-700">khqr_display_{securityModalAction.payload?.shopId}</code> to <b>IDLE</b> (<code className="font-mono">remoteLock: false</code>) and unblock registered displays for <b>{securityModalAction.payload?.shopName}</b>.</>
+                                )}
+                                {securityModalAction.type === 'DELETE_DEVICE' && (
+                                    <>This will completely remove <code className="font-mono font-bold text-red-600">{securityModalAction.payload?.deviceId}</code> from the registry. It will need to be re-registered to connect.</>
                                 )}
                             </p>
 
