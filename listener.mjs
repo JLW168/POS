@@ -1,14 +1,13 @@
 /**
- * ABA PayWay Telegram Group Listener Bridge — Smart Firebase Bypass & Deep History Edition (listener.mjs)
+ * ABA PayWay Telegram Group Listener Bridge — Crash-Proof & Smart Firebase Bypass Edition (listener.mjs)
  *
- * NEW IN THIS VERSION (Phase B-1):
- * 1. SMART FIREBASE DATABASE BYPASS (`bypassFirebaseDb` Default ON):
- *    - When `bypassFirebaseDb !== false` (Default ON), `listener.mjs` completely skips writing to
- *      Firestore `aba_payments` (0 Firebase Writes!) and serves 1,000+ daily transactions directly
- *      from its 2,000-item in-memory ring buffer via SSE (`/events`), `/recent`, and `/history`.
- *    - When `bypassFirebaseDb === false` (OFF), it saves all transactions to Firestore `aba_payments`.
- * 2. UPGRADED RENDER URL DEFAULT (`https://pos-payway.onrender.com`) & 2,000-ITEM MEMORY VAULT.
- * 3. DEEP HISTORICAL BACKFILL (`/history?chatId=...&startMs=...&endMs=...&limit=1000`).
+ * FIXES IN THIS VERSION:
+ * 1. HTTP SERVER STARTS FIRST: Opens Render's port immediately so health checks pass even if Telegram is reconnecting.
+ * 2. AUTH_KEY_DUPLICATED PROTECTION: Catches background GramJS `_recvLoop` 406/401 errors cleanly instead of
+ *    crashing Node.js into an infinite Render restart loop, and reports status via `/` and `/health`.
+ * 3. GRACEFUL SIGTERM SHUTDOWN & STARTUP DELAY: Disconnects Telegram cleanly on Render redeploys and waits
+ *    briefly before connecting so the previous container closes its socket first (preventing IP overlap).
+ * 4. SMART FIREBASE DATABASE BYPASS (`bypassFirebaseDb` Default ON) + 2,000-ITEM MEMORY VAULT + `/history`.
  */
 import http from "node:http";
 import https from "node:https";
@@ -18,7 +17,9 @@ import { NewMessage } from "telegram/events/index.js";
 import { initializeApp, applicationDefault, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
-// 1. Initialize Firebase Admin SDK
+// ============================================================================
+// 1. INITIALIZE FIREBASE ADMIN SDK
+// ============================================================================
 const serviceAccountEnv =
   process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 if (serviceAccountEnv) {
@@ -42,7 +43,16 @@ db.settings({ ignoreUndefinedProperties: true, preferRest: false });
 // Quota Circuit Breaker for Firestore Writes
 let firestoreQuotaExhaustedUntil = 0;
 
-// 2. Strict Whitelist of Configured & Enabled Shop PayWay Chat IDs + Per-Chat Bypass DB Flag
+// Telegram Connection Health State
+let client = null;
+let telegramConnected = false;
+let telegramError = null;
+let telegramFatalAuthError = false;
+let isShuttingDown = false;
+
+// ============================================================================
+// 2. STRICT WHITELIST OF CONFIGURED SHOP PAYWAY CHAT IDS + BYPASS DB MAP
+// ============================================================================
 const normalizeChatId = (rawId) =>
   String(rawId || "")
     .trim()
@@ -61,9 +71,7 @@ const envBypassDefault =
   String(process.env.BYPASS_FIREBASE_DB || "true").toLowerCase() !== "false";
 
 let dynamicFirestoreChatIds = new Set();
-// Map of normalizedChatId -> raw configured chatId string
 const configuredRawChatIdMap = new Map();
-// Map of normalizedChatId -> boolean (true = Bypass Firebase DB, false = Save to Firebase DB)
 const bypassDbByChatIdMap = new Map();
 
 async function refreshConfiguredShopChatIds() {
@@ -87,7 +95,6 @@ async function refreshConfiguredShopChatIds() {
             if (!configuredRawChatIdMap.has(norm) || raw.startsWith("-")) {
               configuredRawChatIdMap.set(norm, raw);
             }
-            // If any shop sharing this Chat ID explicitly sets bypassFirebaseDb === false, allow DB writes
             if (bypassDbByChatIdMap.has(norm)) {
               const prev = bypassDbByChatIdMap.get(norm);
               bypassDbByChatIdMap.set(norm, prev && bypassDbFlag);
@@ -105,7 +112,6 @@ async function refreshConfiguredShopChatIds() {
         const data = doc.data() || {};
         const cfg = data.khqrConfig;
         if (cfg && cfg.paywayVerifyEnabled !== false && cfg.paywayChatId) {
-          // Default ON (true) when undefined
           const bypassDb = cfg.bypassFirebaseDb !== false;
           registerRawChatIds(cfg.paywayChatId, bypassDb);
         }
@@ -186,14 +192,12 @@ const shouldBypassFirestoreForChat = (chatIdStr) => {
   return envBypassDefault;
 };
 
-await refreshConfiguredShopChatIds();
-// Refresh config every 10 minutes (or immediately via /sync-config) to minimize Firestore reads
-setInterval(refreshConfiguredShopChatIds, 10 * 60 * 1000);
-
-// 3. In-Memory Ring Buffer (Up to 2,000 items for 1,000+ daily transactions) & SSE Clients
+// ============================================================================
+// 3. IN-MEMORY RING BUFFER (2,000 ITEMS) & SSE CLIENTS
+// ============================================================================
 const MAX_BUFFER_SIZE = 2000;
 const recentPaymentsBuffer = [];
-const recentPaymentsMap = new Map(); // trxId -> paymentObj
+const recentPaymentsMap = new Map();
 const savedTrxMemory = new Set();
 const sseClients = new Set();
 
@@ -245,7 +249,9 @@ setInterval(() => {
   }
 }, 20000);
 
-// 4. Minute-Granularity Timestamp Alignment Helper
+// ============================================================================
+// 4. TIMESTAMP ALIGNMENT & ABA PAYWAY PARSER
+// ============================================================================
 function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   if (!paidAtStr || typeof paidAtStr !== "string") return referenceMs;
   const clean = paidAtStr.trim();
@@ -287,7 +293,6 @@ function parseAbaPaidAtToMs(paidAtStr, referenceMs = Date.now()) {
   return referenceMs;
 }
 
-// 5. Unified Indoor ABA PAY + Outdoor Bank KHQR Parser
 function parseABAPayWay(raw, msgDateMs = Date.now()) {
   if (!raw || typeof raw !== "string") return null;
   const t = raw.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -370,16 +375,9 @@ function parseABAPayWay(raw, msgDateMs = Date.now()) {
   return null;
 }
 
-const apiId = Number(process.env.TG_API_ID);
-const apiHash = String(process.env.TG_API_HASH || "").trim();
-const sessionStr = String(process.env.TG_SESSION || "").trim();
-
-if (!apiId || !apiHash || !sessionStr) {
-  console.error("Missing TG_API_ID, TG_API_HASH, or TG_SESSION in environment variables.");
-  process.exit(1);
-}
-
-// 6. Smart Payment Processor (Respects `bypassFirebaseDb`: ON = 0 Firebase Writes, OFF = Save to Firestore)
+// ============================================================================
+// 5. SMART PAYMENT PROCESSOR (BYPASS DB BY DEFAULT)
+// ============================================================================
 async function saveParsedPaymentToFirestore(
   parsed,
   chatIdStr,
@@ -445,35 +443,21 @@ async function saveParsedPaymentToFirestore(
       console.warn(
         "⚠️ Firestore Daily Quota Exhausted — Serving payments directly via Render SSE (/events) & HTTP (/recent, /history)!"
       );
-      return mergedInMemory;
     }
     return mergedInMemory;
   }
 }
 
-// 7. Native TCP Transport in Node.js
-const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
-  connectionRetries: 10,
-  retryDelay: 1000,
-  autoReconnect: true,
-  useWSS: false,
-});
-
-client.setLogLevel("error");
-
-await client.connect();
-console.log("==================================================================");
-console.log("⚡ Connected to Telegram MTProto (Smart Bypass + Deep History)!");
-console.log("   Allowed Shop Chat IDs:", Array.from(getEffectiveAllowedChatIds()));
-console.log("==================================================================");
-
-// 8. Target Dialog & Direct Peer Resolver Cache
+// ============================================================================
+// 6. TARGET DIALOG & HISTORICAL BACKFILL ENGINE
+// ============================================================================
 let cachedTargetDialogs = [];
 const resolvedPeerByNormId = new Map();
 let lastDialogRefreshMs = 0;
 let isSweeping = false;
 
 async function resolveWhitelistedPeers(forceRefresh = false, targetChatIdFilter = "") {
+  if (!client || !telegramConnected) return [];
   const now = Date.now();
   if (!forceRefresh && cachedTargetDialogs.length > 0 && now - lastDialogRefreshMs < 300000) {
     if (!targetChatIdFilter) return cachedTargetDialogs;
@@ -521,7 +505,7 @@ async function resolveWhitelistedPeers(forceRefresh = false, targetChatIdFilter 
     cachedTargetDialogs = matched;
     lastDialogRefreshMs = now;
   } catch (err) {
-    console.warn("Dialog discovery warning:", err.message || err);
+    handlePossibleFatalTelegramError(err, "resolveWhitelistedPeers");
   }
 
   if (!targetChatIdFilter) return cachedTargetDialogs;
@@ -534,13 +518,14 @@ async function resolveWhitelistedPeers(forceRefresh = false, targetChatIdFilter 
   return cachedTargetDialogs.filter((d) => filterNorms.has(d.normId));
 }
 
-// 9. DEEP HISTORICAL TELEGRAM BACKFILL ENGINE (`/history`)
 async function fetchHistoricalGroupMessages({
   chatId = "",
   startMs = 0,
   endMs = Date.now(),
   maxMessagesPerChat = 800,
 } = {}) {
+  if (!client || !telegramConnected) return [];
+
   const peers = await resolveWhitelistedPeers(false, chatId);
   if (!peers || peers.length === 0) {
     await refreshConfiguredShopChatIds();
@@ -572,7 +557,7 @@ async function fetchHistoricalGroupMessages({
       try {
         messages = await client.getMessages(peerObj.entity, queryOpts);
       } catch (err) {
-        console.warn(`Historical getMessages warning for ${peerObj.chatId}:`, err.message);
+        handlePossibleFatalTelegramError(err, "fetchHistoricalGroupMessages");
         break;
       }
 
@@ -618,9 +603,54 @@ async function fetchHistoricalGroupMessages({
   return extractedResults;
 }
 
-// 10. HTTP Server (`/recent`, `/history`, `/sync-config`, `/events`, `/claim`, `/delete`)
+async function syncRecentGroupHistory(isInitialBoot = false) {
+  if (isSweeping || !client || !telegramConnected || telegramFatalAuthError) return;
+  if (getEffectiveAllowedChatIds().size === 0) return;
+  isSweeping = true;
+  try {
+    const peers = await resolveWhitelistedPeers(isInitialBoot);
+    await Promise.all(
+      peers.map(async (d) => {
+        try {
+          if (!isChatAllowed(d.chatId)) return;
+          const messages = await client.getMessages(d.entity, {
+            limit: isInitialBoot ? 120 : 8,
+          });
+          for (const msg of messages) {
+            const text = msg?.message || msg?.text || "";
+            if (!text) continue;
+            const msgServerMs = msg.date ? Number(msg.date) * 1000 : Date.now();
+            const effectiveMs =
+              !isInitialBoot && Math.abs(Date.now() - msgServerMs) < 90000
+                ? Date.now()
+                : msgServerMs;
+            const parsed = parseABAPayWay(text, effectiveMs);
+            if (parsed) {
+              await saveParsedPaymentToFirestore(
+                parsed,
+                d.chatId,
+                effectiveMs,
+                !isInitialBoot
+              );
+            }
+          }
+        } catch (innerErr) {
+          handlePossibleFatalTelegramError(innerErr, "syncRecentGroupHistory");
+        }
+      })
+    );
+  } catch (err) {
+    handlePossibleFatalTelegramError(err, "syncRecentGroupHistory");
+  } finally {
+    isSweeping = false;
+  }
+}
+
+// ============================================================================
+// 7. START HTTP SERVER FIRST (GUARANTEES RENDER HEALTH CHECK ALWAYS PASSES)
+// ============================================================================
 const port = Number(process.env.PORT || 10000);
-http
+const server = http
   .createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -636,14 +666,33 @@ http
     const pathname = urlObj.pathname;
     const shouldScan = urlObj.searchParams.get("scan") === "1";
 
-    // Endpoint 0: Instant Config & Whitelist Reload (`/sync-config`)
-    if (pathname === "/sync-config") {
-      await refreshConfiguredShopChatIds();
-      await resolveWhitelistedPeers(true);
+    // Health Endpoint for Render
+    if (pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(
         JSON.stringify({
           ok: true,
+          telegramConnected,
+          telegramError,
+          telegramFatalAuthError,
+          uptimeSeconds: Math.round(process.uptime()),
+        })
+      );
+      return;
+    }
+
+    // Endpoint 0: Instant Config & Whitelist Reload (`/sync-config`)
+    if (pathname === "/sync-config") {
+      await refreshConfiguredShopChatIds();
+      if (telegramConnected) {
+        await resolveWhitelistedPeers(true);
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          telegramConnected,
+          telegramError,
           allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
           bypassFirebaseDbMap: Object.fromEntries(bypassDbByChatIdMap),
         })
@@ -651,8 +700,19 @@ http
       return;
     }
 
-    // Endpoint A: Deep Historical Backfill (`/history?chatId=...&startMs=...&endMs=...&limit=800`)
+    // Endpoint A: Deep Historical Backfill (`/history`)
     if (pathname === "/history") {
+      if (!telegramConnected) {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: telegramError || "Telegram client is not connected.",
+            payments: [],
+          })
+        );
+        return;
+      }
       try {
         const chatId = String(urlObj.searchParams.get("chatId") || "").trim();
         const startMs = Number(urlObj.searchParams.get("startMs")) || 0;
@@ -684,7 +744,7 @@ http
       return;
     }
 
-    if (shouldScan) {
+    if (shouldScan && telegramConnected) {
       syncRecentGroupHistory(false).catch(() => {});
     }
 
@@ -712,6 +772,8 @@ http
         `data: ${JSON.stringify({
           type: "CONNECTED",
           ts: Date.now(),
+          telegramConnected,
+          telegramError,
           payments: allowedPayments.slice(0, 120),
         })}\n\n`
       );
@@ -765,14 +827,17 @@ http
       return;
     }
 
-    // Endpoint E: JSON Payment Feed (`/recent`, `/payments`, or root `/?scan=1`)
+    // Endpoint E: JSON Payment Feed (`/recent`, `/payments`, or root `/`)
     const limitParam = Math.min(2000, Math.max(50, Number(urlObj.searchParams.get("limit")) || 300));
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(
       JSON.stringify({
         ok: true,
-        status: "ok",
-        service: "solaris-aba-listener-v6-bypass",
+        status: telegramConnected ? "ok" : "degraded_telegram_disconnected",
+        service: "solaris-aba-listener-v7-resilient",
+        telegramConnected,
+        telegramError,
+        telegramFatalAuthError,
         uptimeSeconds: Math.round(process.uptime()),
         allowedChatIds: Array.from(getEffectiveAllowedChatIds()),
         bypassFirebaseDbMap: Object.fromEntries(bypassDbByChatIdMap),
@@ -786,110 +851,194 @@ http
     console.log(`🌐 Listener HTTP, History & SSE server active on port ${port}`);
   });
 
-// Self-Keep-Alive Ping every 4 minutes (Defaults to https://pos-payway.onrender.com)
+// Self-Keep-Alive Ping every 4 minutes
 const selfExternalUrl =
   process.env.RENDER_EXTERNAL_URL || "https://pos-payway.onrender.com";
 setInterval(() => {
   try {
     https
-      .get(`${selfExternalUrl}/?keepalive=${Date.now()}`, (res) => {
+      .get(`${selfExternalUrl}/health?keepalive=${Date.now()}`, (res) => {
         res.resume();
       })
       .on("error", () => {});
   } catch (e) {}
 }, 4 * 60 * 1000);
 
-// 11A. REAL-TIME EVENT LISTENER
-client.addEventHandler(async (ev) => {
-  try {
-    const rawMessage = ev.message?.message || ev.message?.text || "";
-    if (!rawMessage) return;
+// ============================================================================
+// 8. FATAL AUTH_KEY_DUPLICATED GUARD & GLOBAL SAFETY NET
+// ============================================================================
+function handlePossibleFatalTelegramError(err, context = "GramJS") {
+  const msg = String(err?.errorMessage || err?.message || err || "");
+  if (
+    /AUTH_KEY_DUPLICATED|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|USER_DEACTIVATED/i.test(msg)
+  ) {
+    telegramConnected = false;
+    telegramFatalAuthError = true;
+    telegramError = `FATAL TELEGRAM SESSION ERROR (${msg}): Generate a brand-new TG_SESSION using 'node login.mjs', update Render's TG_SESSION env var, and make sure ONLY ONE server uses this TG_SESSION!`;
+    console.error("==================================================================");
+    console.error(`❌ [${context}] ${telegramError}`);
+    console.error("   HTTP server will stay alive so you can inspect /health,");
+    console.error("   but Telegram polling is paused until TG_SESSION is replaced.");
+    console.error("==================================================================");
+    if (client) {
+      client.disconnect().catch(() => {});
+    }
+    return true;
+  }
+  return false;
+}
 
-    const peer = ev.message?.peerId;
-    const incomingChatId = String(
-      ev.chatId ||
-        ev.message?.chatId ||
-        (peer?.channelId ? `-100${peer.channelId}` : peer?.chatId ? `-${peer.chatId}` : "")
-    );
-    if (!isChatAllowed(incomingChatId)) return;
-
-    const msgServerMs = ev.message?.date ? Number(ev.message.date) * 1000 : Date.now();
-    const effectiveMs = Math.abs(Date.now() - msgServerMs) < 90000 ? Date.now() : msgServerMs;
-    const parsed = parseABAPayWay(rawMessage, effectiveMs);
-    if (!parsed) return;
-
-    await saveParsedPaymentToFirestore(parsed, incomingChatId, effectiveMs, true);
-  } catch (err) {}
-}, new NewMessage({}));
-
-// 11B. RAW MTPROTO UPDATE FALLBACK
-client.addEventHandler(async (update) => {
-  try {
-    const msgObj = update?.message || update?.newMessage?.message;
-    const rawText = typeof msgObj === "string" ? msgObj : msgObj?.message || msgObj?.text || "";
-    if (!rawText) return;
-
-    const peer = msgObj?.peerId || update?.peerId;
-    const rawPeerId = peer?.channelId
-      ? `-100${peer.channelId}`
-      : peer?.chatId
-      ? `-${peer.chatId}`
-      : "";
-
-    if (!isChatAllowed(rawPeerId)) return;
-
-    const msgServerMs = msgObj?.date ? Number(msgObj.date) * 1000 : Date.now();
-    const effectiveMs = Math.abs(Date.now() - msgServerMs) < 90000 ? Date.now() : msgServerMs;
-    const parsed = parseABAPayWay(rawText, effectiveMs);
-    if (!parsed) return;
-
-    await saveParsedPaymentToFirestore(parsed, rawPeerId, effectiveMs, true);
-  } catch (err) {}
+process.on("unhandledRejection", (reason) => {
+  if (!handlePossibleFatalTelegramError(reason, "unhandledRejection")) {
+    console.warn("⚠️ Unhandled Promise Rejection:", reason?.message || reason);
+  }
 });
 
-// 12. INITIAL BOOT & LIVE TARGET-GROUP SWEEP
-async function syncRecentGroupHistory(isInitialBoot = false) {
-  if (isSweeping) return;
-  if (getEffectiveAllowedChatIds().size === 0) return;
-  isSweeping = true;
+process.on("uncaughtException", (err) => {
+  if (!handlePossibleFatalTelegramError(err, "uncaughtException")) {
+    console.error("⚠️ Uncaught Exception:", err?.message || err);
+  }
+});
+
+// ============================================================================
+// 9. GRACEFUL SHUTDOWN (PREVENTS AUTH_KEY_DUPLICATED DURING RENDER REDEPLOYS)
+// ============================================================================
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`🛑 Received ${signal}. Disconnecting Telegram cleanly before exit...`);
+  telegramConnected = false;
   try {
-    const peers = await resolveWhitelistedPeers(isInitialBoot);
-    await Promise.all(
-      peers.map(async (d) => {
-        try {
-          if (!isChatAllowed(d.chatId)) return;
-          const messages = await client.getMessages(d.entity, {
-            limit: isInitialBoot ? 120 : 8,
-          });
-          for (const msg of messages) {
-            const text = msg?.message || msg?.text || "";
-            if (!text) continue;
-            const msgServerMs = msg.date ? Number(msg.date) * 1000 : Date.now();
-            const effectiveMs =
-              !isInitialBoot && Math.abs(Date.now() - msgServerMs) < 90000
-                ? Date.now()
-                : msgServerMs;
-            const parsed = parseABAPayWay(text, effectiveMs);
-            if (parsed) {
-              await saveParsedPaymentToFirestore(
-                parsed,
-                d.chatId,
-                effectiveMs,
-                !isInitialBoot
-              );
-            }
-          }
-        } catch (innerErr) {}
-      })
-    );
-  } catch (err) {
-    if (!/RPCError|INTERNAL|FLOOD/i.test(err.message || "")) {
-      console.warn("History sweep warning:", err.message || err);
+    for (const res of sseClients) {
+      try { res.end(); } catch (e) {}
     }
-  } finally {
-    isSweeping = false;
+    sseClients.clear();
+    if (client) {
+      await Promise.race([
+        client.disconnect(),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+      console.log("✅ Telegram MTProto disconnected cleanly.");
+    }
+  } catch (e) {}
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// ============================================================================
+// 10. INITIALIZE WHITELIST & CONNECT TELEGRAM MTPROTO SAFELY
+// ============================================================================
+await refreshConfiguredShopChatIds();
+setInterval(refreshConfiguredShopChatIds, 10 * 60 * 1000);
+
+async function startTelegramClient() {
+  const apiId = Number(process.env.TG_API_ID);
+  const apiHash = String(process.env.TG_API_HASH || "").trim();
+  const sessionStr = String(process.env.TG_SESSION || "").trim();
+
+  if (!apiId || !apiHash || !sessionStr) {
+    telegramError = "Missing TG_API_ID, TG_API_HASH, or TG_SESSION in Render Environment Variables.";
+    console.error(`❌ ${telegramError}`);
+    return;
+  }
+
+  // Wait briefly on boot (default 3s) so any previous Render container finishes SIGTERM disconnect
+  const bootDelayMs = Math.max(0, Number(process.env.TG_CONNECT_DELAY_MS ?? 3000));
+  if (bootDelayMs > 0) {
+    console.log(`⏳ Waiting ${bootDelayMs}ms before connecting to Telegram (prevents deploy overlap)...`);
+    await new Promise((resolve) => setTimeout(resolve, bootDelayMs));
+  }
+
+  if (isShuttingDown) return;
+
+  try {
+    client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
+      connectionRetries: 5,
+      retryDelay: 2000,
+      autoReconnect: true,
+      useWSS: false,
+    });
+
+    client.setLogLevel("error");
+
+    await client.connect();
+
+    // Verify session is actually authorized before attaching handlers
+    const isAuth = await client.checkAuthorization();
+    if (!isAuth) {
+      throw new Error("AUTH_KEY_UNREGISTERED: TG_SESSION is expired or revoked.");
+    }
+
+    telegramConnected = true;
+    telegramError = null;
+    telegramFatalAuthError = false;
+
+    console.log("==================================================================");
+    console.log("⚡ Connected to Telegram MTProto (Crash-Proof Smart Bypass v7)!");
+    console.log("   Allowed Shop Chat IDs:", Array.from(getEffectiveAllowedChatIds()));
+    console.log("==================================================================");
+
+    // Real-Time Event Listener
+    client.addEventHandler(async (ev) => {
+      try {
+        const rawMessage = ev.message?.message || ev.message?.text || "";
+        if (!rawMessage) return;
+
+        const peer = ev.message?.peerId;
+        const incomingChatId = String(
+          ev.chatId ||
+            ev.message?.chatId ||
+            (peer?.channelId ? `-100${peer.channelId}` : peer?.chatId ? `-${peer.chatId}` : "")
+        );
+        if (!isChatAllowed(incomingChatId)) return;
+
+        const msgServerMs = ev.message?.date ? Number(ev.message.date) * 1000 : Date.now();
+        const effectiveMs = Math.abs(Date.now() - msgServerMs) < 90000 ? Date.now() : msgServerMs;
+        const parsed = parseABAPayWay(rawMessage, effectiveMs);
+        if (!parsed) return;
+
+        await saveParsedPaymentToFirestore(parsed, incomingChatId, effectiveMs, true);
+      } catch (err) {}
+    }, new NewMessage({}));
+
+    // Raw MTProto Update Fallback
+    client.addEventHandler(async (update) => {
+      try {
+        const msgObj = update?.message || update?.newMessage?.message;
+        const rawText = typeof msgObj === "string" ? msgObj : msgObj?.message || msgObj?.text || "";
+        if (!rawText) return;
+
+        const peer = msgObj?.peerId || update?.peerId;
+        const rawPeerId = peer?.channelId
+          ? `-100${peer.channelId}`
+          : peer?.chatId
+          ? `-${peer.chatId}`
+          : "";
+
+        if (!isChatAllowed(rawPeerId)) return;
+
+        const msgServerMs = msgObj?.date ? Number(msgObj.date) * 1000 : Date.now();
+        const effectiveMs = Math.abs(Date.now() - msgServerMs) < 90000 ? Date.now() : msgServerMs;
+        const parsed = parseABAPayWay(rawText, effectiveMs);
+        if (!parsed) return;
+
+        await saveParsedPaymentToFirestore(parsed, rawPeerId, effectiveMs, true);
+      } catch (err) {}
+    });
+
+    // Initial boot sweep + live 3.5s sweep
+    await syncRecentGroupHistory(true);
+    setInterval(() => syncRecentGroupHistory(false), 3500);
+  } catch (err) {
+    const isFatal = handlePossibleFatalTelegramError(err, "startTelegramClient");
+    if (!isFatal) {
+      telegramError = err?.message || String(err);
+      console.error("❌ Telegram connection failed:", telegramError);
+    }
   }
 }
 
-await syncRecentGroupHistory(true);
-setInterval(() => syncRecentGroupHistory(false), 3500);
+startTelegramClient();
