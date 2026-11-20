@@ -4217,6 +4217,15 @@
     const khrFormatter = new Intl.NumberFormat('en-US');
     const usdFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
+    // Resolves the effective selling price for a product at a specific shop.
+    // When the shop's custom price is null, blank, or 0, falls back to the base product.price.
+    const getEffectiveShopPrice = (product, shopId) => {
+        const basePrice = Number(product?.price) || 0;
+        if (!shopId || shopId === 'ALL' || shopId === 'All') return basePrice;
+        const customShopPrice = Number(product?.priceByShop?.[shopId]);
+        return customShopPrice > 0 ? customShopPrice : basePrice;
+    };
+
     // --- NEW: Loyalty Program Expiration & Eligibility Helper Engine ---
     const getLoyaltyExpirationMonths = (periodStr) => {
         const clean = String(periodStr || 'Never').trim();
@@ -5484,7 +5493,7 @@
     // --- PHASE 1 & 2: POS Terminal Component ---
     const POSTerminal = ({ userProfile }) => {
         const { products, shops, customers, loyaltyRules, systemConfig, devices, currentDeviceId } = useData(); // <-- ADDED loyaltyRules, devices & currentDeviceId
-        const canEditLineItem = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
+        const canEditLineItem = true; // Available to all users; Unit Price override is protected by 6-digit Shop PIN
         const [cart, setCart] = useState([]);
         const [searchTerm, setSearchTerm] = useState('');
         const [customerSearchTerm, setCustomerSearchTerm] = useState('');
@@ -6118,8 +6127,43 @@
             refocusSearchInput();
         };
 
+        // Shared Audit Logger for Cart Clear & Single Item Deletion (Anti-Fraud "Cat & Dog" Protection)
+        const logCartRemovalAudit = useCallback((removedItems, actionType = 'clear_cart') => {
+            if (!Array.isArray(removedItems) || removedItems.length === 0) return;
+            const totalQty = removedItems.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+            const totalAmount = removedItems.reduce((sum, i) => sum + ((Number(i.price) || 0) * (Number(i.quantity) || 0)), 0);
+            const clearDocRef = db.collection('clearedCarts').doc();
+            const nowIso = new Date().toISOString();
+            const localClearedEntry = {
+                id: clearDocRef.id,
+                actionType, // 'clear_cart' | 'delete_item'
+                shopId: selectedShopId,
+                shopName: effectiveCurrentShopObj?.name || 'Unknown',
+                cashierId: userProfile.uid,
+                cashierName: userProfile.name,
+                items: removedItems,
+                totalAmount,
+                totalQty,
+                timestamp: nowIso,
+                createdAt: nowIso,
+                deviceId: currentDeviceId || '',
+                deviceName: currentDevice?.name || ''
+            };
+            if (window.SolarisLocalSalesStore) {
+                window.SolarisLocalSalesStore.recordClearedCart(localClearedEntry);
+            }
+            clearDocRef.set({
+                ...localClearedEntry,
+                timestamp: firebase.firestore.FieldValue.serverTimestamp()
+            }).catch(() => {});
+        }, [selectedShopId, effectiveCurrentShopObj?.name, userProfile.uid, userProfile.name, currentDeviceId, currentDevice?.name]);
+
         const removeFromCart = (productId) => {
-            setCart(cart.filter(item => item.productId !== productId));
+            const removedItem = cart.find(item => item.productId === productId);
+            if (removedItem) {
+                logCartRemovalAudit([removedItem], 'delete_item');
+            }
+            setCart(prev => prev.filter(item => item.productId !== productId));
             refocusSearchInput();
         };
 
@@ -6783,31 +6827,9 @@
                     show={showClearConfirm}
                     title="Clear Cart?"
                     message="Are you sure you want to remove all items from the current ticket?"
-                    onConfirm={async () => {
+                    onConfirm={() => {
                         if (cart.length > 0) {
-                            const clearDocRef = db.collection('clearedCarts').doc();
-                            const nowIso = new Date().toISOString();
-                            const localClearedEntry = {
-                                id: clearDocRef.id,
-                                shopId: selectedShopId,
-                                shopName: effectiveCurrentShopObj?.name || 'Unknown',
-                                cashierId: userProfile.uid,
-                                cashierName: userProfile.name,
-                                items: cart,
-                                totalAmount: cartTotal,
-                                totalQty: cartItemCount,
-                                timestamp: nowIso,
-                                createdAt: nowIso,
-                                deviceId: currentDeviceId || '',
-                                deviceName: currentDevice?.name || ''
-                            };
-                            if (window.SolarisLocalSalesStore) {
-                                window.SolarisLocalSalesStore.recordClearedCart(localClearedEntry);
-                            }
-                            clearDocRef.set({
-                                ...localClearedEntry,
-                                timestamp: firebase.firestore.FieldValue.serverTimestamp()
-                            }).catch(() => {});
+                            logCartRemovalAudit(cart, 'clear_cart');
                         }
                         setCart([]);
                         setShowClearConfirm(false);
@@ -6963,6 +6985,7 @@
                     <LineItemEditModal
                         item={editingCartItem}
                         userProfile={userProfile}
+                        shop={effectiveCurrentShopObj}
                         availableStock={getAvailableStock(editingCartItem.productId)}
                         manageStock={currentShopObj?.manageStock !== false}
                         onSave={(updates) => handleApplyLineItemEdit(editingCartItem.productId, updates)}
@@ -7961,23 +7984,49 @@
     };
 
     // --- NEW: Interactive Quantity NumPad & Line-Item Price/Note Override Modal ---
-    const LineItemEditModal = ({ item, userProfile, availableStock, manageStock, onSave, onClose }) => {
+    const LineItemEditModal = ({ item, userProfile, shop, availableStock, manageStock, onSave, onClose }) => {
         const [activeField, setActiveField] = useState('quantity'); // 'quantity' or 'price'
         const [qtyStr, setQtyStr] = useState(String(item.quantity || 1));
         const [priceStr, setPriceStr] = useState(String(item.price || 0));
         const [note, setNote] = useState(item.note || '');
         const [freshStart, setFreshStart] = useState(true);
 
-        // Authorized roles for custom price override (Admin, Shop Manager, or users with inventory/settings permission)
-        const canOverridePrice = userProfile?.role === 'Admin' ||
+        // 6-Digit Shop PIN Security for Unit Price Overrides (linked to Shop & Location `discountPin`)
+        const requiredPin = useMemo(() => {
+            const rawPin = String(shop?.discountPin || '').replace(/\D/g, '');
+            return rawPin.length === 6 ? rawPin : '';
+        }, [shop?.discountPin]);
+        const [pinInput, setPinInput] = useState('');
+        const pinInputRef = useRef(null);
+
+        const isRoleAuthorized = userProfile?.role === 'Admin' ||
                                  userProfile?.role === 'Shop Manager' ||
                                  (userProfile?.permissions || []).includes('inventory') ||
                                  (userProfile?.permissions || []).includes('settings');
 
+        // When a 6-digit Shop PIN is configured, any user can unlock Unit Price override with the valid PIN.
+        // If no PIN is configured for the branch, fall back to authorized roles.
+        const isPinUnlocked = requiredPin ? (pinInput === requiredPin) : isRoleAuthorized;
+        const isPinInvalid = requiredPin && pinInput.length === 6 && pinInput !== requiredPin;
+        const canOverridePrice = isPinUnlocked;
+
         const originalPrice = item.originalPrice ?? item.price;
 
+        const handlePinChange = (e) => {
+            const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
+            setPinInput(digits);
+            if (requiredPin && digits !== requiredPin && activeField === 'price') {
+                setActiveField('quantity');
+            }
+        };
+
         const handleSelectField = (field) => {
-            if (field === 'price' && !canOverridePrice) return;
+            if (field === 'price' && !canOverridePrice) {
+                if (requiredPin && pinInputRef.current) {
+                    pinInputRef.current.focus();
+                }
+                return;
+            }
             setActiveField(field);
             setFreshStart(true);
         };
@@ -8050,6 +8099,59 @@
                                 </span>
                             </div>
 
+                            {/* Supervisor 6-Digit PIN Security Bar (Unlocks Unit Price Override) */}
+                            {requiredPin ? (
+                                <div className={`px-3 py-2.5 rounded-xl border flex items-center justify-between gap-2.5 transition-colors ${
+                                    isPinUnlocked
+                                        ? 'bg-emerald-950/30 border-emerald-500/40'
+                                        : isPinInvalid
+                                            ? 'bg-rose-950/30 border-rose-500/50'
+                                            : 'bg-slate-900/80 border-amber-500/30'
+                                }`}>
+                                    <div className="min-w-0">
+                                        <div className="text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                            <i className={`fas ${isPinUnlocked ? 'fa-unlock text-emerald-400' : 'fa-key text-amber-400'}`}></i>
+                                            <span className={isPinUnlocked ? 'text-emerald-300' : 'text-amber-300'}>
+                                                {isPinUnlocked ? 'Price Override Unlocked' : 'Price Override PIN'}
+                                            </span>
+                                        </div>
+                                        <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                                            {isPinUnlocked
+                                                ? 'Tap Unit Price (៛) below to edit'
+                                                : isPinInvalid
+                                                    ? 'Invalid 6-digit Shop PIN'
+                                                    : 'Enter 6-digit Shop PIN to edit price'}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                        <input
+                                            ref={pinInputRef}
+                                            type="password"
+                                            inputMode="numeric"
+                                            maxLength={6}
+                                            value={pinInput}
+                                            onChange={handlePinChange}
+                                            placeholder="6-Digit PIN"
+                                            className={`w-28 bg-slate-800 text-center font-mono text-xs font-bold tracking-widest px-2.5 py-2 rounded-lg border outline-none transition ${
+                                                isPinUnlocked
+                                                    ? 'border-emerald-500 text-emerald-300'
+                                                    : isPinInvalid
+                                                        ? 'border-rose-500 text-rose-300'
+                                                        : 'border-slate-600 text-white focus:border-amber-400'
+                                            }`}
+                                        />
+                                        {isPinUnlocked && (
+                                            <i className="fas fa-check-circle text-emerald-400 text-sm"></i>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : !isRoleAuthorized ? (
+                                <div className="px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-700 text-[11px] text-slate-400 flex items-center gap-2">
+                                    <i className="fas fa-lock text-amber-400 shrink-0"></i>
+                                    <span>Unit Price locked. Configure a 6-digit Shop PIN in <strong>Settings → Shop &amp; Location</strong> to allow PIN-authorized overrides.</span>
+                                </div>
+                            ) : null}
+
                             {/* Interactive Field Selector Cards (Quantity & Price Override) */}
                             <div className="grid grid-cols-2 gap-3">
                                 <div
@@ -8079,19 +8181,19 @@
                                     onClick={() => handleSelectField('price')}
                                     className={`p-3 rounded-xl border-2 transition-all relative ${
                                         !canOverridePrice
-                                            ? 'bg-slate-900/30 border-slate-800 opacity-60 cursor-not-allowed'
+                                            ? 'bg-slate-900/30 border-slate-800 opacity-60 cursor-pointer'
                                             : activeField === 'price'
                                                 ? 'bg-emerald-600/20 border-emerald-500 shadow-lg shadow-emerald-900/20 cursor-pointer'
                                                 : 'bg-slate-900/50 border-slate-700 hover:border-slate-600 cursor-pointer'
                                     }`}
-                                    title={!canOverridePrice ? "Authorized role required for price override" : "Tap to override unit price"}
+                                    title={!canOverridePrice ? (requiredPin ? "Enter 6-digit Shop PIN above to unlock price override" : "Authorized role required for price override") : "Tap to override unit price"}
                                 >
                                     <div className="flex justify-between items-center mb-1">
                                         <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">Unit Price (៛)</span>
                                         {canOverridePrice ? (
                                             <i className="fas fa-tag text-xs text-emerald-400"></i>
                                         ) : (
-                                            <i className="fas fa-lock text-xs text-slate-500"></i>
+                                            <i className="fas fa-lock text-xs text-amber-400"></i>
                                         )}
                                     </div>
                                     <input
@@ -8460,23 +8562,35 @@
                 }
                 activeCount++;
                 const disc = Number(d.discount) || (Number(d.manualDiscount || 0) + Number(d.redemptionAmount || 0));
-                gross += (Number(d.subtotal) || (rev + disc));
+                const sub = Number(d.subtotal) || (rev + disc);
+                const c = Number(d.totalCost) || 0;
+
+                gross += sub;
                 discount += disc;
                 net += rev;
-                cost += (Number(d.totalCost) || 0);
+                cost += c;
                 if (isCash) liveCashSales += rev;
                 else liveBankSales += rev;
             });
 
             const margin = net > 0 ? ((net - cost) / net) * 100 : 0;
             return {
-                gross, discount, net, cost, margin,
-                voidCount, voidAmount, voidCashAmount, voidBankAmount,
-                liveCashSales, liveBankSales, activeCount
+                gross,
+                discount,
+                net,
+                cost,
+                margin,
+                voidCount,
+                voidAmount,
+                voidCashAmount,
+                voidBankAmount,
+                liveCashSales,
+                liveBankSales,
+                activeCount
             };
         }, [currentShift?.id, todaySales, cloudShiftSales]);
 
-        // Single Source of Truth for Live & Submitted Reconciliation Math (Automatically excludes Voided Cash & Voided Bank/KHQR)
+        // Single Source of Truth for Live & Submitted Reconciliation Math (Supports Voided Bank/KHQR & Cash Verification)
         const reconciliation = useMemo(() => {
             const expectedFloat = parseFloat(currentShift?.startCash) || 0;
             const enteredFloat = parseNumber(closingFloatCash);
@@ -8492,12 +8606,23 @@
             const actualCombinedTotal = actualCashTotal + actualBankTotal;
 
             const hasLiveSalesRecords = (shiftSalesStats.activeCount + shiftSalesStats.voidCount) > 0;
-            const expectedCashTotal = hasLiveSalesRecords
+            const rawExpectedCashTotal = hasLiveSalesRecords
                 ? shiftSalesStats.liveCashSales
                 : (parseFloat(currentShift?.totalCashSales) || 0);
-            const expectedBankTotal = hasLiveSalesRecords
+            const rawExpectedBankTotal = hasLiveSalesRecords
                 ? shiftSalesStats.liveBankSales
                 : (parseFloat(currentShift?.totalKHQRSales) || 0);
+            const rawSysGrandTotal = rawExpectedCashTotal + rawExpectedBankTotal;
+
+            const voidCashAmount = shiftSalesStats.voidCashAmount || 0;
+            const voidBankAmount = shiftSalesStats.voidBankAmount || 0;
+            // POS No-Refund Policy: Voided Cash and Bank/KHQR funds remain collected and are always included in expected totals
+            const accountedVoidCash = voidCashAmount;
+            const accountedVoidBank = voidBankAmount;
+            const accountedVoidTotal = accountedVoidCash + accountedVoidBank;
+
+            const expectedCashTotal = rawExpectedCashTotal + accountedVoidCash;
+            const expectedBankTotal = rawExpectedBankTotal + accountedVoidBank;
             const sysGrandTotal = expectedCashTotal + expectedBankTotal;
 
             const cashVariance = actualCashTotal - expectedCashTotal;
@@ -8515,6 +8640,12 @@
                 actualCashTotal,
                 actualBankTotal,
                 actualCombinedTotal,
+                rawExpectedCashTotal,
+                rawExpectedBankTotal,
+                rawSysGrandTotal,
+                accountedVoidCash,
+                accountedVoidBank,
+                accountedVoidTotal,
                 expectedCashTotal,
                 expectedBankTotal,
                 sysGrandTotal,
@@ -8523,7 +8654,6 @@
                 totalVariance
             };
         }, [currentShift, shiftSalesStats, closingFloatCash, actualCashKHR, actualCashUSD, actualBankKHR, actualBankUSD, currentRate, parseNumber]);
-
         const handleApplyBillCount = (total) => {
             if (showBillCounter === 'KHR') {
                 setActualCashKHR(formatNumber(total));
@@ -8638,13 +8768,16 @@
                     difference: reconciliation.totalVariance,
                     status: 'closed',
                     closedBy: userProfile?.name || 'Staff',
-                    totalSales: reconciliation.sysGrandTotal,
-                    totalCashSales: reconciliation.expectedCashTotal,
-                    totalKHQRSales: reconciliation.expectedBankTotal,
+                    totalSales: reconciliation.rawSysGrandTotal,
+                    totalCashSales: reconciliation.rawExpectedCashTotal,
+                    totalKHQRSales: reconciliation.rawExpectedBankTotal,
                     transactionCount: shiftSalesStats.activeCount || currentShift.transactionCount || 0,
+                    accountedVoidCash: reconciliation.accountedVoidCash,
+                    accountedVoidBank: reconciliation.accountedVoidBank,
+                    accountedVoidTotal: reconciliation.accountedVoidTotal,
                     statsGross: shiftSalesStats.gross || 0,
                     statsDiscount: shiftSalesStats.discount || 0,
-                    statsNet: shiftSalesStats.net || reconciliation.sysGrandTotal || 0,
+                    statsNet: shiftSalesStats.net || reconciliation.rawSysGrandTotal || 0,
                     statsCost: shiftSalesStats.cost || 0,
                     statsMargin: shiftSalesStats.margin || 0,
                     statsVoidCount: shiftSalesStats.voidCount || 0,
@@ -9070,6 +9203,11 @@
                                         <span className="text-lg sm:text-xl font-black text-white mt-1 block">
                                             ៛{khrFormatter.format(reconciliation.sysGrandTotal)}
                                         </span>
+                                        {reconciliation.accountedVoidTotal > 0 && (
+                                            <span className="text-[10px] font-mono font-bold text-amber-300 mt-0.5 block">
+                                                Incl. ៛{khrFormatter.format(reconciliation.accountedVoidTotal)} Voided
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="bg-slate-800/80 p-3.5 rounded-xl border border-slate-700 text-center">
                                         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Actual Counted</span>
@@ -9093,6 +9231,17 @@
                                             <span>System Cash: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.expectedCashTotal)}</strong></span>
                                             <span>Counted: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.actualCashTotal)}</strong></span>
                                         </div>
+                                        {shiftSalesStats.voidCashAmount > 0 && (
+                                            <div className="flex justify-between items-center text-[11px] px-2.5 py-1.5 rounded-lg border text-amber-200 bg-amber-500/15 border-amber-500/40">
+                                                <span className="flex items-center gap-1.5 font-semibold">
+                                                    <i className="fas fa-shield-alt text-amber-400"></i>
+                                                    <span>Incl. Voided Cash (No-Refund Policy)</span>
+                                                </span>
+                                                <span className="font-mono font-bold shrink-0 ml-2">
+                                                    +៛{khrFormatter.format(shiftSalesStats.voidCashAmount)}
+                                                </span>
+                                            </div>
+                                        )}
                                         <div className="flex justify-between text-[11px] text-slate-500 font-mono pt-0.5">
                                             <span>KHR: ៛{khrFormatter.format(reconciliation.cashKHR)}</span>
                                             <span>USD: ${reconciliation.cashUSD.toFixed(2)}</span>
@@ -9112,9 +9261,14 @@
                                             <span>Counted: <strong className="text-slate-200">៛{khrFormatter.format(reconciliation.actualBankTotal)}</strong></span>
                                         </div>
                                         {shiftSalesStats.voidBankAmount > 0 && (
-                                            <div className="flex justify-between items-center text-[11px] text-amber-300 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/25">
-                                                <span><i className="fas fa-ban mr-1"></i>Voided Bank/KHQR Excluded:</span>
-                                                <span className="font-mono font-bold">-៛{khrFormatter.format(shiftSalesStats.voidBankAmount)}</span>
+                                            <div className="flex justify-between items-center text-[11px] px-2.5 py-1.5 rounded-lg border text-amber-200 bg-amber-500/15 border-amber-500/40">
+                                                <span className="flex items-center gap-1.5 font-semibold">
+                                                    <i className="fas fa-shield-alt text-amber-400"></i>
+                                                    <span>Incl. Voided Bank (No-Refund Policy)</span>
+                                                </span>
+                                                <span className="font-mono font-bold shrink-0 ml-2">
+                                                    +៛{khrFormatter.format(shiftSalesStats.voidBankAmount)}
+                                                </span>
                                             </div>
                                         )}
                                         <div className="flex justify-between text-[11px] text-slate-500 font-mono pt-0.5">
@@ -9136,7 +9290,9 @@
                                         <span className="text-xs font-bold uppercase tracking-wider text-slate-300 block">Net Shift Variance</span>
                                         <span className="text-[11px] text-slate-400">
                                             {reconciliation.totalVariance === 0
-                                                ? 'Balanced with system sales'
+                                                ? (reconciliation.accountedVoidTotal > 0
+                                                    ? 'Balanced with system sales (Voided included — No-Refund Policy)'
+                                                    : 'Balanced with system sales')
                                                 : reconciliation.totalVariance > 0
                                                     ? 'Surplus (Over)'
                                                     : 'Shortage (Under)'}
@@ -18298,6 +18454,7 @@
         const [bankStateLoading, setBankStateLoading] = useState(false);
         const [bankStateCurrentPage, setBankStateCurrentPage] = useState(1);
         const [bankStateSearchTerm, setBankStateSearchTerm] = useState('');
+        const [bankStateStatusFilter, setBankStateStatusFilter] = useState('ALL'); // 'ALL' | 'VERIFIED' | 'UNVERIFIED'
         const bankStateItemsPerPage = 100;
         const [modal, setModal] = useState({ type: null, data: null });
 
@@ -18316,9 +18473,11 @@
         const [clearedCartsData, setClearedCartsData] = useState([]);
         const [clearedCartsLoading, setClearedCartsLoading] = useState(false);
         const [expandedClearedCartId, setExpandedClearedCartId] = useState(null);
+        const [clearedCartsStatusFilter, setClearedCartsStatusFilter] = useState('ALL'); // 'ALL' | 'delete_item' | 'clear_cart'
 
-        // --- NEW: Cash Drop Sub-Tab State ---
+        // --- NEW: Cash Drop Sub-Tab & Shift Name Filter State ---
         const [cashDropSubTab, setCashDropSubTab] = useState('summary');
+        const [shiftNameFilter, setShiftNameFilter] = useState('ALL'); // 'ALL' | 'AM' | 'PM'
 
         // Create a quick lookup map for product details (like vendorName)
         const productMap = useMemo(() => {
@@ -19249,21 +19408,39 @@
         }, [bankStateData, selectedShopId, shops, userProfile, matchesShopBankFilter]);
 
         const filteredBankStateData = useMemo(() => {
-            if (!bankStateSearchTerm.trim()) return shopFilteredBankStateData;
-            const q = bankStateSearchTerm.toLowerCase().trim();
             return shopFilteredBankStateData.filter(b => {
+                const vlookup = vlookupBankVerification(b);
+                if (bankStateStatusFilter === 'VERIFIED' && !vlookup.isVerified) return false;
+                if (bankStateStatusFilter === 'UNVERIFIED' && vlookup.isVerified) return false;
+
+                if (!bankStateSearchTerm.trim()) return true;
+                const q = bankStateSearchTerm.toLowerCase().trim();
                 const payer = (b.payerName || '').toLowerCase();
                 const bank = (b.sourceBank || b.paymentChannel || '').toLowerCase();
                 const apv = (b.apv || '').toLowerCase();
                 const trx = (b.trxId || '').toLowerCase();
                 const shopObj = resolveShopForBankPayment(b);
                 const shopName = (shopObj?.name || b.merchantName || '').toLowerCase();
-                const vlookup = vlookupBankVerification(b);
                 const invoice = (vlookup.invoiceNo || '').toLowerCase();
                 const statusStr = vlookup.isVerified ? 'verified' : 'unverified';
                 return payer.includes(q) || bank.includes(q) || apv.includes(q) || trx.includes(q) || invoice.includes(q) || shopName.includes(q) || statusStr.includes(q);
             });
-        }, [shopFilteredBankStateData, bankStateSearchTerm, resolveShopForBankPayment, vlookupBankVerification]);
+        }, [shopFilteredBankStateData, bankStateStatusFilter, bankStateSearchTerm, resolveShopForBankPayment, vlookupBankVerification]);
+
+        // Filtered Cleared Carts Log (All / Delete Item / Clear Cart)
+        const filteredClearedCartsData = useMemo(() => {
+            if (clearedCartsStatusFilter === 'ALL') return clearedCartsData;
+            return clearedCartsData.filter(log => {
+                const isDeleteItem = log.actionType === 'delete_item';
+                return clearedCartsStatusFilter === 'delete_item' ? isDeleteItem : !isDeleteItem;
+            });
+        }, [clearedCartsData, clearedCartsStatusFilter]);
+
+        // Filtered Shifts Data by Shift Name (All / AM / PM) for Shift Report & Cash Drop
+        const filteredShiftsData = useMemo(() => {
+            if (shiftNameFilter === 'ALL') return shiftsData;
+            return shiftsData.filter(s => String(s.shiftName || '').trim().toUpperCase() === shiftNameFilter);
+        }, [shiftsData, shiftNameFilter]);
 
         const totalBankStatePages = Math.ceil(filteredBankStateData.length / bankStateItemsPerPage);
         const paginatedBankStateData = useMemo(() => {
@@ -20191,10 +20368,11 @@
                 ws['!cols'] = [{wch:20}, {wch:20}, {wch:15}, {wch:20}];
             }
             else if (activeTab === 'shifts') {
-                const data = shiftsData.map(s => {
+                const data = filteredShiftsData.map(s => {
                     const shop = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
                     return {
                         'Shop': shop,
+                        'Shift': s.shiftName || '-',
                         'Start Time': safeFormatDateTime(s.startTime || s.createdAt, ''),
                         'End Time': safeFormatDateTime(s.endTime, ''),
                         'Cashier': s.cashierName,
@@ -20209,7 +20387,7 @@
                 ws = XLSX.utils.json_to_sheet(data);
             }
             else if (activeTab === 'cash-drop') {
-                const data = shiftsData.filter(s => s.status === 'closed').map(s => {
+                const data = filteredShiftsData.filter(s => s.status === 'closed').map(s => {
                     const shop = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
                     const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                     const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
@@ -20250,6 +20428,24 @@
                 });
                 ws = XLSX.utils.json_to_sheet(data);
                 ws['!cols'] = [{wch:25}, {wch:20}, {wch:25}, {wch:15}, {wch:10}, {wch:20}, {wch:15}, {wch:20}, {wch:20}, {wch:20}];
+            }
+            else if (activeTab === 'cleared-carts') {
+                const data = filteredClearedCartsData.map(log => {
+                    const isDeleteItem = log.actionType === 'delete_item';
+                    const itemSummary = (log.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ');
+                    return {
+                        'Date & Time': safeFormatDateTime(log.timestamp || log.createdAt, 'N/A'),
+                        'Status': isDeleteItem ? 'Delete Item' : 'Clear Cart',
+                        'Cashier': log.cashierName || 'Unknown',
+                        'Shop Name': log.shopName || 'Unknown',
+                        'Terminal': log.deviceName || '-',
+                        'Items Summary': itemSummary || 'No items',
+                        'Total QTY': log.totalQty || 0,
+                        'Total Amount (KHR)': log.totalAmount || 0
+                    };
+                });
+                ws = XLSX.utils.json_to_sheet(data);
+                ws['!cols'] = [{wch:22}, {wch:15}, {wch:18}, {wch:20}, {wch:16}, {wch:40}, {wch:12}, {wch:18}];
             }
 
             if (ws) {
@@ -22158,9 +22354,11 @@
                         {/* NEW: Phase 5 - Shift Report */}
                         {activeTab === 'shifts' && (
                             <ShiftReportList
-                                shifts={shiftsData}
+                                shifts={filteredShiftsData}
                                 loading={shiftsLoading}
                                 userProfile={userProfile}
+                                shiftNameFilter={shiftNameFilter}
+                                onShiftNameFilterChange={setShiftNameFilter}
                                 onOptimisticDeleteShift={(shiftId) => {
                                     setShiftsData(prev => prev.filter(s => s.id !== shiftId));
                                 }}
@@ -22173,34 +22371,57 @@
                         {/* NEW: Phase 6 - Cash Drop Close Report */}
                         {activeTab === 'cash-drop' && (
                             <div className="space-y-4 animate-fade-in-up">
-                                <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700 inline-flex shadow-sm">
-                                    <button
-                                        type="button"
-                                        onClick={() => setCashDropSubTab('summary')}
-                                        className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'summary' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                                    >
-                                        <i className="fas fa-th-large"></i> Total Summary
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setCashDropSubTab('details')}
-                                        className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'details' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                                    >
-                                        <i className="fas fa-list"></i> Detailed List
-                                    </button>
+                                <div className="flex flex-wrap items-center justify-between gap-3">
+                                    <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700 inline-flex shadow-sm">
+                                        <button
+                                            type="button"
+                                            onClick={() => setCashDropSubTab('summary')}
+                                            className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'summary' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                                        >
+                                            <i className="fas fa-th-large"></i> Total Summary
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCashDropSubTab('details')}
+                                            className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${cashDropSubTab === 'details' ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                                        >
+                                            <i className="fas fa-list"></i> Detailed List
+                                        </button>
+                                    </div>
+
+                                    {/* Shift Name Filter: All / AM / PM */}
+                                    <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-xl border border-slate-700 shadow-sm">
+                                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-2.5 pr-1">
+                                            <i className="fas fa-clock text-blue-400 mr-1"></i>Shift:
+                                        </span>
+                                        {['ALL', 'AM', 'PM'].map(sh => (
+                                            <button
+                                                key={sh}
+                                                type="button"
+                                                onClick={() => setShiftNameFilter(sh)}
+                                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                                                    shiftNameFilter === sh
+                                                        ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40'
+                                                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                                                }`}
+                                            >
+                                                {sh === 'ALL' ? 'All' : sh}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
 
                                 {shiftsLoading ? (
                                     <div className="flex justify-center p-8"><div className="loader"></div></div>
-                                ) : shiftsData.filter(s => s.status === 'closed').length === 0 ? (
+                                ) : filteredShiftsData.filter(s => s.status === 'closed').length === 0 ? (
                                     <Card className="p-8 text-center text-slate-400">
                                         <i className="fas fa-cash-register text-4xl mb-3 opacity-50 block"></i>
-                                        <p>No closed shifts found in this period.</p>
+                                        <p>No closed shifts found in this period{shiftNameFilter !== 'ALL' ? ` for ${shiftNameFilter} shift` : ''}.</p>
                                     </Card>
                                 ) : cashDropSubTab === 'summary' ? (
                                     <div className="space-y-4">
                                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                            {Object.values(shiftsData.filter(s => s.status === 'closed').reduce((acc, s) => {
+                                            {Object.values(filteredShiftsData.filter(s => s.status === 'closed').reduce((acc, s) => {
                                                 const shopId = s.shopId;
                                                 if (!acc[shopId]) {
                                                     acc[shopId] = { shopName: shops.find(sh => sh.id === shopId)?.name || 'Unknown', totalNetSale: 0, shiftCount: 0 };
@@ -22229,6 +22450,7 @@
                                                         <tr>
                                                             <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date</th>
                                                             <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                                            <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
                                                             <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase bg-emerald-950/30 text-emerald-400 border-l border-r border-emerald-500/20">NetSale</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash KHR</th>
@@ -22239,7 +22461,7 @@
                                                         </tr>
                                                     </thead>
                                                     <tbody className="divide-y divide-slate-700">
-                                                        {shiftsData.filter(s => s.status === 'closed').map(s => {
+                                                        {filteredShiftsData.filter(s => s.status === 'closed').map(s => {
                                                             const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
                                                             const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                                                             const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
@@ -22248,6 +22470,7 @@
                                                                 <tr key={s.id} className="hover:bg-slate-700/50">
                                                                     <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
                                                                     <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
+                                                                    <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
                                                                     <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-black text-emerald-400 bg-emerald-950/10 border-l border-r border-emerald-500/10 shadow-inner">៛{khrFormatter.format(calcNetSale)}</td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
@@ -22264,7 +22487,7 @@
                                         </TableCard>
                                     </div>
                                 ) : (
-                                    <TableCard title="Cash Drop Detailed List">
+                                    <TableCard title={`Cash Drop Detailed List${shiftNameFilter !== 'ALL' ? ` (${shiftNameFilter} Shift)` : ''}`}>
                                         <div className="overflow-x-auto">
                                             <table className="min-w-full divide-y divide-slate-700">
                                                 <thead className="bg-slate-900/50">
@@ -22282,7 +22505,7 @@
                                                     </tr>
                                                 </thead>
                                                 <tbody className="divide-y divide-slate-700">
-                                                    {shiftsData.filter(s => s.status === 'closed').map(s => {
+                                                    {filteredShiftsData.filter(s => s.status === 'closed').map(s => {
                                                         const shopName = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
                                                         const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                                                         const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
@@ -22316,26 +22539,23 @@
                                 {/* Row 1: Title "Bank Statement - [N] Trx" + Feed Mode on the Same Line */}
                                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-700/80">
                                     <h4 className="text-base sm:text-xl font-bold text-slate-100 flex items-center gap-2">
-                                        <i className="fas fa-university text-emerald-400 text-sm sm:text-base"></i>
+                                        <i className="fas fa-university text-emerald-400"></i>
                                         <span>Bank Statement - {filteredBankStateData.length} Trx</span>
                                     </h4>
-                                    <span
-                                        className={`px-2.5 sm:px-3 py-1 rounded-xl text-[11px] sm:text-xs font-bold border flex items-center gap-1.5 shrink-0 ${
-                                            effectiveBankStateFeedMode === 'live'
-                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                                : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
-                                        }`}
-                                        title="Configured in Settings → KHQR & ABA PayWay Configuration"
-                                    >
+                                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold border inline-flex items-center gap-1.5 ${
+                                        effectiveBankStateFeedMode === 'live'
+                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                            : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                                    }`}>
                                         <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
-                                        <span>Mode: {effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
+                                        <span>{effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
                                     </span>
                                 </div>
 
-                                {/* Row 2: Search Box + Bypass (Icon) + Clean Stray IDs (Icon) + Smart Live Refresh (Icon) on the Same Line (Desktop & Mobile) */}
-                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-row items-center gap-1.5 sm:gap-2">
+                                {/* Row 2: Search Box + Status Filter + Bypass (Icon) + Clean Stray IDs (Icon) + Smart Live Refresh (Icon) */}
+                                <div className="mb-4 pb-4 border-b border-slate-700 flex flex-wrap sm:flex-nowrap items-center gap-1.5 sm:gap-2">
                                     {/* 1. Search Box */}
-                                    <div className="relative flex-1 min-w-0">
+                                    <div className="relative flex-1 min-w-[160px]">
                                         <input
                                             type="text"
                                             value={bankStateSearchTerm}
@@ -22353,6 +22573,23 @@
                                                 <i className="fas fa-times-circle text-xs"></i>
                                             </button>
                                         )}
+                                    </div>
+
+                                    {/* 1B. Status Filter (All / Verified / Unverified) */}
+                                    <div className="relative shrink-0">
+                                        <select
+                                            value={bankStateStatusFilter}
+                                            onChange={e => { setBankStateStatusFilter(e.target.value); setBankStateCurrentPage(1); }}
+                                            className="bg-slate-700 text-slate-100 pl-3 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none text-xs sm:text-sm font-bold cursor-pointer appearance-none h-[38px]"
+                                            title="Filter Bank Statement by Verification Status"
+                                        >
+                                            <option value="ALL">All Status</option>
+                                            <option value="VERIFIED">Verified</option>
+                                            <option value="UNVERIFIED">Unverified</option>
+                                        </select>
+                                        <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-400">
+                                            <i className="fas fa-chevron-down text-[10px]"></i>
+                                        </div>
                                     </div>
 
                                     {/* 2. Bypass DB Status Icon */}
@@ -22696,11 +22933,40 @@
 
                         {/* NEW: Cleared Carts Log */}
                         {activeTab === 'cleared-carts' && (
-                            <TableCard title={`Cleared Carts Log - ${clearedCartsData.length} Records`}>
+                            <Card className="p-3 sm:p-5">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-700">
+                                    <h4 className="text-base sm:text-xl font-semibold text-slate-200 flex items-center gap-2">
+                                        <i className="fas fa-trash-alt text-rose-400 text-sm sm:text-base"></i>
+                                        <span>Cleared Carts Log - {filteredClearedCartsData.length} Records</span>
+                                    </h4>
+
+                                    {/* Status Filter: All / Delete Item / Clear Cart */}
+                                    <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-700 self-start sm:self-auto">
+                                        {[
+                                            { id: 'ALL', label: 'All Status', activeClass: 'bg-blue-600 text-white' },
+                                            { id: 'delete_item', label: 'Delete Item', activeClass: 'bg-amber-500 text-slate-950' },
+                                            { id: 'clear_cart', label: 'Clear Cart', activeClass: 'bg-rose-600 text-white' }
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.id}
+                                                type="button"
+                                                onClick={() => setClearedCartsStatusFilter(opt.id)}
+                                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap ${
+                                                    clearedCartsStatusFilter === opt.id
+                                                        ? `${opt.activeClass} shadow-sm`
+                                                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
                                 {clearedCartsLoading ? (
                                     <p className="text-center p-4">Loading cleared carts...</p>
-                                ) : clearedCartsData.length === 0 ? (
-                                    <p className="text-center p-4 text-slate-400">No cleared carts found in this period.</p>
+                                ) : filteredClearedCartsData.length === 0 ? (
+                                    <p className="text-center p-4 text-slate-400">No cleared carts found for the selected filter.</p>
                                 ) : (
                                     <div className="overflow-x-auto">
                                         <table className="min-w-full divide-y divide-slate-700">
@@ -22708,6 +22974,7 @@
                                                 <tr>
                                                     <th className="px-4 py-3 w-10"></th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Date & Time</th>
+                                                    <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop Name</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Items Summary</th>
@@ -22717,8 +22984,9 @@
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
-                                                {clearedCartsData.map(log => {
+                                                {filteredClearedCartsData.map(log => {
                                                     const isExpanded = expandedClearedCartId === log.id;
+                                                    const isDeleteItem = log.actionType === 'delete_item';
                                                     const itemSummary = (log.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ');
                                                     return (
                                                         <React.Fragment key={log.id}>
@@ -22731,6 +22999,19 @@
                                                                 </td>
                                                                 <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">
                                                                     {safeFormatDateTime(log.timestamp || log.createdAt, 'N/A')}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-center whitespace-nowrap">
+                                                                    {isDeleteItem ? (
+                                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                                                                            <i className="fas fa-minus-circle text-[10px]"></i>
+                                                                            <span>Delete Item</span>
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/40">
+                                                                            <i className="fas fa-trash-alt text-[10px]"></i>
+                                                                            <span>Clear Cart</span>
+                                                                        </span>
+                                                                    )}
                                                                 </td>
                                                                 <td className="px-4 py-3 text-sm text-slate-200">{log.cashierName}</td>
                                                                 <td className="px-4 py-3 text-sm text-slate-400">{log.shopName}</td>
@@ -22745,8 +23026,10 @@
                                                             </tr>
                                                             {isExpanded && (
                                                                 <tr className="bg-slate-900/60">
-                                                                    <td colSpan="8" className="px-8 py-3 border-l-4 border-rose-500">
-                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-2">Cleared Items ({log.items?.length || 0})</div>
+                                                                    <td colSpan="9" className={`px-8 py-3 border-l-4 ${isDeleteItem ? 'border-amber-500' : 'border-rose-500'}`}>
+                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-2">
+                                                                            {isDeleteItem ? 'Deleted Item from Cart' : 'Cleared Items'} ({log.items?.length || 0})
+                                                                        </div>
                                                                         <div className="space-y-1">
                                                                             {(log.items || []).map((item, idx) => (
                                                                                 <div key={idx} className="flex justify-between text-xs text-slate-300 py-1 border-b border-slate-800 last:border-0">
@@ -22765,7 +23048,7 @@
                                         </table>
                                     </div>
                                 )}
-                            </TableCard>
+                            </Card>
                         )}
                     </>
                 )}
@@ -22773,8 +23056,8 @@
         );
     };
 
-    // --- UPDATED: Shift Report Sub-Component (Pure Presentation + Optimistic 0ms Delete/Edit) ---
-    const ShiftReportList = ({ shifts, loading, userProfile, onOptimisticDeleteShift, onOptimisticUpdateShift }) => {
+    // --- UPDATED: Shift Report Sub-Component (Pure Presentation + Optimistic 0ms Delete/Edit + AM/PM Shift Filter) ---
+    const ShiftReportList = ({ shifts, loading, userProfile, shiftNameFilter = 'ALL', onShiftNameFilterChange, onOptimisticDeleteShift, onOptimisticUpdateShift }) => {
         const { shops } = useData(); 
         const canEdit = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
         
@@ -22998,38 +23281,65 @@
                                                 </div>
                                             </div>
 
-                                            {/* Note & Info */}
+                                            {/* Closing Note */}
                                             <div>
-                                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-700 pb-1">
-                                                    <i className="fas fa-comment-alt text-slate-500"></i> Handover / Correction Note
-                                                </label>
-                                                <textarea value={editData.closeNote || ''} onChange={(e) => setEditData({ ...editData, closeNote: e.target.value })} rows="2" className="w-full bg-slate-900/40 text-white px-3 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm resize-none"></textarea>
+                                                <label className="block text-xs font-medium text-slate-400 mb-1">Handover / Closing Note</label>
+                                                <textarea
+                                                    rows="2"
+                                                    value={editData.closeNote || ''}
+                                                    onChange={(e) => setEditData({ ...editData, closeNote: e.target.value })}
+                                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-sm"
+                                                    placeholder="Optional shift note..."
+                                                />
                                             </div>
                                         </>
                                     )}
-
-                                    <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/10 p-2.5 rounded-lg border border-amber-500/20">
-                                        <i className="fas fa-info-circle shrink-0"></i>
-                                        <span>Editing these values will automatically recalculate the shift variance (over/short) upon saving.</span>
-                                    </div>
                                 </div>
                             </ModalBody>
                             <ModalFooter>
-                                <button type="button" onClick={() => setEditData(null)} className="bg-slate-700 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-slate-600 transition text-sm">Cancel</button>
-                                <button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white font-bold py-2.5 px-8 rounded-lg hover:bg-blue-500 transition flex items-center gap-2 text-sm shadow-lg shadow-blue-600/20 disabled:opacity-50">
-                                    {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check-double"></i>} Commit Changes
+                                <button type="button" onClick={() => setEditData(null)} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-slate-500 transition">Cancel</button>
+                                <button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-50">
+                                    {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-save"></i>}
+                                    <span>Save Changes</span>
                                 </button>
                             </ModalFooter>
                         </form>
                     </Modal>
                 )}
 
-                <TableCard title="Shift Report">
-                    {loading ? <p className="text-center p-4">Loading shifts...</p> : shifts.length === 0 ? <p className="text-center p-4 text-slate-400">No shifts found in this period.</p> : (
+                <Card className="p-3 sm:p-5">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-700">
+                        <h4 className="text-base sm:text-xl font-semibold text-slate-200 flex items-center gap-2">
+                            <i className="fas fa-clock text-blue-400 text-sm sm:text-base"></i>
+                            <span>Shift Report{shiftNameFilter !== 'ALL' ? ` (${shiftNameFilter} Shift)` : ''}</span>
+                        </h4>
+                        {typeof onShiftNameFilterChange === 'function' && (
+                            <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-700 self-start sm:self-auto">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-2 pr-1">Shift:</span>
+                                {['ALL', 'AM', 'PM'].map(sh => (
+                                    <button
+                                        key={sh}
+                                        type="button"
+                                        onClick={() => onShiftNameFilterChange(sh)}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                                            shiftNameFilter === sh
+                                                ? 'bg-blue-600 text-white shadow-sm'
+                                                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                                        }`}
+                                    >
+                                        {sh === 'ALL' ? 'All' : sh}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <div className="overflow-x-auto">
+                    {loading ? <p className="text-center p-4">Loading shifts...</p> : shifts.length === 0 ? <p className="text-center p-4 text-slate-400">No shifts found in this period{shiftNameFilter !== 'ALL' ? ` for ${shiftNameFilter} shift` : ''}.</p> : (
                         <table className="min-w-full divide-y divide-slate-700">
                             <thead className="bg-slate-900/50">
                                 <tr>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
+                                    <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Shift</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Start Time</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">End Time</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Cashier</th>
@@ -23052,6 +23362,11 @@
                                     return (
                                     <tr key={shift.id} className="hover:bg-slate-700/50">
                                         <td className="px-4 py-3 text-sm text-slate-200">{shopName}</td>
+                                        <td className="px-4 py-3 text-sm text-center">
+                                            <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 text-xs font-bold">
+                                                {shift.shiftName || '-'}
+                                            </span>
+                                        </td>
                                         <td className="px-4 py-3 text-sm text-slate-300">{safeFormatDateTime(shift.startTime || shift.createdAt, '-')}</td>
                                         <td className="px-4 py-3 text-sm text-slate-400">{safeFormatDateTime(shift.endTime, '-')}</td>
                                         <td className="px-4 py-3 text-sm text-slate-300">{shift.cashierName}</td>
@@ -23077,7 +23392,8 @@
                             </tbody>
                         </table>
                     )}
-                </TableCard>
+                    </div>
+                </Card>
             </React.Fragment>
         );
     };
@@ -23414,8 +23730,20 @@
         const [loading, setLoading] = useState(false);
         const [modalInfo, setModalInfo] = useState({ show: false, title: '', message: '', isError: false });
 
-        const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
-        const selectedShop = shops.find(s => s.id === shopId);
+        const managedShops = useMemo(() => {
+            const stockShops = shops.filter(s => s.manageStock);
+            if (!userProfile || userProfile.role === 'Admin') return stockShops;
+            const assigned = userProfile.assignedShops || [];
+            return stockShops.filter(s => assigned.includes(s.id));
+        }, [shops, userProfile]);
+
+        useEffect(() => {
+            if (managedShops.length > 0 && (!shopId || !managedShops.some(s => s.id === shopId))) {
+                setShopId(managedShops[0].id);
+            }
+        }, [managedShops, shopId]);
+
+        const selectedShop = managedShops.find(s => s.id === shopId);
         const currentStock = product.stockByShop?.[shopId] || 0;
 
         // Calculate new stock for display preview
@@ -23837,7 +24165,13 @@
                             className="w-full bg-slate-900 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-cyan-500 outline-none text-xs font-bold appearance-none cursor-pointer h-[40px]"
                             title="Select Shop View"
                         >
-                            <option value="ALL">All Shop View ({managedShops.length})</option>
+                            {(userProfile?.role === 'Admin' || managedShops.length > 1) && (
+                                <option value="ALL">
+                                    {userProfile?.role === 'Admin'
+                                        ? `All Shop View (${managedShops.length})`
+                                        : `All Assigned Shops (${managedShops.length})`}
+                                </option>
+                            )}
                             {managedShops.map((shop) => (
                                 <option key={shop.id} value={shop.id}>
                                     {shop.name} {Number(shop.saleMargin) > 0 ? `(${shop.saleMargin}%)` : ''}
@@ -23907,7 +24241,12 @@
     // Component for rendering the product table (Single-Row Auto-Accordion Expand/Hide & Multi-Shop Matrix)
     const ProductTable = memo(({ products, onAction, userProfile, fifoValuationMap, onApplySuggestedPrice, focusedShopId = 'ALL' }) => {
         const { shops } = useData();
-        const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
+        const managedShops = useMemo(() => {
+            const stockShops = shops.filter(s => s.manageStock);
+            if (!userProfile || userProfile.role === 'Admin') return stockShops;
+            const assigned = userProfile.assignedShops || [];
+            return stockShops.filter(s => assigned.includes(s.id));
+        }, [shops, userProfile]);
         // Single active expanded product ID: expanding 1 product automatically hides any previously expanded product
         const [activeExpandedProductId, setActiveExpandedProductId] = useState(null);
 
@@ -23964,7 +24303,7 @@
                         </thead>
                         <tbody className="divide-y divide-slate-700/70">
                             {products.map(p => {
-                                const totalStock = p.stockByShop ? Object.values(p.stockByShop).reduce((a, b) => (Number(a) || 0) + (Number(b) || 0), 0) : 0;
+                                const totalStock = managedShops.reduce((sum, s) => sum + (Number(p.stockByShop?.[s.id]) || 0), 0);
                                 const minStock = parseInt(p.minStock) || 0;
                                 const isLowStock = minStock > 0 && totalStock < minStock;
                                 const prodFifo = fifoValuationMap?.get(p.id);
@@ -23976,7 +24315,14 @@
                                     ? focusedShopFifo.fifoUnitCost
                                     : (prodFifo?.globalFifoUnitCost ?? (Number(p.cost) || 0));
                                 const baseCost = Number(p.cost) || 0;
-                                const currentPrice = Number(p.price) || 0;
+                                const basePrice = Number(p.price) || 0;
+                                const currentPrice = focusedShopObj
+                                    ? getEffectiveShopPrice(p, focusedShopObj.id)
+                                    : basePrice;
+                                const hasCustomFocusedPrice = focusedShopObj
+                                    ? (Number(p.priceByShop?.[focusedShopObj.id]) > 0)
+                                    : false;
+                                const customPriceShopsCount = managedShops.filter(s => Number(p.priceByShop?.[s.id]) > 0).length;
                                 const actualMarginPct = currentPrice > 0 ? ((currentPrice - displayFifoCost) / currentPrice) * 100 : 0;
                                 const displayTotalValue = focusedShopObj
                                     ? (focusedShopFifo ? focusedShopFifo.totalFifoValue : ((Number(p.stockByShop?.[focusedShopObj.id]) || 0) * baseCost))
@@ -24072,7 +24418,23 @@
                                                 <div className="text-sm font-black text-emerald-400 font-mono">
                                                     ៛{khrFormatter.format(currentPrice)}
                                                 </div>
-                                                <div className="mt-0.5">
+                                                <div className="mt-0.5 flex items-center justify-end gap-1 flex-wrap">
+                                                    {focusedShopObj && hasCustomFocusedPrice && (
+                                                        <span
+                                                            className="inline-block px-1.5 py-0.2 rounded text-[9px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+                                                            title={`Custom price for ${focusedShopObj.name} (Base Price: ៛${khrFormatter.format(basePrice)})`}
+                                                        >
+                                                            Shop Price
+                                                        </span>
+                                                    )}
+                                                    {!focusedShopObj && customPriceShopsCount > 0 && (
+                                                        <span
+                                                            className="inline-block px-1.5 py-0.2 rounded text-[9px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40"
+                                                            title={`${customPriceShopsCount} shop(s) have a custom selling price. Click row to expand.`}
+                                                        >
+                                                            {customPriceShopsCount} Shop Price{customPriceShopsCount > 1 ? 's' : ''}
+                                                        </span>
+                                                    )}
                                                     <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
                                                         actualMarginPct >= 20
                                                             ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
@@ -24128,7 +24490,7 @@
                                                                             {userProfile?.role === 'Admin' && sf.suggestedPrice !== currentPrice && onApplySuggestedPrice && (
                                                                                 <button
                                                                                     type="button"
-                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, focusedShopObj.name, sf.targetMarginPct)}
+                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, focusedShopObj.name, sf.targetMarginPct, focusedShopObj.id)}
                                                                                     className="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black shadow transition"
                                                                                 >
                                                                                     Apply
@@ -24170,7 +24532,9 @@
                                                             {managedShops.map(shop => {
                                                                 const qty = Number(p.stockByShop?.[shop.id]) || 0;
                                                                 const sf = prodFifo?.byShop?.[shop.id];
-                                                                const hasSugDiff = sf && sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
+                                                                const shopEffectivePrice = getEffectiveShopPrice(p, shop.id);
+                                                                const isCustomShopPrice = Number(p.priceByShop?.[shop.id]) > 0;
+                                                                const hasSugDiff = sf && sf.targetMarginPct > 0 && sf.suggestedPrice > shopEffectivePrice;
                                                                 return (
                                                                     <button
                                                                         key={shop.id}
@@ -24189,10 +24553,13 @@
                                                                                     ? 'bg-red-950/40 text-red-300 border-red-500/40 hover:bg-red-900/50'
                                                                                     : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-blue-400'
                                                                         }`}
-                                                                        title={`${shop.name}: ${qty} qty | FIFO Cost: ៛${khrFormatter.format(Math.round(sf?.fifoUnitCost || baseCost))} | Sug (${sf?.targetMarginPct || 0}%): ៛${khrFormatter.format(sf?.suggestedPrice || currentPrice)}${userProfile?.role === 'Admin' ? ' (Click to Adjust Stock)' : ''}`}
+                                                                        title={`${shop.name}: ${qty} qty | Price: ៛${khrFormatter.format(shopEffectivePrice)}${isCustomShopPrice ? ' (Custom)' : ' (Base)'} | FIFO Cost: ៛${khrFormatter.format(Math.round(sf?.fifoUnitCost || baseCost))} | Sug (${sf?.targetMarginPct || 0}%): ៛${khrFormatter.format(sf?.suggestedPrice || shopEffectivePrice)}${userProfile?.role === 'Admin' ? ' (Click to Adjust Stock)' : ''}`}
                                                                     >
                                                                         <span className="text-slate-400 font-sans font-semibold">{getShortShopCode(shop.name)}:</span>
                                                                         <strong className={qty > 0 ? 'text-emerald-400' : 'text-slate-500'}>{qty}</strong>
+                                                                        {isCustomShopPrice && (
+                                                                            <span className="text-[9px] text-indigo-300 font-bold" title="Custom Shop Selling Price">• ៛{khrFormatter.format(shopEffectivePrice)}</span>
+                                                                        )}
                                                                         {hasSugDiff && (
                                                                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" title="Current price is below shop target margin suggestion"></span>
                                                                         )}
@@ -24249,7 +24616,7 @@
                                                                 </span>
                                                             </div>
                                                             <span className="text-[11px] text-slate-400 font-mono">
-                                                                Current Selling Price: <strong className="text-emerald-400">៛{khrFormatter.format(currentPrice)}</strong>
+                                                                Base Selling Price: <strong className="text-emerald-400">៛{khrFormatter.format(basePrice)}</strong>
                                                             </span>
                                                         </div>
 
@@ -24257,17 +24624,19 @@
                                                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
                                                             {managedShops.map(shop => {
                                                                 const qty = Number(p.stockByShop?.[shop.id]) || 0;
+                                                                const shopSellingPrice = getEffectiveShopPrice(p, shop.id);
+                                                                const isCustomShopPrice = Number(p.priceByShop?.[shop.id]) > 0;
                                                                 const sf = prodFifo?.byShop?.[shop.id] || {
                                                                     qty,
                                                                     fifoUnitCost: baseCost,
                                                                     totalFifoValue: qty * baseCost,
                                                                     targetMarginPct: Number(shop.saleMargin) || 0,
-                                                                    suggestedPrice: currentPrice,
+                                                                    suggestedPrice: shopSellingPrice,
                                                                     activeBatchCount: 0,
                                                                     layers: []
                                                                 };
-                                                                const isBelowSuggested = sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
-                                                                const shopActualMargin = currentPrice > 0 ? ((currentPrice - sf.fifoUnitCost) / currentPrice) * 100 : 0;
+                                                                const isBelowSuggested = sf.targetMarginPct > 0 && sf.suggestedPrice > shopSellingPrice;
+                                                                const shopActualMargin = shopSellingPrice > 0 ? ((shopSellingPrice - sf.fifoUnitCost) / shopSellingPrice) * 100 : 0;
 
                                                                 return (
                                                                     <div
@@ -24300,6 +24669,19 @@
                                                                                         <i className="fas fa-pen text-[9px]"></i>
                                                                                     </button>
                                                                                 )}
+                                                                            </div>
+
+                                                                            {/* Active Shop Selling Price Pill */}
+                                                                            <div className="flex items-center justify-between bg-slate-950/70 px-2 py-1.5 rounded-lg border border-slate-800/90 mb-2">
+                                                                                <div className="flex items-center gap-1">
+                                                                                    <span className="text-[9px] uppercase font-bold text-slate-400">Sell Price</span>
+                                                                                    <span className={`px-1 py-0.2 rounded text-[8px] font-bold uppercase ${isCustomShopPrice ? 'bg-indigo-500/25 text-indigo-300 border border-indigo-500/40' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
+                                                                                        {isCustomShopPrice ? 'Custom' : 'Base'}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <span className="text-xs font-black font-mono text-emerald-400">
+                                                                                    ៛{khrFormatter.format(shopSellingPrice)}
+                                                                                </span>
                                                                             </div>
 
                                                                             {/* Stock & FIFO Cost Metrics */}
@@ -24346,12 +24728,12 @@
                                                                                 )}
                                                                             </div>
 
-                                                                            {userProfile?.role === 'Admin' && sf.targetMarginPct > 0 && sf.suggestedPrice > 0 && sf.suggestedPrice !== currentPrice ? (
+                                                                            {userProfile?.role === 'Admin' && sf.targetMarginPct > 0 && sf.suggestedPrice > 0 && sf.suggestedPrice !== shopSellingPrice ? (
                                                                                 <button
                                                                                     type="button"
-                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, shop.name, sf.targetMarginPct)}
+                                                                                    onClick={() => onApplySuggestedPrice(p, sf.suggestedPrice, shop.name, sf.targetMarginPct, shop.id)}
                                                                                     className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black shadow transition shrink-0"
-                                                                                    title={`Apply ៛${khrFormatter.format(sf.suggestedPrice)} as Product Selling Price`}
+                                                                                    title={`Apply ៛${khrFormatter.format(sf.suggestedPrice)} as ${shop.name}'s Selling Price`}
                                                                                 >
                                                                                     Apply
                                                                                 </button>
@@ -24490,23 +24872,33 @@
         const [productModal, setProductModal] = useState({ show: false, product: null, mode: 'edit' });
         const [isGeneratingCode, setIsGeneratingCode] = useState(false);
         
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {} };
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {}, priceByShop: {} };
 
-        // Identify managed shops for calculation
-        const managedShops = useMemo(() => shops.filter(s => s.manageStock), [shops]);
+        // Identify managed shops scoped to user's assigned shops (Admins see all managed shops)
+        const managedShops = useMemo(() => {
+            const stockShops = shops.filter(s => s.manageStock);
+            if (!userProfile || userProfile.role === 'Admin') return stockShops;
+            const assigned = userProfile.assignedShops || [];
+            return stockShops.filter(s => assigned.includes(s.id));
+        }, [shops, userProfile]);
 
-        // ============================================================================
-        // SMART FIFO COST WITH QTY & SELLING PRICE SUGGESTION ENGINE (BY SHOP)
-        // Reconstructs the active remaining inventory layers for each (productId, shopId)
-        // from chronological Audited POs and Completed Internal Transfers.
-        // Because older stock is sold first under FIFO, the current On-Hand Stock (`qty`)
-        // consists of the most recent incoming cost batches up to `qty`.
-        // ============================================================================
+        // Auto-focus single assigned shop for non-Admin users and guard against unauthorized shop selection
+        useEffect(() => {
+            if (userProfile?.role !== 'Admin') {
+                if (managedShops.length === 1) {
+                    setFocusedShopId(managedShops[0].id);
+                } else if (focusedShopId !== 'ALL' && !managedShops.some(s => s.id === focusedShopId)) {
+                    setFocusedShopId('ALL');
+                }
+            }
+        }, [managedShops, userProfile, focusedShopId]);
+
+        // Smart FIFO Valuation & Suggested Selling Price Map per Product & Shop
         const fifoValuationMap = useMemo(() => {
             const map = new Map();
             if (!allProducts || allProducts.length === 0) return map;
 
-            // 1. Index incoming stock layers per `${productId}_${shopId}` from Audited POs & Done Transfers
+            // 1. Build incoming cost layers per (productId, shopId) from Audited POs & Completed Transfers
             const incomingLayersByProdShop = new Map();
             const pushIncomingLayer = (productId, shopId, qty, unitCost, dateMs, refNo, sourceType) => {
                 if (!productId || !shopId || qty <= 0 || unitCost <= 0) return;
@@ -24660,20 +25052,26 @@
             return map;
         }, [allProducts, allPOs, allTransfers, managedShops]);
 
-        // Quick 1-Click Handler to apply a Shop's FIFO Suggested Selling Price to the Product
-        const handleApplySuggestedPrice = useCallback((product, newSuggestedPrice, shopName, marginPct) => {
+        // Quick 1-Click Handler to apply a Shop's FIFO Suggested Selling Price to the Product (per-shop when shopId is passed)
+        const handleApplySuggestedPrice = useCallback((product, newSuggestedPrice, shopName, marginPct, shopId = null) => {
             if (!product || !product.id || !newSuggestedPrice) return;
             const cleanPrice = Math.round(Number(newSuggestedPrice) || 0);
+            const updatePayload = shopId
+                ? { priceByShop: { ...(product.priceByShop || {}), [shopId]: cleanPrice } }
+                : { price: cleanPrice };
+
             if (window.SolarisCollectionMutator) {
-                window.SolarisCollectionMutator.upsertDoc("products", product.id, { price: cleanPrice }, false);
+                window.SolarisCollectionMutator.upsertDoc("products", product.id, updatePayload, false);
             } else {
-                db.collection("products").doc(product.id).update({ price: cleanPrice }).catch(() => {});
+                db.collection("products").doc(product.id).update(updatePayload).catch(() => {});
             }
             setModal({
                 type: 'message',
                 data: {
                     title: 'Suggested Price Applied',
-                    message: `Updated selling price for "${product.name}" to ៛${khrFormatter.format(cleanPrice)} based on ${shopName}'s ${marginPct}% Sale Margin.`
+                    message: shopId
+                        ? `Updated ${shopName}'s selling price for "${product.name}" to ៛${khrFormatter.format(cleanPrice)} based on ${marginPct}% Sale Margin.`
+                        : `Updated base selling price for "${product.name}" to ៛${khrFormatter.format(cleanPrice)} based on ${shopName}'s ${marginPct}% Sale Margin.`
                 }
             });
         }, []);
@@ -24835,7 +25233,6 @@
                         if (json.length === 0) throw new Error("File is empty or wrong format.");
                         
                         let created = 0, updated = 0, errors = 0;
-                        const managedShops = shops.filter(s => s.manageStock); // Get managed shops to check for columns
 
                         for (const row of json) {
                             try {
@@ -24958,14 +25355,14 @@
         };
         
         const handleExport = async () => {
-            const managedShops = shops.filter(s => s.manageStock);
             const shopColumns = managedShops.flatMap(s => [
                 `${s.name} (Qty)`,
+                `${s.name} (Shop Price ៛)`,
                 `${s.name} (FIFO Unit Cost ៛)`,
                 `${s.name} (Total FIFO Cost ៛)`,
                 `${s.name} (Suggested Price @ ${Number(s.saleMargin) || 0}% ៛)`
             ]);
-            const headers = ['Code', 'Barcode', 'Name', 'Category', 'Vendor', 'Min Stock', 'Base Cost', 'Global FIFO Cost', 'Current Price', 'Note', ...shopColumns];
+            const headers = ['Code', 'Barcode', 'Name', 'Category', 'Vendor', 'Min Stock', 'Base Cost', 'Global FIFO Cost', 'Base Price', 'Note', ...shopColumns];
 
             const data = filteredProducts.map(p => {
                 const prodFifo = fifoValuationMap.get(p.id);
@@ -24978,16 +25375,18 @@
                     'Min Stock': p.minStock || 0,
                     'Base Cost': p.cost || 0,
                     'Global FIFO Cost': Math.round(prodFifo?.globalFifoUnitCost ?? (p.cost || 0)),
-                    'Current Price': p.price || 0,
+                    'Base Price': p.price || 0,
                     'Note': p.note || ''
                 };
                 managedShops.forEach(shop => {
                     const sf = prodFifo?.byShop?.[shop.id];
                     const qty = p.stockByShop?.[shop.id] || 0;
+                    const shopSellPrice = getEffectiveShopPrice(p, shop.id);
                     row[`${shop.name} (Qty)`] = qty;
+                    row[`${shop.name} (Shop Price ៛)`] = shopSellPrice;
                     row[`${shop.name} (FIFO Unit Cost ៛)`] = Math.round(sf?.fifoUnitCost ?? (p.cost || 0));
                     row[`${shop.name} (Total FIFO Cost ៛)`] = Math.round(sf?.totalFifoValue ?? (qty * (p.cost || 0)));
-                    row[`${shop.name} (Suggested Price @ ${Number(shop.saleMargin) || 0}% ៛)`] = sf?.suggestedPrice ?? (p.price || 0);
+                    row[`${shop.name} (Suggested Price @ ${Number(shop.saleMargin) || 0}% ៛)`] = sf?.suggestedPrice ?? shopSellPrice;
                 });
                 return row;
             });
@@ -25003,9 +25402,6 @@
         };
 
         const handleDownloadTemplate = () => {
-            // Get shops that manage stock
-            const managedShops = shops.filter(s => s.manageStock);
-            
             // Create a sample row with basic fields
             const sampleRow = { 
                 code: 'P001', 
@@ -25073,7 +25469,7 @@
             const focusedShopObj = managedShops.find(s => s.id === focusedShopId) || null;
 
             filteredProducts.forEach(p => {
-                const totalStock = p.stockByShop ? Object.values(p.stockByShop).reduce((a, b) => (Number(a) || 0) + (Number(b) || 0), 0) : 0;
+                const totalStock = managedShops.reduce((acc, s) => acc + (Number(p.stockByShop?.[s.id]) || 0), 0);
                 const prodFifo = fifoValuationMap?.get(p.id);
                 const focusedShopFifo = focusedShopObj ? prodFifo?.byShop?.[focusedShopObj.id] : null;
                 const baseCost = Number(p.cost) || 0;
@@ -25111,6 +25507,7 @@
                     productToEdit={productModal.product} 
                     mode={productModal.mode}
                     fifoInfo={productModal.product?.id ? fifoValuationMap.get(productModal.product.id) : null}
+                    userProfile={userProfile}
                     onSave={handleSaveProduct} 
                     onClose={() => setProductModal({ show: false, product: null, mode: 'edit' })} 
                 />}
@@ -25179,15 +25576,21 @@
     };
 
 
-    const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit', fifoInfo = null }) => {
+    const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit', fifoInfo = null, userProfile = null }) => {
         const { vendors, categories, products, shops } = useData(); 
-        // PHASE 1: Added categoryId, category, and optional 1:1 imageUrl fields
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {} };
+        // PHASE 1: Added categoryId, category, optional 1:1 imageUrl, and optional multi-shop priceByShop fields
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, imageUrl: '', stockByShop: {}, priceByShop: {} };
         const [formData, setFormData] = useState(initialFormState);
         const [isProcessingImage, setIsProcessingImage] = useState(false);
         const photoFileInputRef = useRef(null);
         
-        const managedShops = useMemo(() => shops.filter(s => s.manageStock).sort((a,b) => a.name.localeCompare(b.name)), [shops]);
+        const managedShops = useMemo(() => {
+            const stockShops = shops.filter(s => s.manageStock);
+            const allowed = (!userProfile || userProfile.role === 'Admin')
+                ? stockShops
+                : stockShops.filter(s => (userProfile.assignedShops || []).includes(s.id));
+            return allowed.sort((a, b) => a.name.localeCompare(b.name));
+        }, [shops, userProfile]);
 
         // Helper: Center-crops any uploaded image into a 1:1 square (320x320) compressed WebP data URL
         const handleProductPhotoUpload = (e) => {
@@ -25393,6 +25796,18 @@
             }
         };
 
+        const handleShopPriceChange = (e, shopId) => {
+            const { value } = e.target;
+            if (value === '') {
+                setFormData(prev => ({ ...prev, priceByShop: { ...(prev.priceByShop || {}), [shopId]: '' } }));
+            } else {
+                const newPrice = parseFloat(value);
+                if (!isNaN(newPrice) && newPrice >= 0) {
+                    setFormData(prev => ({ ...prev, priceByShop: { ...(prev.priceByShop || {}), [shopId]: newPrice } }));
+                }
+            }
+        };
+
         const handleSubmit = (e) => { 
             e.preventDefault(); 
             
@@ -25409,15 +25824,19 @@
                 return;
             }
 
-            // 3. Stock Sanitation (Blank-yet-zero logic)
+            // 3. Stock & Multi-Shop Price Sanitation (Blank-yet-zero logic; preserves unassigned shops)
             const sanitizedStock = { ...(formData.stockByShop || {}) };
+            const sanitizedPrices = { ...(formData.priceByShop || {}) };
             managedShops.forEach(shop => {
                 // Convert any empty strings in the state to numeric 0 for the database
                 sanitizedStock[shop.id] = Number(sanitizedStock[shop.id]) || 0;
+                const rawShopPrice = Number(sanitizedPrices[shop.id]);
+                // Store 0 when blank/null/<=0 so Firestore merge cleanly resets it to fallback to base product.price
+                sanitizedPrices[shop.id] = rawShopPrice > 0 ? rawShopPrice : 0;
             });
 
             // 4. Final Save call
-            const finalData = { ...formData, stockByShop: sanitizedStock };
+            const finalData = { ...formData, stockByShop: sanitizedStock, priceByShop: sanitizedPrices };
             onSave(finalData, productToEdit?.id); 
         };
 
@@ -25755,11 +26174,11 @@
                                                                     {!isViewMode && (
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => setFormData(prev => ({ ...prev, price: suggestedKhr }))}
+                                                                            onClick={() => setFormData(prev => ({ ...prev, priceByShop: { ...(prev.priceByShop || {}), [shop.id]: suggestedKhr } }))}
                                                                             className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] transition shadow"
-                                                                            title="Use this Suggested Price"
+                                                                            title={`Set ${shop.name}'s custom selling price to ៛${khrFormatter.format(suggestedKhr)}`}
                                                                         >
-                                                                            Use Price
+                                                                            Set Shop Price
                                                                         </button>
                                                                     )}
                                                                 </>
@@ -25773,6 +26192,49 @@
                                         </div>
                                     </div>
                                 )}
+
+                                {/* --- Multi-Shop Selling Price (Optional) Section --- */}
+                                <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                        <label className="block text-sm font-medium text-slate-300">
+                                            <i className="fas fa-tags text-indigo-400 mr-1.5"></i>Multi-Shop Selling Price <span className="text-xs text-slate-400 font-normal">(Optional)</span>
+                                        </label>
+                                        <span className="text-[11px] text-slate-400 font-mono">
+                                            Fallback Base: <strong className="text-emerald-400">៛{khrFormatter.format(Number(formData.price) || 0)}</strong>
+                                        </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mb-2">
+                                        Leave blank or enter <strong className="text-slate-300">0</strong> to automatically use the base Sale Price.
+                                    </p>
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 p-3.5 border border-slate-700 rounded-md bg-slate-900/30">
+                                        {managedShops.length === 0 && (
+                                            <p className="text-sm text-slate-400 col-span-full">No managed shops assigned.</p>
+                                        )}
+                                        {managedShops.map(shop => {
+                                            const rawVal = formData.priceByShop?.[shop.id];
+                                            const hasCustom = Number(rawVal) > 0;
+                                            return (
+                                                <div key={shop.id}>
+                                                    <div className="flex items-center justify-between gap-1 mb-1">
+                                                        <label className="block text-xs font-medium text-slate-400 truncate" title={shop.name}>{shop.name}</label>
+                                                        <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${hasCustom ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
+                                                            {hasCustom ? 'Custom' : 'Base'}
+                                                        </span>
+                                                    </div>
+                                                    <input
+                                                        type="number"
+                                                        min="0"
+                                                        value={rawVal === 0 || rawVal === undefined || rawVal === null ? '' : rawVal}
+                                                        placeholder={`Base: ${khrFormatter.format(Number(formData.price) || 0)}`}
+                                                        onChange={(e) => handleShopPriceChange(e, shop.id)}
+                                                        className={`w-full bg-slate-700 text-slate-100 px-3 py-2 border rounded-md text-sm font-mono read-only:bg-slate-800 read-only:text-slate-400 ${hasCustom ? 'border-indigo-500/70 text-emerald-300 font-bold' : 'border-slate-600'}`}
+                                                        readOnly={isViewMode}
+                                                    />
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
 
                                 {/* --- Stock by Shop Section --- */}
                                 <div>
@@ -26508,16 +26970,16 @@
         );
     };
 
-    // --- NEW: Product Cross Promotion Modal & Section ---
-    const CrossPromoProductModal = ({ product, onClose, userProfile }) => {
+    // --- NEW: Cross Promotion Products Modal & Management Section ---
+    const CrossPromoProductModal = ({ product, userProfile, onClose }) => {
         const { shops } = useData();
         const [isSubmitting, setIsSubmitting] = useState(false);
         const [errorMsg, setErrorMsg] = useState('');
 
         const availableShops = useMemo(() => {
-            if (!userProfile) return shops || [];
-            if (userProfile.role === 'Admin' || userProfile.role === 'Management') return shops || [];
-            return (shops || []).filter(s => (userProfile.assignedShops || userProfile.shopIds || []).includes(s.id));
+            if (!userProfile || userProfile.role === 'Admin') return shops || [];
+            const assigned = userProfile.assignedShops || [];
+            return (shops || []).filter(s => assigned.includes(s.id));
         }, [shops, userProfile]);
 
         const formatNum = (val) => {
