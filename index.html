@@ -6087,6 +6087,9 @@
                 return;
             }
 
+            // Strictly apply the active shop's configured selling price (falls back to base price if legacy record is unset)
+            const shopSellingPrice = getEffectiveShopPrice(product, selectedShopId);
+
             setCart(prevCart => {
                 const existingItem = prevCart.find(item => item.productId === product.id);
                 const currentQty = existingItem ? (parseInt(existingItem.quantity, 10) || 0) : 0;
@@ -6098,8 +6101,8 @@
                 return [...prevCart, { 
                     productId: product.id, 
                     name: product.name, 
-                    price: product.price, 
-                    originalPrice: product.price,
+                    price: shopSellingPrice, 
+                    originalPrice: shopSellingPrice,
                     cost: product.cost, 
                     quantity: 1,
                     code: product.code,
@@ -6107,7 +6110,28 @@
                 }];
             });
             refocusSearchInput();
-        }, [currentShift, refocusSearchInput]);
+        }, [currentShift, selectedShopId, refocusSearchInput]);
+
+        // Keep non-overridden cart items synchronized if an Admin switches the active POS shop
+        useEffect(() => {
+            if (!selectedShopId) return;
+            setCart(prevCart => {
+                if (prevCart.length === 0) return prevCart;
+                let changed = false;
+                const nextCart = prevCart.map(item => {
+                    const prod = productByIdMap.get(item.productId);
+                    if (!prod) return item;
+                    const shopPrice = getEffectiveShopPrice(prod, selectedShopId);
+                    const wasManuallyOverridden = item.originalPrice !== undefined && item.price !== item.originalPrice;
+                    if (!wasManuallyOverridden && item.price !== shopPrice) {
+                        changed = true;
+                        return { ...item, price: shopPrice, originalPrice: shopPrice };
+                    }
+                    return item;
+                });
+                return changed ? nextCart : prevCart;
+            });
+        }, [selectedShopId, productByIdMap]);
 
         const handleApplyLineItemEdit = (productId, updates) => {
             setCart(prev => prev.map(item => {
@@ -6508,11 +6532,12 @@
                 const workingCart = [...cart];
                 if (paymentDetails.addedRewardProduct && paymentDetails.addedRewardProduct.id) {
                     const rp = paymentDetails.addedRewardProduct;
+                    const rpShopPrice = getEffectiveShopPrice(rp, selectedShopId);
                     workingCart.push({
                         productId: rp.id,
                         name: rp.name,
-                        price: Number(rp.price) || 0,
-                        originalPrice: Number(rp.price) || 0,
+                        price: rpShopPrice,
+                        originalPrice: rpShopPrice,
                         cost: Number(rp.cost) || 0,
                         quantity: 1,
                         code: rp.code || '',
@@ -7000,6 +7025,7 @@
                 {showQuickGroupModal && (
                     <QuickAccessGroupModal
                         products={products}
+                        selectedShopId={selectedShopId}
                         existingGroup={editingQuickGroup}
                         onClose={() => {
                             setShowQuickGroupModal(false);
@@ -7321,6 +7347,8 @@
                                         const inCartQty = cartQtyMap.get(product.id) || 0;
                                         const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
                                         const isHighlighted = index === highlightedIndex;
+                                        const shopPrice = getEffectiveShopPrice(product, selectedShopId);
+                                        const hasCustomShopPrice = Number(product.priceByShop?.[selectedShopId]) > 0 && shopPrice !== (Number(product.price) || 0);
 
                                         return (
                                             <div
@@ -7382,9 +7410,17 @@
                                                             {product.code}
                                                         </span>
                                                     </div>
-                                                    <div className="text-right flex items-center justify-end">
+                                                    <div className="text-right flex items-center justify-end gap-1">
+                                                        {hasCustomShopPrice && (
+                                                            <span
+                                                                className="text-[9px] font-bold px-1 py-0.5 rounded bg-indigo-500/25 text-indigo-300 border border-indigo-500/40 shrink-0"
+                                                                title={`Shop Selling Price (Base: ៛${khrFormatter.format(product.price)})`}
+                                                            >
+                                                                Shop
+                                                            </span>
+                                                        )}
                                                         <span className="inline-flex items-baseline px-2.5 py-1 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/15 border border-emerald-500/40 group-hover:from-emerald-500 group-hover:to-teal-500 text-emerald-300 group-hover:text-slate-950 font-black text-xs sm:text-sm leading-none shadow-sm transition-all duration-200 truncate">
-                                                            ៛{khrFormatter.format(product.price)}
+                                                            ៛{khrFormatter.format(shopPrice)}
                                                         </span>
                                                     </div>
                                                 </div>
@@ -7414,6 +7450,8 @@
                                                 const inCartQty = cartQtyMap.get(product.id) || 0;
                                                 const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
                                                 const isHighlighted = index === highlightedIndex;
+                                                const shopPrice = getEffectiveShopPrice(product, selectedShopId);
+                                                const hasCustomShopPrice = Number(product.priceByShop?.[selectedShopId]) > 0 && shopPrice !== (Number(product.price) || 0);
                                                 
                                                 return (
                                                     <tr 
@@ -7448,8 +7486,13 @@
                                                         </td>
                                                         <td className="py-2.5 px-3 text-right whitespace-nowrap">
                                                             <div className="font-black text-sm sm:text-base text-emerald-400 group-hover:text-emerald-300">
-                                                                ៛{khrFormatter.format(product.price)}
+                                                                ៛{khrFormatter.format(shopPrice)}
                                                             </div>
+                                                            {hasCustomShopPrice && (
+                                                                <div className="text-[10px] text-indigo-300 font-semibold">
+                                                                    Shop <span className="text-slate-500 line-through ml-1">៛{khrFormatter.format(product.price)}</span>
+                                                                </div>
+                                                            )}
                                                         </td>
                                                         <td className="py-2.5 pr-3 sm:pr-4 text-right">
                                                             <button type="button" className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center transition-all shadow-sm ml-auto ${inCartQty > 0 || isHighlighted ? 'bg-blue-600 text-white' : 'bg-slate-700/70 text-slate-300 group-hover:bg-blue-600 group-hover:text-white'}`}>
@@ -7810,7 +7853,7 @@
     };
 
     // --- NEW: Quick Access Product Group Creator / Editor Modal ---
-    const QuickAccessGroupModal = ({ products = [], existingGroup = null, onClose, onSave, onDelete }) => {
+    const QuickAccessGroupModal = ({ products = [], selectedShopId = '', existingGroup = null, onClose, onSave, onDelete }) => {
         const [groupName, setGroupName] = useState(existingGroup?.name || '');
         const [selectedIds, setSelectedIds] = useState(() => new Set(existingGroup?.productIds || []));
         const [searchQuery, setSearchQuery] = useState('');
@@ -7940,7 +7983,7 @@
                                                 </div>
                                             </div>
                                             <div className="text-xs font-black text-emerald-400 shrink-0">
-                                                ៛{new Intl.NumberFormat('en-US').format(prod.price)}
+                                                ៛{new Intl.NumberFormat('en-US').format(getEffectiveShopPrice(prod, selectedShopId))}
                                             </div>
                                         </div>
                                     );
@@ -9656,14 +9699,14 @@
             return products
                 .filter(p => !inCartIds.has(p.id))
                 .filter(p => {
-                    const price = Number(p.price) || 0;
+                    const price = getEffectiveShopPrice(p, shop?.id);
                     const priceOk = price > 0 && price <= maxPrice;
                     const idOk = eligibleIds.length === 0 || eligibleIds.includes(p.id);
                     return priceOk && idOk;
                 })
-                .sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0))
+                .sort((a, b) => getEffectiveShopPrice(b, shop?.id) - getEffectiveShopPrice(a, shop?.id))
                 .slice(0, 40);
-        }, [loyaltyRule, customer, products, cart]);
+        }, [loyaltyRule, customer, products, cart, shop?.id]);
 
         // Auto-select best eligible reward option when available
         useEffect(() => {
@@ -9694,10 +9737,10 @@
             if (selectedRewardKey.startsWith('catalog:')) {
                 const id = selectedRewardKey.replace('catalog:', '');
                 const found = eligibleCatalogRewardProducts.find(p => p.id === id);
-                return found ? { source: 'catalog', product: found, price: Number(found.price) || 0, name: found.name } : null;
+                return found ? { source: 'catalog', product: found, price: getEffectiveShopPrice(found, shop?.id), name: found.name } : null;
             }
             return null;
-        }, [selectedRewardKey, eligibleCartRewardItems, eligibleCatalogRewardProducts]);
+        }, [selectedRewardKey, eligibleCartRewardItems, eligibleCatalogRewardProducts, shop?.id]);
 
         // If a catalog reward product is claimed, it adds its price to the gross subtotal and then deducts it as a 100% free reward
         const extraCatalogRewardPrice = (claimFreeProduct && resolvedRewardSelection?.source === 'catalog')
@@ -10435,7 +10478,7 @@
                                                         <optgroup label="Add Free Reward Item to Ticket">
                                                             {eligibleCatalogRewardProducts.map(prod => (
                                                                 <option key={`catalog:${prod.id}`} value={`catalog:${prod.id}`}>
-                                                                    [+ Add Free] {prod.name} — ៛{khrFormatter.format(prod.price)}
+                                                                    [+ Add Free] {prod.name} — ៛{khrFormatter.format(getEffectiveShopPrice(prod, shop?.id))}
                                                                 </option>
                                                             ))}
                                                         </optgroup>
@@ -25810,30 +25853,30 @@
 
         const handleSubmit = (e) => { 
             e.preventDefault(); 
-            
-            // 1. Guard for View Mode
-            if (isViewMode) return;
-
-            // 2. Barcode Validation checks
-            if (barcodeValidation.status === 'invalid') {
-                setModalInfo({ show: true, title: "Validation Error", message: "Cannot save: The barcode is already in use by another product.", isError: true });
-                return;
-            }
-            if (barcodeValidation.status === 'validating') {
-                setModalInfo({ show: true, title: "Validation Error", message: "Please wait, barcode is currently being validated.", isError: true });
-                return;
-            }
-
-            // 3. Stock & Multi-Shop Price Sanitation (Blank-yet-zero logic; preserves unassigned shops)
+            // 3. Stock & Multi-Shop Price Sanitation (Strictly requires valid selling price per assigned shop; preserves unassigned shops)
             const sanitizedStock = { ...(formData.stockByShop || {}) };
             const sanitizedPrices = { ...(formData.priceByShop || {}) };
+            const missingPriceShops = [];
             managedShops.forEach(shop => {
                 // Convert any empty strings in the state to numeric 0 for the database
                 sanitizedStock[shop.id] = Number(sanitizedStock[shop.id]) || 0;
                 const rawShopPrice = Number(sanitizedPrices[shop.id]);
-                // Store 0 when blank/null/<=0 so Firestore merge cleanly resets it to fallback to base product.price
-                sanitizedPrices[shop.id] = rawShopPrice > 0 ? rawShopPrice : 0;
+                if (!rawShopPrice || rawShopPrice <= 0) {
+                    missingPriceShops.push(shop.name);
+                } else {
+                    sanitizedPrices[shop.id] = rawShopPrice;
+                }
             });
+
+            if (managedShops.length > 0 && missingPriceShops.length > 0) {
+                setModalInfo({
+                    show: true,
+                    title: "Shop Selling Price Required",
+                    message: `Please enter a selling price (> 0) for: ${missingPriceShops.join(', ')}. You can also click "Copy Base to All" to fill all shops quickly.`,
+                    isError: true
+                });
+                return;
+            }
 
             // 4. Final Save call
             const finalData = { ...formData, stockByShop: sanitizedStock, priceByShop: sanitizedPrices };
@@ -26174,16 +26217,19 @@
                                                                     {!isViewMode && (
                                                                         <button
                                                                             type="button"
-                                                                            onClick={() => setFormData(prev => ({ ...prev, priceByShop: { ...(prev.priceByShop || {}), [shop.id]: suggestedKhr } }))}
-                                                                            className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] transition shadow"
-                                                                            title={`Set ${shop.name}'s custom selling price to ៛${khrFormatter.format(suggestedKhr)}`}
+                                                                            onClick={() => setFormData(prev => ({
+                                                                                ...prev,
+                                                                                priceByShop: { ...(prev.priceByShop || {}), [shop.id]: suggestedKhr }
+                                                                            }))}
+                                                                            className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] shadow transition"
+                                                                            title={`Apply ៛${khrFormatter.format(suggestedKhr)} as ${shop.name}'s Selling Price`}
                                                                         >
                                                                             Set Shop Price
                                                                         </button>
                                                                     )}
                                                                 </>
                                                             ) : (
-                                                                <span className="text-[11px] text-slate-500 italic">Set Shop Margin %</span>
+                                                                <span className="text-[10px] text-slate-500 italic">No margin set</span>
                                                             )}
                                                         </div>
                                                     </div>
@@ -26193,41 +26239,60 @@
                                     </div>
                                 )}
 
-                                {/* --- Multi-Shop Selling Price (Optional) Section --- */}
+                                {/* --- Multi-Shop Selling Price (Required & Strictly Applied to POS Terminal) --- */}
                                 <div>
-                                    <div className="flex items-center justify-between mb-1">
+                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
                                         <label className="block text-sm font-medium text-slate-300">
-                                            <i className="fas fa-tags text-indigo-400 mr-1.5"></i>Multi-Shop Selling Price <span className="text-xs text-slate-400 font-normal">(Optional)</span>
+                                            <i className="fas fa-tags text-indigo-400 mr-1.5"></i>Multi-Shop Selling Price <span className="text-red-400 font-bold">*</span>
                                         </label>
-                                        <span className="text-[11px] text-slate-400 font-mono">
-                                            Fallback Base: <strong className="text-emerald-400">៛{khrFormatter.format(Number(formData.price) || 0)}</strong>
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            {!isViewMode && managedShops.length > 0 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const baseVal = Number(formData.price) || 0;
+                                                        const nextPrices = { ...(formData.priceByShop || {}) };
+                                                        managedShops.forEach(s => { nextPrices[s.id] = baseVal; });
+                                                        setFormData(prev => ({ ...prev, priceByShop: nextPrices }));
+                                                    }}
+                                                    className="px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 text-[11px] font-bold transition flex items-center gap-1"
+                                                    title="Copy Base Sale Price to all shops"
+                                                >
+                                                    <i className="fas fa-copy text-[10px]"></i>
+                                                    <span>Copy Base to All</span>
+                                                </button>
+                                            )}
+                                            <span className="text-[11px] text-slate-400 font-mono">
+                                                Base: <strong className="text-emerald-400">៛{khrFormatter.format(Number(formData.price) || 0)}</strong>
+                                            </span>
+                                        </div>
                                     </div>
                                     <p className="text-[11px] text-slate-400 mb-2">
-                                        Leave blank or enter <strong className="text-slate-300">0</strong> to automatically use the base Sale Price.
+                                        Strictly applied to each shop's <strong className="text-indigo-300">POS Terminal</strong>. Every assigned shop requires a selling price (&gt; 0).
                                     </p>
-                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 p-3.5 border border-slate-700 rounded-md bg-slate-900/30">
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 p-3.5 border border-indigo-500/30 rounded-md bg-slate-900/30">
                                         {managedShops.length === 0 && (
                                             <p className="text-sm text-slate-400 col-span-full">No managed shops assigned.</p>
                                         )}
                                         {managedShops.map(shop => {
                                             const rawVal = formData.priceByShop?.[shop.id];
-                                            const hasCustom = Number(rawVal) > 0;
+                                            const hasValidPrice = Number(rawVal) > 0;
                                             return (
                                                 <div key={shop.id}>
                                                     <div className="flex items-center justify-between gap-1 mb-1">
-                                                        <label className="block text-xs font-medium text-slate-400 truncate" title={shop.name}>{shop.name}</label>
-                                                        <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${hasCustom ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
-                                                            {hasCustom ? 'Custom' : 'Base'}
+                                                        <label className="block text-xs font-medium text-slate-300 truncate" title={shop.name}>{shop.name} <span className="text-red-400">*</span></label>
+                                                        <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${hasValidPrice ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-red-500/20 text-red-300 border border-red-500/40'}`}>
+                                                            {hasValidPrice ? 'POS Active' : 'Required'}
                                                         </span>
                                                     </div>
                                                     <input
                                                         type="number"
-                                                        min="0"
+                                                        min="1"
+                                                        required={!isViewMode}
                                                         value={rawVal === 0 || rawVal === undefined || rawVal === null ? '' : rawVal}
-                                                        placeholder={`Base: ${khrFormatter.format(Number(formData.price) || 0)}`}
+                                                        placeholder="Enter shop price"
                                                         onChange={(e) => handleShopPriceChange(e, shop.id)}
-                                                        className={`w-full bg-slate-700 text-slate-100 px-3 py-2 border rounded-md text-sm font-mono read-only:bg-slate-800 read-only:text-slate-400 ${hasCustom ? 'border-indigo-500/70 text-emerald-300 font-bold' : 'border-slate-600'}`}
+                                                        className={`w-full bg-slate-700 text-slate-100 px-3 py-2 border rounded-md text-sm font-mono read-only:bg-slate-800 read-only:text-slate-400 ${hasValidPrice ? 'border-emerald-500/60 text-emerald-300 font-bold' : 'border-red-500/60'}`}
                                                         readOnly={isViewMode}
                                                     />
                                                 </div>
