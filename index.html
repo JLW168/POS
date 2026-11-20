@@ -1800,7 +1800,7 @@
             }
         }
 
-        // SOURCE 5: Direct Render Listener Bridge (https://po-listener.onrender.com)
+        // SOURCE 5: Direct Render Listener Bridge (https://pos-bh4o.onrender.com)
         // Bypasses Firestore Daily Write Quota limits and wakes up sleeping Render instances automatically!
         if (window.SolarisRenderBridge) {
             window.SolarisRenderBridge.ensureConnected();
@@ -2399,22 +2399,25 @@
                 return { ok: true, count: extracted.length, items: extracted };
             } catch (err) {
                 console.warn('MTProto historical range scan warning:', err);
-                return { ok: false, count: 0, items: [], error: err.message };
+                return { ok: false, count: 0, items: [], error: err?.message || 'Historical scan failed' };
             }
         }
     };
 
-    // --- Direct Render.com SSE & HTTP Bridge (https://pos-payway.onrender.com) ---
+    // --- Direct Render.com SSE & HTTP Bridge (Global Config Synced via KHQR Settings UI) ---
     // Ensures 0ms payment delivery with 0 Firebase Reads/Writes when Bypass Mode is ON!
     window.SolarisRenderBridge = {
         baseUrl: (() => {
+            const defaultUrl = 'https://pos-bh4o.onrender.com';
             try {
-                return localStorage.getItem('solaris_render_listener_url') || 'https://pos-payway.onrender.com';
-            } catch (e) {
-                return 'https://pos-payway.onrender.com';
-            }
+                const saved = String(localStorage.getItem('solaris_render_listener_url') || '').trim().replace(/\/+$/, '');
+                if (saved && /^https?:\/\//i.test(saved)) {
+                    return saved;
+                }
+                localStorage.setItem('solaris_render_listener_url', defaultUrl);
+            } catch (e) {}
+            return defaultUrl;
         })(),
-        fallbackUrl: 'https://po-listener.onrender.com',
         eventSource: null,
         isConnected: false,
         lastPingAt: 0,
@@ -2422,16 +2425,20 @@
         _keepAliveTimer: null,
         _pollInFlight: false,
 
-        setBaseUrl(url) {
-            const clean = String(url || 'https://pos-payway.onrender.com').trim().replace(/\/+$/, '');
+        setBaseUrl(url, reconnect = true) {
+            const clean = String(url || 'https://pos-bh4o.onrender.com').trim().replace(/\/+$/, '');
+            if (!clean) return;
+            const changed = clean !== this.baseUrl;
             this.baseUrl = clean;
             try { localStorage.setItem('solaris_render_listener_url', clean); } catch (e) {}
-            if (this.eventSource) {
+            if (changed && this.eventSource) {
                 try { this.eventSource.close(); } catch (e) {}
                 this.eventSource = null;
                 this.isConnected = false;
             }
-            this.ensureConnected();
+            if (reconnect && (changed || !this.eventSource)) {
+                this.ensureConnected();
+            }
         },
 
         getCandidateUrls() {
@@ -3749,12 +3756,10 @@
         const { data: categories, loading: categoriesLoading } = useCollection('categories');
         // --- PHASE 1 ADDITION: Fetch Customers ---
         const { data: customers, loading: customersLoading } = useCollection('customers');
-        // --- NEW: Fetch Loyalty Program Rules per Branch ---
         const { data: loyaltyRules, loading: loyaltyRulesLoading } = useCollection('loyalty_programs');
-        // --- NEW: Fetch Cross Promotion Products ---
-        const { data: crossPromoProducts, loading: crossPromoProductsLoading } = useCollection('crossPromoProducts', { enabled: enableHeavyCollections });
+        const { data: crossPromoProducts, loading: crossPromoProductsLoading } = useCollection('crossPromoProducts');
 
-        // --- NEW: Fetch System Config ---
+        // --- NEW: Fetch System Config (Includes Global Render Bridge URL Sync for All Shops) ---
         useEffect(() => {
             const unsubscribe = db.collection('system').doc('config').onSnapshot(doc => {
                 if (doc.exists) {
@@ -3762,6 +3767,12 @@
                     setSystemConfig(prev => ({ ...prev, ...data }));
                     if (data.appName) {
                         try { localStorage.setItem('solaris_cached_app_name', data.appName); } catch (e) {}
+                    }
+                    if (data.renderListenerUrl && window.SolarisRenderBridge) {
+                        window.SolarisRenderBridge.setBaseUrl(
+                            data.renderListenerUrl,
+                            !!window.SolarisRenderBridge.eventSource
+                        );
                     }
                 }
             }, (error) => {
@@ -28753,9 +28764,10 @@
 
             const loadBranchAndSecretsFromCloud = async () => {
                 try {
-                    const [shopSnap, secSnap] = await Promise.all([
+                    const [shopSnap, secSnap, sysCfgSnap] = await Promise.all([
                         db.collection('shops').doc(filterShop).get().catch(() => null),
-                        db.collection('payway_secrets').doc(filterShop).get().catch(() => null)
+                        db.collection('payway_secrets').doc(filterShop).get().catch(() => null),
+                        db.collection('system').doc('config').get().catch(() => null)
                     ]);
 
                     if (!isMounted) return;
@@ -28765,6 +28777,7 @@
                         : (shops.find(s => s.id === filterShop) || {});
 
                     const secData = secSnap && secSnap.exists ? secSnap.data() : null;
+                    const sysCfgData = sysCfgSnap && sysCfgSnap.exists ? sysCfgSnap.data() : null;
 
                     const cfg = {
                         ...(secData?.khqrConfigBackup || {}),
@@ -28772,6 +28785,13 @@
                     };
 
                     const savedPaywayChatId = String(cfg.paywayChatId || secData?.paywayChatId || '').trim();
+                    const resolvedGlobalRenderUrl = String(
+                        sysCfgData?.renderListenerUrl ||
+                        cfg.renderListenerUrl ||
+                        secData?.renderListenerUrl ||
+                        window.SolarisRenderBridge?.baseUrl ||
+                        'https://pos-bh4o.onrender.com'
+                    ).trim().replace(/\/+$/, '');
                     const emvInfo = cfg.baseEmvPayload
                         ? window.SolarisKHQREngine.extractMerchantInfoFromEMV(cfg.baseEmvPayload)
                         : { merchantName: null };
@@ -28784,7 +28804,7 @@
                         bypassFirebaseDb: cfg.bypassFirebaseDb !== undefined
                             ? cfg.bypassFirebaseDb !== false
                             : (secData?.bypassFirebaseDb !== undefined ? secData.bypassFirebaseDb !== false : true),
-                        renderListenerUrl: cfg.renderListenerUrl || secData?.renderListenerUrl || window.SolarisRenderBridge?.baseUrl || 'https://pos-payway.onrender.com',
+                        renderListenerUrl: resolvedGlobalRenderUrl,
                         bankStateFeedMode: cfg.bankStateFeedMode || 'on-demand',
                         qrValidMinutes: cfg.qrValidMinutes !== undefined ? Number(cfg.qrValidMinutes) : 2,
                         autoVerifyWindowMinutes: cfg.autoVerifyWindowMinutes !== undefined ? Number(cfg.autoVerifyWindowMinutes) : 5,
@@ -28991,10 +29011,16 @@
                 }
 
                 const currentShopObj = shops.find(s => s.id === filterShop);
-                const cleanRenderUrl = String(formData.renderListenerUrl || 'https://pos-payway.onrender.com').trim().replace(/\/+$/, '');
+                const cleanRenderUrl = String(formData.renderListenerUrl || 'https://pos-bh4o.onrender.com').trim().replace(/\/+$/, '');
                 if (window.SolarisRenderBridge) {
                     window.SolarisRenderBridge.setBaseUrl(cleanRenderUrl);
                 }
+
+                // Persist Global Direct Render Bridge URL for ALL shops & terminals in `system/config`
+                await db.collection('system').doc('config').set({
+                    renderListenerUrl: cleanRenderUrl,
+                    updatedAt: Date.now()
+                }, { merge: true }).catch(() => {});
 
                 const extractedEmv = formData.baseEmvPayload && window.SolarisKHQREngine
                     ? window.SolarisKHQREngine.extractMerchantInfoFromEMV(formData.baseEmvPayload)
@@ -29077,7 +29103,7 @@
                     }).catch(() => {});
                 }
 
-                showToast("KHQR settings & Staff-Only Telegram MTProto credentials saved to Firestore!", "success");
+                showToast("KHQR settings, Global Render Bridge URL (all shops) & Telegram credentials saved!", "success");
             } catch (err) {
                 console.error("Save KHQR settings error:", err);
                 showToast("Error saving KHQR settings: " + err.message, "error");
@@ -29350,18 +29376,20 @@
                                                     </button>
                                                 </div>
                                             </div>
-
-                                            {/* Direct Render.com Listener Bridge URL */}
+                                            {/* Direct Render.com Listener Bridge URL (Applies Globally to All Shops) */}
                                             <div className="pt-2 border-t border-stone-200/80 flex flex-col sm:flex-row sm:items-center gap-2">
-                                                <label className="text-[10px] font-black uppercase text-stone-700 shrink-0 flex items-center gap-1">
+                                                <label className="text-[10px] font-black uppercase text-stone-700 shrink-0 flex items-center gap-1.5">
                                                     <i className="fa-solid fa-server text-sky-600"></i>
                                                     <span>Direct Render Bridge URL:</span>
+                                                    <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 border border-sky-200 text-[9px] font-black">
+                                                        Global (All Shops)
+                                                    </span>
                                                 </label>
                                                 <input
                                                     type="url"
-                                                    placeholder="https://pos-payway.onrender.com"
+                                                    placeholder="https://your-service.onrender.com"
                                                     className="flex-1 border border-stone-300 rounded-lg px-2.5 py-1 text-xs font-mono font-bold text-stone-800 bg-white outline-none focus:border-emerald-600"
-                                                    value={formData.renderListenerUrl || 'https://pos-payway.onrender.com'}
+                                                    value={formData.renderListenerUrl || ''}
                                                     onChange={e => setFormData({ ...formData, renderListenerUrl: e.target.value })}
                                                 />
                                                 <span className="text-[10px] font-bold text-emerald-700 bg-white px-2 py-1 rounded border border-emerald-200 shrink-0">
