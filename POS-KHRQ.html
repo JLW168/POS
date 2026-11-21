@@ -401,29 +401,47 @@
             const R = 6371;
             const dLat = (lat2 - lat1) * (Math.PI / 180);
             const dLon = (lon2 - lon1) * (Math.PI / 180);
-            const a = Math.sin(dLat / 2) ** 2 +
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                       Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-                      Math.sin(dLon / 2) ** 2;
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
             return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         };
+
+        let sharedAudioCtx = null;
+        const warmUpAudioContext = () => {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                if (!sharedAudioCtx) sharedAudioCtx = new AudioCtx();
+                if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume().catch(() => {});
+            } catch (e) {}
+        };
+        window.addEventListener('pointerdown', warmUpAudioContext, { once: true, passive: true });
 
         const playDisplaySound = (type = 'item', isMuted = false) => {
             if (isMuted) return;
             try {
                 const AudioCtx = window.AudioContext || window.webkitAudioContext;
                 if (!AudioCtx) return;
-                const ctx = new AudioCtx();
+                if (!sharedAudioCtx) {
+                    sharedAudioCtx = new AudioCtx();
+                }
+                if (sharedAudioCtx.state === 'suspended') {
+                    sharedAudioCtx.resume().catch(() => {});
+                }
+                const ctx = sharedAudioCtx;
+                const now = ctx.currentTime;
                 const playTone = (freq, start, dur, gainVal = 0.1) => {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
                     osc.type = 'sine';
-                    osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
-                    gain.gain.setValueAtTime(gainVal, ctx.currentTime + start);
-                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+                    osc.frequency.setValueAtTime(freq, now + start);
+                    gain.gain.setValueAtTime(gainVal, now + start);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
                     osc.connect(gain);
                     gain.connect(ctx.destination);
-                    osc.start(ctx.currentTime + start);
-                    osc.stop(ctx.currentTime + start + dur);
+                    osc.start(now + start);
+                    osc.stop(now + start + dur);
                 };
                 if (type === 'paid') {
                     playTone(880, 0, 0.16, 0.16);
@@ -548,7 +566,8 @@
                 }
                 return null;
             });
-            const [syncChannelBadge, setSyncChannelBadge] = useState('Standby'); // '0ms Local Bus' | 'Cloud Live' | 'Standby'
+            const [syncChannelBadge, setSyncChannelBadge] = useState('Standby'); // '0ms Direct' | '0ms Local Bus' | 'Cloud Live' | 'Standby'
+            const [lastLatencyMs, setLastLatencyMs] = useState(0);
             const lastAcceptedUpdatedAtRef = useRef(0);
 
             // Device Security Registry State (`system_settings/khqr_devices_registry`)
@@ -568,24 +587,38 @@
             const prevStatusRef = useRef('IDLE');
             const prevItemCountRef = useRef(0);
 
-            // Monotonic Freshness Guard: Prevents slower Cloud snapshot from overwriting fresher 0ms BroadcastChannel payload
-            const acceptIncomingSession = useCallback((payload, channelLabel = 'Cloud Live') => {
+            // Monotonic Freshness Guard + Synchronous ReactDOM.flushSync for True 0ms Local/Direct Rendering
+            const acceptIncomingSession = useCallback((payload, channelLabel = 'Cloud Live', isInstantLocal = false) => {
                 if (!payload || typeof payload !== 'object') return;
                 const incomingTs = Number(payload.updatedAt) || Date.now();
-                // Allow update if timestamp is newer, or if status changed to PAID/REVOKED
                 const isPriorityTransition = payload.status === 'PAID' || payload.status === 'REVOKED';
-                if (!isPriorityTransition && incomingTs < lastAcceptedUpdatedAtRef.current) {
-                    return;
+                // Skip stale packets or duplicate cloud echoes of an already-applied 0ms local update
+                if (!isPriorityTransition) {
+                    if (incomingTs < lastAcceptedUpdatedAtRef.current) return;
+                    if (!isInstantLocal && incomingTs === lastAcceptedUpdatedAtRef.current) return;
                 }
                 lastAcceptedUpdatedAtRef.current = incomingTs;
-                setSessionData(payload);
-                setSyncChannelBadge(channelLabel);
-                if (payload.selectedCurrency) {
-                    setDisplayCurrency(payload.selectedCurrency);
+                const measuredMs = payload.sentAt ? Math.max(0, Date.now() - Number(payload.sentAt)) : 0;
+
+                const applyState = () => {
+                    setSessionData(payload);
+                    setSyncChannelBadge(channelLabel);
+                    setLastLatencyMs(measuredMs);
+                    if (payload.selectedCurrency) {
+                        setDisplayCurrency(payload.selectedCurrency);
+                    }
+                    if (payload.status !== 'PAID') {
+                        setPaidDismissedToIdle(false);
+                    }
+                };
+
+                if (isInstantLocal && typeof ReactDOM.flushSync === 'function') {
+                    try {
+                        ReactDOM.flushSync(applyState);
+                        return;
+                    } catch (e) {}
                 }
-                if (payload.status !== 'PAID') {
-                    setPaidDismissedToIdle(false);
-                }
+                applyState();
             }, []);
 
             // Keep Screen Awake (Wake Lock API)
@@ -741,9 +774,39 @@
             const currentShopObj = useMemo(() => shops.find(s => s.id === selectedShopId) || null, [shops, selectedShopId]);
 
             // ================================================================
-            // CHANNEL A: 0ms LOCAL BROADCASTCHANNEL + LOCALSTORAGE STORAGE SYNC
+            // CHANNEL 0 & A: 0ms DIRECT WINDOW POSTMESSAGE + BROADCASTCHANNEL + LOCALSTORAGE
             // ================================================================
             useEffect(() => {
+                // 0. Direct Window postMessage (0ms — works BOTH cross-origin & same-origin when opened from POS!)
+                const handleWindowMessage = (ev) => {
+                    const msg = ev?.data;
+                    if (!msg) return;
+                    if (msg.type === 'POS_SHOPS_SYNC' && Array.isArray(msg.shops) && msg.shops.length > 0) {
+                        setShops(msg.shops);
+                        setShopsLoading(false);
+                        try { localStorage.setItem('solaris_cached_shops_list', JSON.stringify(msg.shops)); } catch (e) {}
+                    }
+                    if (msg.type === 'POS_DISPLAY_SESSION' && msg.payload) {
+                        const incomingShopId = msg.payload.shopId;
+                        if (!selectedShopId && incomingShopId) {
+                            setSelectedShopId(incomingShopId);
+                            try { localStorage.setItem('solaris_display_shop_id', incomingShopId); } catch (e) {}
+                        }
+                        if (!selectedShopId || incomingShopId === selectedShopId) {
+                            acceptIncomingSession(msg.payload, '0ms Direct', true);
+                        }
+                    }
+                };
+                window.addEventListener('message', handleWindowMessage);
+
+                // Request immediate 0ms sync from opener POS window (cross-origin safe)
+                try {
+                    if (window.opener && !window.opener.closed) {
+                        window.opener.postMessage({ type: 'REQUEST_POS_SYNC', deviceId, shopId: selectedShopId || '' }, '*');
+                    }
+                } catch (e) {}
+
+                // 1. Same-Origin BroadcastChannel (0ms structured-clone memory bus)
                 let displayBus = null;
                 if (typeof BroadcastChannel !== 'undefined') {
                     try {
@@ -763,11 +826,10 @@
                                     try { localStorage.setItem('solaris_display_shop_id', incomingShopId); } catch (e) {}
                                 }
                                 if (!selectedShopId || incomingShopId === selectedShopId) {
-                                    acceptIncomingSession(msg.payload, '0ms Local Bus');
+                                    acceptIncomingSession(msg.payload, '0ms Local Bus', true);
                                 }
                             }
                         };
-                        // Ask Application Workspace for immediate current state (0ms handshake)
                         displayBus.postMessage({ type: 'REQUEST_POS_SYNC', deviceId, shopId: selectedShopId || '' });
                     } catch (e) {}
                 }
@@ -785,13 +847,14 @@
                     if (selectedShopId && e.key === `solaris_khqr_display_session_${selectedShopId}` && e.newValue) {
                         try {
                             const parsed = JSON.parse(e.newValue);
-                            if (parsed) acceptIncomingSession(parsed, '0ms Local Bus');
+                            if (parsed) acceptIncomingSession(parsed, '0ms Local Bus', true);
                         } catch (err) {}
                     }
                 };
                 window.addEventListener('storage', handleStorageEvent);
 
                 return () => {
+                    window.removeEventListener('message', handleWindowMessage);
                     if (displayBus) displayBus.close();
                     window.removeEventListener('storage', handleStorageEvent);
                 };
@@ -916,7 +979,11 @@
             const totalItemQty = isIdle ? 0 : (Number(sessionData?.itemCount) || cartItems.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0));
             const subtotalKhr = isIdle ? 0 : (Number(sessionData?.subtotalKhr) || cartItems.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.quantity) || 1)), 0));
             const discountKhr = isIdle ? 0 : (Number(sessionData?.discountKhr) || 0);
-            const amountKhr = isIdle ? 0 : (Number(sessionData?.amountKhr) ?? Math.max(0, subtotalKhr - discountKhr));
+            const amountKhr = isIdle
+                ? 0
+                : (sessionData?.amountKhr !== undefined && sessionData?.amountKhr !== null && !isNaN(Number(sessionData.amountKhr))
+                    ? Number(sessionData.amountKhr)
+                    : Math.max(0, subtotalKhr - discountKhr));
             const amountUsd = isIdle ? '0.00' : (Number(sessionData?.amountUsd || (amountKhr / resolvedExchangeRate)).toFixed(2));
 
             const baseEmvPayload = sessionData?.baseEmvPayload || shopKhqrCfg.baseEmvPayload || '';
@@ -927,7 +994,7 @@
             const usdAccount = sessionData?.usdAccount || shopKhqrCfg.usdAccount || '';
             const displayMid = emvInfo.mid || 'N/A';
 
-            // Audio Chime & Auto-Scroll on Live Cart / QR / Paid Transitions
+            // Audio Chime & Instant Auto-Scroll on Live Cart / QR / Paid Transitions
             useEffect(() => {
                 if (currentStatus === 'PAID' && prevStatusRef.current !== 'PAID') {
                     playDisplaySound('paid', isMuted);
@@ -935,7 +1002,7 @@
                     playDisplaySound('qr', isMuted);
                 } else if (currentStatus === 'CART' && totalItemQty > prevItemCountRef.current) {
                     playDisplaySound('item', isMuted);
-                    setTimeout(() => cartListEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), 30);
+                    cartListEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
                 }
                 prevStatusRef.current = currentStatus;
                 prevItemCountRef.current = totalItemQty;
@@ -1128,8 +1195,8 @@
                                     <h1 className="text-sm sm:text-base font-black text-white truncate">{resolvedShopName}</h1>
                                     <span className={`w-2 h-2 rounded-full shrink-0 ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
                                     <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-[10px] font-mono font-bold text-emerald-300">
-                                        <i className={`fas ${syncChannelBadge === '0ms Local Bus' ? 'fa-bolt text-amber-400' : 'fa-cloud text-sky-400'}`}></i>
-                                        {syncChannelBadge}
+                                        <i className={`fas ${syncChannelBadge.includes('0ms') ? 'fa-bolt text-amber-400' : 'fa-cloud text-sky-400'}`}></i>
+                                        {syncChannelBadge}{syncChannelBadge !== 'Standby' ? ` (${lastLatencyMs}ms)` : ''}
                                     </span>
                                 </div>
                                 <div className="text-[10px] sm:text-xs text-slate-400 font-mono truncate">
@@ -1191,7 +1258,7 @@
 
                         {/* STATE 1: LIVE CART SCREEN */}
                         {currentStatus === 'CART' && (
-                            <div className="flex-1 flex flex-col lg:flex-row gap-4 p-3 sm:p-5 overflow-hidden animate-fade-scale">
+                            <div className="flex-1 flex flex-col lg:flex-row gap-4 p-3 sm:p-5 overflow-hidden">
                                 {/* Left: Live Itemized Cart */}
                                 <div className="flex-1 bg-slate-900/90 border border-slate-800 rounded-3xl flex flex-col overflow-hidden shadow-2xl min-h-0">
                                     <div className="px-4 sm:px-6 py-3.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0">
@@ -1219,7 +1286,7 @@
                                             const isDiscounted = origPrice > price && price > 0;
 
                                             return (
-                                                <div key={`${item.productId || idx}_${qty}_${price}`} className="item-row-flash bg-slate-800/60 border border-slate-700/70 rounded-2xl p-3 sm:p-4 flex items-center justify-between gap-3">
+                                                <div key={item.productId || idx} className="item-row-flash bg-slate-800/60 border border-slate-700/70 rounded-2xl p-3 sm:p-4 flex items-center justify-between gap-3">
                                                     <div className="flex items-center gap-3 min-w-0 flex-1">
                                                         <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-blue-600/20 border border-blue-500/40 text-blue-300 font-black text-sm sm:text-base flex items-center justify-center shrink-0">
                                                             {qty}×
