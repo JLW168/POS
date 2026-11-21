@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="referrer" content="no-referrer">
     <title>Customer Display — Live Cart &amp; ABA KHQR</title>
 
     <!-- PWA & Full-Screen Kiosk Meta Tags -->
@@ -459,8 +460,41 @@
         // 3B. BILL PAYMENT VOICE ANNOUNCEMENT ENGINE (KHMER DEFAULT / ENGLISH)
         // ====================================================================
         const PaymentVoiceAnnouncer = {
-            _activeAudio: null,
+            _audioEl: null,
             _voicesReady: false,
+            _audioUnlocked: false,
+            _playbackToken: 0,
+            _onAutoplayBlocked: null,
+
+            _ensureAudioEl() {
+                if (!this._audioEl) {
+                    const el = new Audio();
+                    el.preload = 'auto';
+                    // NOTE: Do NOT set el.crossOrigin = 'anonymous' — Google TTS does not send CORS headers
+                    // and setting crossOrigin causes browsers to silently block the MP3 stream!
+                    this._audioEl = el;
+                }
+                return this._audioEl;
+            },
+
+            unlockAudio() {
+                if (this._audioUnlocked) return;
+                this._audioUnlocked = true;
+                try {
+                    const el = this._ensureAudioEl();
+                    // Play a tiny silent WAV once on first user gesture so iOS/iPad/Chrome allow future auto-announcements
+                    el.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+                    const p = el.play();
+                    if (p && typeof p.then === 'function') {
+                        p.then(() => {
+                            el.pause();
+                            el.currentTime = 0;
+                        }).catch(() => {
+                            this._audioUnlocked = false;
+                        });
+                    }
+                } catch (e) {}
+            },
 
             initVoices() {
                 try {
@@ -477,14 +511,16 @@
             },
 
             stop() {
+                this._playbackToken += 1;
                 try {
                     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
                 } catch (e) {}
                 try {
-                    if (this._activeAudio) {
-                        this._activeAudio.pause();
-                        this._activeAudio.currentTime = 0;
-                        this._activeAudio = null;
+                    if (this._audioEl) {
+                        this._audioEl.onended = null;
+                        this._audioEl.onerror = null;
+                        this._audioEl.pause();
+                        this._audioEl.currentTime = 0;
                     }
                 } catch (e) {}
             },
@@ -559,83 +595,145 @@
                     return `បានទទួលប្រាក់ចំនួន ${usdTextKm} ដោយជោគជ័យ។ សូមអរគុណ!`;
                 }
                 const khrVal = Math.round(num);
-                return `បានទទួលប្រាក់ចំនួន ${khrVal} រៀល ដោយជោគជ័យ។ សូមអរគុណ!`;
+                return `បានទទួលប្រាក់ចំនួន ${khrVal.toLocaleString('en-US')} រៀល ដោយជោគជ័យ។ សូមអរគុណ!`;
             },
 
-            playCloudTTS(text, langCode = 'km') {
+            playCloudTTS(text, langCode = 'km', fallbackAmountObj = null) {
+                const token = this._playbackToken;
+                const tl = langCode === 'en' ? 'en' : 'km';
+                const q = encodeURIComponent(text);
+
+                // Multi-endpoint cascade (No crossOrigin header + <meta name="referrer" content="no-referrer">)
+                const urls = [
+                    `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=${tl}&q=${q}`,
+                    `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${tl}&q=${q}`
+                ];
+
+                const tryUrl = (idx) => {
+                    if (token !== this._playbackToken) return;
+                    if (idx >= urls.length) {
+                        // Offline / blocked fallback: speak via browser native speechSynthesis so customer always hears confirmation
+                        if (langCode !== 'en' && fallbackAmountObj) {
+                            const enText = this.buildAnnouncementText(fallbackAmountObj, 'en');
+                            this.speakNative(enText, 'en');
+                        }
+                        return;
+                    }
+
+                    try {
+                        const audio = this._ensureAudioEl();
+                        audio.onended = null;
+                        audio.onerror = () => {
+                            if (token !== this._playbackToken) return;
+                            tryUrl(idx + 1);
+                        };
+                        audio.src = urls[idx];
+                        audio.volume = 1.0;
+                        const playPromise = audio.play();
+                        if (playPromise && typeof playPromise.catch === 'function') {
+                            playPromise.catch((err) => {
+                                if (token !== this._playbackToken) return;
+                                if (err && err.name === 'NotAllowedError') {
+                                    // Browser blocked autoplay before user touched the screen
+                                    if (typeof this._onAutoplayBlocked === 'function') {
+                                        this._onAutoplayBlocked();
+                                    }
+                                    return;
+                                }
+                                tryUrl(idx + 1);
+                            });
+                        }
+                    } catch (e) {
+                        tryUrl(idx + 1);
+                    }
+                };
+
+                tryUrl(0);
+                return true;
+            },
+
+            speakNative(text, lang = 'en') {
                 try {
-                    const tl = langCode === 'en' ? 'en' : 'km';
-                    const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${tl}&q=${encodeURIComponent(text)}`;
-                    const audio = new Audio();
-                    audio.crossOrigin = 'anonymous';
-                    try { audio.referrerPolicy = 'no-referrer'; } catch (e) {}
-                    audio.src = url;
-                    this._activeAudio = audio;
-                    audio.play().catch(() => {});
+                    if (!('speechSynthesis' in window)) return false;
+                    const voices = window.speechSynthesis.getVoices() || [];
+                    const isKhmer = lang !== 'en';
+                    const matchingVoice = isKhmer
+                        ? voices.find(v => /^km/i.test(v.lang) || /khmer|cambodia/i.test(v.name || ''))
+                        : (voices.find(v => /^en-US/i.test(v.lang)) || voices.find(v => /^en/i.test(v.lang)));
+
+                    if (isKhmer && !matchingVoice) return false;
+
+                    const utter = new SpeechSynthesisUtterance(text);
+                    utter.lang = matchingVoice?.lang || (isKhmer ? 'km-KH' : 'en-US');
+                    if (matchingVoice) utter.voice = matchingVoice;
+                    utter.rate = isKhmer ? 0.96 : 0.98;
+                    utter.pitch = 1.0;
+                    utter.volume = 1.0;
+                    window.speechSynthesis.speak(utter);
                     return true;
                 } catch (e) {
                     return false;
                 }
             },
 
-            speakText(text, lang = 'km') {
+            speakText(text, lang = 'km', amountObj = null) {
                 if (!text) return;
                 this.stop();
                 const isKhmer = lang !== 'en';
-                const targetLocale = isKhmer ? 'km-KH' : 'en-US';
 
-                try {
-                    if ('speechSynthesis' in window) {
-                        const voices = window.speechSynthesis.getVoices() || [];
-                        const matchingVoice = isKhmer
-                            ? voices.find(v => /^km/i.test(v.lang) || /khmer|cambodia/i.test(v.name || ''))
-                            : (voices.find(v => /^en-US/i.test(v.lang)) || voices.find(v => /^en/i.test(v.lang)));
+                // 1. Try native OS/Browser voice if a matching language voice exists
+                if (this.speakNative(text, isKhmer ? 'km' : 'en')) {
+                    return;
+                }
 
-                        // For Khmer on Windows/iPad/macOS without a local Khmer voice pack, use crystal-clear Khmer Cloud TTS
-                        if (isKhmer && !matchingVoice) {
-                            this.playCloudTTS(text, 'km');
-                            return;
-                        }
-
-                        const utter = new SpeechSynthesisUtterance(text);
-                        utter.lang = matchingVoice?.lang || targetLocale;
-                        if (matchingVoice) utter.voice = matchingVoice;
-                        utter.rate = isKhmer ? 0.96 : 0.98;
-                        utter.pitch = 1.0;
-                        utter.volume = 1.0;
-                        utter.onerror = () => {
-                            this.playCloudTTS(text, isKhmer ? 'km' : 'en');
-                        };
-                        window.speechSynthesis.speak(utter);
-                        return;
-                    }
-                } catch (e) {}
-
-                this.playCloudTTS(text, isKhmer ? 'km' : 'en');
+                // 2. Otherwise stream crystal-clear Khmer/English Cloud TTS (no-CORS)
+                this.playCloudTTS(text, isKhmer ? 'km' : 'en', amountObj);
             },
 
             announcePayment(session, lang = 'km', isMuted = false) {
                 if (isMuted) return;
-                const { currency, amount } = this.resolvePaidAmount(session);
-                if (!amount || amount <= 0) return;
-                const text = this.buildAnnouncementText({ currency, amount }, lang);
-                this.speakText(text, lang);
+                const amountObj = this.resolvePaidAmount(session);
+                if (!amountObj.amount || amountObj.amount <= 0) return;
+                const text = this.buildAnnouncementText(amountObj, lang);
+                this.speakText(text, lang, amountObj);
             },
 
             testVoice(lang = 'km') {
-                const sample = lang === 'en'
-                    ? { currency: 'KHR', amount: 10000 }
-                    : { currency: 'KHR', amount: 10000 };
+                this.unlockAudio();
+                const sample = { currency: 'KHR', amount: 10000 };
                 const text = this.buildAnnouncementText(sample, lang);
-                this.speakText(text, lang);
+                this.speakText(text, lang, sample);
             }
         };
         PaymentVoiceAnnouncer.initVoices();
-        window.addEventListener('pointerdown', () => PaymentVoiceAnnouncer.initVoices(), { once: true, passive: true });
+        window.addEventListener('pointerdown', () => {
+            PaymentVoiceAnnouncer.initVoices();
+            PaymentVoiceAnnouncer.unlockAudio();
+        }, { once: true, passive: true });
 
         // ====================================================================
-        // 4. REUSABLE MODALS (INSTALL PWA)
+        // 4. REUSABLE MODALS (INSTALL APP KIOSK PROMPT)
         // ====================================================================
+        const Modal = ({ children, show, maxWidth = 'max-w-md' }) => {
+            if (!show) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-scale">
+                    <div className={`bg-slate-900 border border-slate-700 rounded-3xl shadow-2xl w-full ${maxWidth} flex flex-col overflow-hidden`}>
+                        {children}
+                    </div>
+                </div>
+            );
+        };
+        const ModalHeader = ({ title, onClose }) => (
+            <div className="px-5 py-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
+                <h3 className="text-lg font-bold text-white">{title}</h3>
+                <button type="button" onClick={onClose} className="text-slate-400 hover:text-white transition w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center">
+                    <i className="fas fa-times"></i>
+                </button>
+            </div>
+        );
+        const ModalBody = ({ children }) => <div className="p-5 overflow-y-auto max-h-[70vh]">{children}</div>;
+
         const InstallAppModal = ({ show, onClose, appName = 'KHQR Display' }) => {
             const [pwaState, setPwaState] = useState(() => window.SolarisPWAManager ? window.SolarisPWAManager.getState() : { canInstallPrompt: false, isInstalled: false, isIOS: false });
             useEffect(() => {
@@ -644,22 +742,17 @@
             }, []);
             if (!show) return null;
             return (
-                <div onClick={onClose} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-scale">
-                    <div onClick={e => e.stopPropagation()} className="bg-slate-900 border border-slate-700 rounded-3xl shadow-2xl w-full max-w-md overflow-hidden">
-                        <div className="px-5 py-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
-                            <h3 className="text-lg font-bold text-white">Install Customer Display</h3>
-                            <button onClick={onClose} className="text-slate-400 hover:text-white w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center">
-                                <i className="fas fa-times"></i>
-                            </button>
-                        </div>
-                        <div className="p-5 space-y-4">
+                <Modal show={show} maxWidth="max-w-md">
+                    <ModalHeader title="Install Customer Display" onClose={onClose} />
+                    <ModalBody>
+                        <div className="space-y-4">
                             <div className="flex items-center gap-4 bg-slate-800 p-4 rounded-xl border border-slate-700">
                                 <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-blue-600 to-emerald-500 flex items-center justify-center shadow-lg shrink-0">
                                     <i className="fas fa-tv text-white text-xl"></i>
                                 </div>
                                 <div>
                                     <h4 className="text-base font-bold text-white">{appName}</h4>
-                                    <p className="text-xs text-slate-400 mt-1">Install for 1-tap full-screen kiosk display.</p>
+                                    <p className="text-xs text-slate-400 mt-1">Install for 1-tap full-screen kiosk access.</p>
                                 </div>
                             </div>
                             {pwaState.canInstallPrompt && (
@@ -672,27 +765,29 @@
                                         onClose();
                                     }
                                 }} className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition flex justify-center items-center gap-2">
-                                    <i className="fas fa-download"></i> Install App Now
+                                    <i className="fas fa-download"></i> Install Now
                                 </button>
                             )}
                             <div className="text-xs text-slate-400 space-y-2 bg-slate-950/50 p-4 rounded-xl border border-slate-800">
-                                <p><i className="fab fa-apple text-slate-300 mr-2"></i> iOS / iPad: Tap <b>Share</b> <i className="fas fa-arrow-up-from-bracket mx-1"></i> &rarr; <b>Add to Home Screen</b>.</p>
-                                <p><i className="fab fa-android text-emerald-400 mr-2"></i> Android: Menu <i className="fas fa-ellipsis-vertical mx-1"></i> &rarr; <b>Install app</b>.</p>
+                                <p><i className="fab fa-apple text-slate-300 mr-2"></i> iOS/iPad: Tap <b>Share</b> <i className="fas fa-arrow-up-from-bracket mx-1"></i> &gt; <b>Add to Home Screen</b>.</p>
+                                <p><i className="fab fa-android text-emerald-400 mr-2"></i> Android: Menu <i className="fas fa-ellipsis-vertical mx-1"></i> &gt; <b>Install app</b>.</p>
                             </div>
                             <button type="button" onClick={() => { window.SolarisPWAManager?.enterKioskFullscreen(); onClose(); }} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm rounded-xl border border-slate-600 transition flex justify-center items-center gap-2">
-                                <i className="fas fa-expand"></i> Enter Full-Screen Kiosk Mode
+                                <i className="fas fa-expand"></i> Enter Full-Screen Now
                             </button>
                         </div>
-                    </div>
-                </div>
+                    </ModalBody>
+                </Modal>
             );
         };
 
         // ====================================================================
-        // 5. MAIN STANDALONE CUSTOMER DISPLAY APPLICATION (0ms TRIPLE-CHANNEL)
+        // 5. MAIN STANDALONE CUSTOMER DISPLAY APPLICATION (0ms TRIPLE-CHANNEL SYNC)
         // ====================================================================
         function CustomerDisplayApp() {
             const [deviceId] = useState(() => getOrCreateDisplayDeviceId());
+
+            // Parse URL parameters for instant zero-query pairing (?shopId=...&shopName=...)
             const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
             const urlShopId = urlParams.get('shopId') || '';
             const urlShopName = urlParams.get('shopName') || '';
@@ -772,75 +867,91 @@
                 } catch (e) { return 'km'; }
             });
             const [paidDismissedToIdle, setPaidDismissedToIdle] = useState(false);
+            const [audioNeedsTapUnlock, setAudioNeedsTapUnlock] = useState(false);
+
+            useEffect(() => {
+                PaymentVoiceAnnouncer._onAutoplayBlocked = () => setAudioNeedsTapUnlock(true);
+                const clearUnlockBanner = () => setAudioNeedsTapUnlock(false);
+                window.addEventListener('pointerdown', clearUnlockBanner, { passive: true });
+                return () => {
+                    PaymentVoiceAnnouncer._onAutoplayBlocked = null;
+                    window.removeEventListener('pointerdown', clearUnlockBanner);
+                };
+            }, []);
 
             const cartListEndRef = useRef(null);
             const prevStatusRef = useRef('IDLE');
             const prevItemCountRef = useRef(0);
             const lastAnnouncedKeyRef = useRef('');
 
-            const handleToggleVoiceEnabled = useCallback((nextVal) => {
-                const resolved = typeof nextVal === 'boolean' ? nextVal : !voiceEnabled;
-                setVoiceEnabled(resolved);
-                try { localStorage.setItem('solaris_display_voice_enabled', String(resolved)); } catch (e) {}
-                if (!resolved) PaymentVoiceAnnouncer.stop();
-            }, [voiceEnabled]);
+            const handleToggleVoiceEnabled = useCallback(() => {
+                setVoiceEnabled(prev => {
+                    const next = !prev;
+                    try { localStorage.setItem('solaris_display_voice_enabled', String(next)); } catch (e) {}
+                    if (!next) PaymentVoiceAnnouncer.stop();
+                    return next;
+                });
+            }, []);
 
-            const handleSetVoiceLang = useCallback((nextLang, playSample = false) => {
-                const clean = nextLang === 'en' ? 'en' : 'km';
-                setVoiceLang(clean);
-                try { localStorage.setItem('solaris_display_voice_lang', clean); } catch (e) {}
+            const handleSetVoiceLang = useCallback((lang, playSample = false) => {
+                const nextLang = lang === 'en' ? 'en' : 'km';
+                setVoiceLang(nextLang);
+                try { localStorage.setItem('solaris_display_voice_lang', nextLang); } catch (e) {}
                 if (playSample) {
-                    warmUpAudioContext();
-                    if (isMuted) setIsMuted(false);
-                    if (!voiceEnabled) handleToggleVoiceEnabled(true);
-                    PaymentVoiceAnnouncer.testVoice(clean);
+                    setAudioNeedsTapUnlock(false);
+                    PaymentVoiceAnnouncer.testVoice(nextLang);
                 }
-            }, [isMuted, voiceEnabled, handleToggleVoiceEnabled]);
+            }, []);
 
-            // Monotonic Freshness Guard + Synchronous ReactDOM.flushSync for True 0ms Local/Direct Rendering
-            const acceptIncomingSession = useCallback((payload, channelLabel = 'Cloud Live', isInstantLocal = false) => {
+            // Monotonic Freshness Guard + 0ms ReactDOM.flushSync Commit
+            const acceptIncomingSession = useCallback((payload, sourceLabel = 'Cloud Live', isImmediateLocal = false) => {
                 if (!payload || typeof payload !== 'object') return;
-                const incomingTs = Number(payload.updatedAt) || Date.now();
-                const isPriorityTransition = payload.status === 'PAID' || payload.status === 'REVOKED';
-                // Skip stale packets or duplicate cloud echoes of an already-applied 0ms local update
-                if (!isPriorityTransition) {
-                    if (incomingTs < lastAcceptedUpdatedAtRef.current) return;
-                    if (!isInstantLocal && incomingTs === lastAcceptedUpdatedAtRef.current) return;
+                const incomingTs = Number(payload.updatedAt) || 0;
+                if (incomingTs > 0 && incomingTs < lastAcceptedUpdatedAtRef.current) {
+                    return; // Reject stale cloud echoes if a newer 0ms local update was already applied
                 }
-                lastAcceptedUpdatedAtRef.current = incomingTs;
-                const measuredMs = payload.sentAt ? Math.max(0, Date.now() - Number(payload.sentAt)) : 0;
+                if (incomingTs > 0 && incomingTs === lastAcceptedUpdatedAtRef.current && !isImmediateLocal) {
+                    return; // Skip redundant cloud echo of the exact same update
+                }
+                if (incomingTs > 0) {
+                    lastAcceptedUpdatedAtRef.current = incomingTs;
+                }
 
-                const applyState = () => {
+                const sentTs = Number(payload.sentAt || payload.updatedAt || 0);
+                const latency = sentTs > 0 ? Math.max(0, Math.min(9999, Date.now() - sentTs)) : 0;
+
+                const commitUpdate = () => {
                     setSessionData(payload);
-                    setSyncChannelBadge(channelLabel);
-                    setLastLatencyMs(measuredMs);
                     if (payload.selectedCurrency) {
                         setDisplayCurrency(payload.selectedCurrency);
                     }
-                    if (payload.status !== 'PAID') {
-                        setPaidDismissedToIdle(false);
-                    }
+                    setSyncChannelBadge(sourceLabel);
+                    setLastLatencyMs(isImmediateLocal ? Math.min(latency, 1) : latency);
                 };
 
-                if (isInstantLocal && typeof ReactDOM.flushSync === 'function') {
+                if (isImmediateLocal && typeof ReactDOM !== 'undefined' && typeof ReactDOM.flushSync === 'function') {
                     try {
-                        ReactDOM.flushSync(applyState);
+                        ReactDOM.flushSync(commitUpdate);
                         return;
                     } catch (e) {}
                 }
-                applyState();
+                commitUpdate();
             }, []);
 
-            // Keep Screen Awake (Wake Lock API)
+            // Keep Customer Counter Display Awake
             useEffect(() => {
                 let wakeLock = null;
                 const requestWakeLock = async () => {
                     try {
-                        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+                        if ('wakeLock' in navigator) {
+                            wakeLock = await navigator.wakeLock.request('screen');
+                        }
                     } catch (e) {}
                 };
                 requestWakeLock();
-                const handleVis = () => { if (document.visibilityState === 'visible') requestWakeLock(); };
+                const handleVis = () => {
+                    if (document.visibilityState === 'visible') requestWakeLock();
+                };
                 document.addEventListener('visibilitychange', handleVis);
                 return () => {
                     document.removeEventListener('visibilitychange', handleVis);
@@ -1525,6 +1636,22 @@
 
                         {/* Right Controls */}
                         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                            {audioNeedsTapUnlock && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        warmUpAudioContext();
+                                        PaymentVoiceAnnouncer.unlockAudio();
+                                        setAudioNeedsTapUnlock(false);
+                                        PaymentVoiceAnnouncer.testVoice(voiceLang);
+                                    }}
+                                    className="h-8 sm:h-9 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-[11px] flex items-center gap-1.5 animate-pulse shadow-lg"
+                                    title="Tap once to unlock Khmer voice audio on this browser"
+                                >
+                                    <i className="fas fa-volume-up"></i>
+                                    <span>Tap to Enable Voice</span>
+                                </button>
+                            )}
                             <span className="hidden sm:inline-block text-xs sm:text-sm font-mono font-bold text-slate-300 bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700">
                                 {clockStr}
                             </span>
