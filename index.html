@@ -2787,22 +2787,132 @@
             } catch (e) {}
         },
 
+        _displayWindows: new Set(),
+        _windowMsgBound: false,
+
+        _ensureDisplayWindowListener() {
+            if (this._windowMsgBound) return;
+            this._windowMsgBound = true;
+            window.addEventListener('message', (ev) => {
+                const msg = ev?.data;
+                if (!msg || msg.type !== 'REQUEST_POS_SYNC' || !ev.source) return;
+                try {
+                    this._displayWindows.add(ev.source);
+                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
+                    if (Array.isArray(cachedShops) && cachedShops.length > 0) {
+                        ev.source.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    }
+                    const targetShopId = msg.shopId;
+                    if (targetShopId && this._lastSessionPayloadByShop?.[targetShopId]) {
+                        ev.source.postMessage({
+                            type: 'POS_DISPLAY_SESSION',
+                            shopId: targetShopId,
+                            payload: { ...this._lastSessionPayloadByShop[targetShopId], sentAt: Date.now() }
+                        }, '*');
+                    } else if (this._lastSessionPayloadByShop) {
+                        Object.entries(this._lastSessionPayloadByShop).forEach(([sId, payload]) => {
+                            ev.source.postMessage({
+                                type: 'POS_DISPLAY_SESSION',
+                                shopId: sId,
+                                payload: { ...payload, sentAt: Date.now() }
+                            }, '*');
+                        });
+                    }
+                } catch (e) {}
+            });
+        },
+
+        registerCustomerDisplayWindow(win, shopId = '') {
+            this._ensureDisplayWindowListener();
+            if (!win || win.closed) return;
+            this._displayWindows.add(win);
+            const pushInitial = () => {
+                if (!win || win.closed) {
+                    this._displayWindows.delete(win);
+                    return;
+                }
+                try {
+                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
+                    if (Array.isArray(cachedShops) && cachedShops.length > 0) {
+                        win.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    }
+                    const payload = shopId ? this._lastSessionPayloadByShop?.[shopId] : null;
+                    if (payload) {
+                        win.postMessage({
+                            type: 'POS_DISPLAY_SESSION',
+                            shopId,
+                            payload: { ...payload, sentAt: Date.now() }
+                        }, '*');
+                    }
+                } catch (e) {}
+            };
+            pushInitial();
+            setTimeout(pushInitial, 350);
+            setTimeout(pushInitial, 900);
+        },
+
         async broadcastCustomerDisplaySession(shopId, sessionPayload = null) {
             if (!shopId || shopId === 'All') return;
             try {
+                this._ensureDisplayWindowListener();
+                const nowTs = Date.now();
                 const fullPayload = !sessionPayload
-                    ? { status: 'IDLE', shopId, updatedAt: Date.now() }
-                    : { ...sessionPayload, shopId, updatedAt: Date.now() };
+                    ? { status: 'IDLE', shopId, updatedAt: nowTs, sentAt: nowTs }
+                    : { ...sessionPayload, shopId, updatedAt: nowTs, sentAt: nowTs };
 
-                // 1. 0ms LocalStorage + Cross-Tab BroadcastChannel push (instant on dual-screen / same browser)
-                try {
-                    localStorage.setItem(`solaris_khqr_display_session_${shopId}`, JSON.stringify(fullPayload));
-                } catch (e) {}
+                if (!this._lastSessionPayloadByShop) this._lastSessionPayloadByShop = {};
+                this._lastSessionPayloadByShop[shopId] = fullPayload;
 
+                // 0. 0ms Direct Window postMessage (Works even cross-origin, fires BEFORE disk I/O!)
+                if (this._displayWindows && this._displayWindows.size > 0) {
+                    for (const win of Array.from(this._displayWindows)) {
+                        if (!win || win.closed) {
+                            this._displayWindows.delete(win);
+                            continue;
+                        }
+                        try {
+                            win.postMessage({
+                                type: 'POS_DISPLAY_SESSION',
+                                shopId,
+                                payload: fullPayload
+                            }, '*');
+                        } catch (e) {}
+                    }
+                }
+
+                // 1. 0ms Cross-Tab BroadcastChannel (Memory-to-memory push before localStorage disk write)
                 try {
                     if (typeof BroadcastChannel !== 'undefined') {
                         if (!this._khqrDisplayBus) {
                             this._khqrDisplayBus = new BroadcastChannel('solaris_khqr_display_bus');
+                            // Respond in 0ms whenever a standalone Customer Display window requests initial sync
+                            this._khqrDisplayBus.onmessage = (ev) => {
+                                const msg = ev?.data;
+                                if (msg && msg.type === 'REQUEST_POS_SYNC') {
+                                    try {
+                                        const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
+                                        if (Array.isArray(cachedShops) && cachedShops.length > 0) {
+                                            this._khqrDisplayBus.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops });
+                                        }
+                                    } catch (e) {}
+                                    const targetShopId = msg.shopId;
+                                    if (targetShopId && this._lastSessionPayloadByShop?.[targetShopId]) {
+                                        this._khqrDisplayBus.postMessage({
+                                            type: 'POS_DISPLAY_SESSION',
+                                            shopId: targetShopId,
+                                            payload: { ...this._lastSessionPayloadByShop[targetShopId], sentAt: Date.now() }
+                                        });
+                                    } else if (this._lastSessionPayloadByShop) {
+                                        Object.entries(this._lastSessionPayloadByShop).forEach(([sId, payload]) => {
+                                            this._khqrDisplayBus.postMessage({
+                                                type: 'POS_DISPLAY_SESSION',
+                                                shopId: sId,
+                                                payload: { ...payload, sentAt: Date.now() }
+                                            });
+                                        });
+                                    }
+                                }
+                            };
                         }
                         this._khqrDisplayBus.postMessage({
                             type: 'POS_DISPLAY_SESSION',
@@ -2812,24 +2922,49 @@
                     }
                 } catch (e) {}
 
-                // 2. QUOTA GUARD: Only write to Cloud Firestore on critical checkout state transitions (ACTIVE or PAID),
-                // or at most once every 30s if idle, and skip entirely when Firestore daily quota is exhausted!
+                // 1B. Defer LocalStorage disk persistence to microtask so it never delays the 0ms display frame
+                const persistLocal = () => {
+                    try {
+                        localStorage.setItem(`solaris_khqr_display_session_${shopId}`, JSON.stringify(fullPayload));
+                    } catch (e) {}
+                };
+                if (typeof queueMicrotask === 'function') queueMicrotask(persistLocal);
+                else setTimeout(persistLocal, 0);
+
+                // 2. CROSS-DEVICE CLOUD SYNC (Lightweight payload: strips heavy base64 QR images so tablets sync ~10x faster)
                 if (this.isQuotaExceeded) return;
                 const status = fullPayload.status || 'IDLE';
-                const prevStatus = this._lastCloudDisplayStatusByShop?.[shopId];
                 if (!this._lastCloudDisplayStatusByShop) this._lastCloudDisplayStatusByShop = {};
+                if (!this._lastCloudPayloadHashByShop) this._lastCloudPayloadHashByShop = {};
 
+                const prevStatus = this._lastCloudDisplayStatusByShop[shopId];
+                const cloudPayload = { ...fullPayload };
+                delete cloudPayload.sentAt;
+                if (typeof cloudPayload.staticQrImage === 'string' && cloudPayload.staticQrImage.length > 2048) {
+                    delete cloudPayload.staticQrImage;
+                }
+
+                const fingerprintPayload = { ...cloudPayload };
+                delete fingerprintPayload.updatedAt;
+                const payloadHash = JSON.stringify(fingerprintPayload);
+
+                const isDuplicateWrite = this._lastCloudPayloadHashByShop[shopId] === payloadHash;
                 const shouldWriteCloud =
-                    status === 'ACTIVE' ||
-                    status === 'PAID' ||
-                    status === 'REVOKED' ||
-                    (status === 'IDLE' && (prevStatus === 'ACTIVE' || prevStatus === 'PAID'));
+                    !isDuplicateWrite && (
+                        status === 'CART' ||
+                        status === 'ACTIVE' ||
+                        status === 'PAID' ||
+                        status === 'REVOKED' ||
+                        (status === 'IDLE' && prevStatus && prevStatus !== 'IDLE')
+                    );
 
-                this._lastCloudDisplayStatusByShop[shopId] = status;
                 if (!shouldWriteCloud) return;
 
+                this._lastCloudDisplayStatusByShop[shopId] = status;
+                this._lastCloudPayloadHashByShop[shopId] = payloadHash;
+
                 const docRef = db.collection('system_settings').doc(`khqr_display_${shopId}`);
-                docRef.set(fullPayload, { merge: true }).catch(err => {
+                docRef.set(cloudPayload, { merge: true }).catch(err => {
                     if (err?.code === 'resource-exhausted' || /quota|exhausted/i.test(err?.message || '')) {
                         this.isQuotaExceeded = true;
                     }
@@ -4525,6 +4660,528 @@
         );
     };
 
+    // --- NEW: PIN-Protected Live Dynamic KHQR Simulator Modal for POS Terminal (Any Purpose) ---
+    const LiveDynamicKhqrSimulatorModal = ({ show, onClose, shop, systemConfig }) => {
+        const [isUnlocked, setIsUnlocked] = useState(false);
+        const [pinInput, setPinInput] = useState('');
+        const [showPin, setShowPin] = useState(false);
+        const [pinError, setPinError] = useState('');
+
+        // Live Dynamic Simulator State (KHR Default / USD)
+        const [simCurrency, setSimCurrency] = useState('KHR');
+        const [simAmountKHR, setSimAmountKHR] = useState(10000);
+        const [simAmountUSD, setSimAmountUSD] = useState('2.50');
+        const [simInvoiceNo, setSimInvoiceNo] = useState('');
+        const [pushedToDisplay, setPushedToDisplay] = useState(false);
+
+        const cfg = shop?.khqrConfig || {};
+        const exchangeRate = Math.max(100, Number(cfg.exchangeRate) || 4000);
+        const requiredPin = useMemo(() => {
+            const clean = String(shop?.discountPin || '').replace(/\D/g, '');
+            return clean.length === 6 ? clean : '';
+        }, [shop?.discountPin]);
+
+        // Reset PIN lock & initialize reference every time the modal opens/closes
+        useEffect(() => {
+            if (show) {
+                setIsUnlocked(false);
+                setPinInput('');
+                setShowPin(false);
+                setPinError('');
+                setPushedToDisplay(false);
+                setSimInvoiceNo(`QR-${Date.now().toString().slice(-6)}`);
+            }
+        }, [show]);
+
+        const handleCloseModal = () => {
+            if (pushedToDisplay && shop?.id && window.SolarisPayWayVerifier) {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, {
+                    status: 'IDLE',
+                    shopId: shop.id,
+                    shopName: shop.brandingName || shop.name || systemConfig?.appName || 'POS Terminal',
+                    exchangeRate
+                });
+            }
+            onClose();
+        };
+
+        const verifyPinValue = (val) => {
+            const digits = String(val || '').replace(/\D/g, '').slice(0, 6);
+            setPinInput(digits);
+            setPinError('');
+            if (requiredPin && digits.length === 6) {
+                if (digits === requiredPin) {
+                    setIsUnlocked(true);
+                    setPinError('');
+                } else {
+                    setPinError('Incorrect 6-digit Shop PIN. Please try again.');
+                }
+            }
+        };
+
+        const handlePinPadDigit = (d) => {
+            if (pinInput.length >= 6) return;
+            verifyPinValue(pinInput + String(d));
+        };
+
+        const handlePinPadBackspace = () => {
+            setPinInput(prev => prev.slice(0, -1));
+            setPinError('');
+        };
+
+        const handlePinPadClear = () => {
+            setPinInput('');
+            setPinError('');
+        };
+
+        const simulatedUsd = useMemo(() => {
+            if (simCurrency === 'USD') {
+                return (Number(simAmountUSD) || 0).toFixed(2);
+            }
+            return (Number(simAmountKHR || 0) / exchangeRate).toFixed(2);
+        }, [simCurrency, simAmountKHR, simAmountUSD, exchangeRate]);
+
+        const simulatedKhr = useMemo(() => {
+            if (simCurrency === 'USD') {
+                return Math.round((Number(simAmountUSD) || 0) * exchangeRate);
+            }
+            return Math.round(Number(simAmountKHR) || 0);
+        }, [simCurrency, simAmountKHR, simAmountUSD, exchangeRate]);
+
+        const extractedMeta = useMemo(() => {
+            if (!cfg.baseEmvPayload || !window.SolarisKHQREngine) return { merchantName: null, mid: null };
+            return window.SolarisKHQREngine.extractMerchantInfoFromEMV(cfg.baseEmvPayload);
+        }, [cfg.baseEmvPayload]);
+
+        const displayMerchantName = (
+            cfg.accountName ||
+            extractedMeta.merchantName ||
+            shop?.brandingName ||
+            shop?.name ||
+            'MERCHANT NAME'
+        ).toUpperCase();
+        const displayMid = extractedMeta.mid || 'N/A';
+
+        const simulatedDynamicPayload = useMemo(() => {
+            if (!cfg.baseEmvPayload || !window.SolarisKHQREngine) return null;
+            const targetAmt = simCurrency === 'USD' ? Number(simulatedUsd) : Number(simulatedKhr);
+            const expMins = Math.max(5, Number(cfg.qrValidMinutes) || 15);
+            return window.SolarisKHQREngine.generateDynamicKHQR(
+                cfg.baseEmvPayload,
+                targetAmt,
+                simInvoiceNo,
+                simCurrency,
+                expMins
+            );
+        }, [cfg.baseEmvPayload, cfg.qrValidMinutes, simCurrency, simulatedUsd, simulatedKhr, simInvoiceNo]);
+
+        const handlePushToCustomerDisplay = () => {
+            if (!shop?.id || !window.SolarisPayWayVerifier) return;
+            const nowMs = Date.now();
+            const expMs = nowMs + Math.max(5, Number(cfg.qrValidMinutes) || 15) * 60 * 1000;
+            window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, {
+                status: 'ACTIVE',
+                sessionId: `SIM_${simInvoiceNo}_${nowMs}`,
+                shopId: shop.id,
+                shopName: shop.brandingName || shop.name || systemConfig?.appName || 'POS Terminal',
+                accountName: displayMerchantName,
+                khrAccount: cfg.khrAccount || '',
+                usdAccount: cfg.usdAccount || '',
+                exchangeRate,
+                baseEmvPayload: cfg.baseEmvPayload || '',
+                staticQrImage: cfg.staticQrImage || '',
+                items: [],
+                subtotalKhr: simulatedKhr,
+                discountKhr: 0,
+                amountKhr: simulatedKhr,
+                amountUsd: Number(simulatedUsd),
+                selectedCurrency: simCurrency,
+                invoiceNo: simInvoiceNo || 'CUSTOM-QR',
+                initiatedAt: nowMs,
+                expiresAt: expMs
+            });
+            setPushedToDisplay(true);
+        };
+
+        if (!show) return null;
+
+        return (
+            <Modal show={show} onClose={handleCloseModal} maxWidth={isUnlocked ? 'max-w-2xl' : 'max-w-sm'}>
+                <ModalHeader
+                    title={isUnlocked ? 'Live Dynamic KHQR Simulator' : 'PIN Required — Live KHQR Simulator'}
+                    onClose={handleCloseModal}
+                />
+                <ModalBody>
+                    {!isUnlocked ? (
+                        /* PIN SECURITY GATE */
+                        <div className="space-y-4">
+                            <div className="text-center space-y-1.5">
+                                <div className="w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto shadow-inner">
+                                    <i className="fas fa-lock text-2xl"></i>
+                                </div>
+                                <h4 className="text-base font-bold text-white">Authorize Dynamic KHQR Access</h4>
+                                <p className="text-xs text-slate-400">
+                                    Enter the 6-digit Shop PIN for <strong className="text-slate-200">{shop?.name || 'this shop'}</strong> to open the Live Dynamic KHQR Simulator.
+                                </p>
+                            </div>
+
+                            {!requiredPin ? (
+                                <div className="p-4 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs space-y-2 text-center">
+                                    <i className="fas fa-exclamation-triangle text-amber-400 text-xl block"></i>
+                                    <p className="font-bold">No 6-Digit Shop PIN Configured</p>
+                                    <p className="text-amber-200/80">
+                                        Please configure a 6-digit PIN in <strong>Settings &rarr; Shop Property &rarr; Shop &amp; Location</strong> for this branch before using the Live Dynamic KHQR Simulator.
+                                    </p>
+                                </div>
+                            ) : (
+                                <>
+                                    <div>
+                                        <div className="relative flex items-center">
+                                            <input
+                                                type={showPin ? 'text' : 'password'}
+                                                inputMode="numeric"
+                                                maxLength={6}
+                                                value={pinInput}
+                                                onChange={(e) => verifyPinValue(e.target.value)}
+                                                placeholder="• • • • • •"
+                                                autoFocus
+                                                className={`w-full bg-slate-900 text-center font-mono text-2xl font-black tracking-[0.45em] py-3 pl-4 pr-12 rounded-xl border outline-none transition ${
+                                                    pinError
+                                                        ? 'border-rose-500 text-rose-300'
+                                                        : 'border-slate-600 text-white focus:border-rose-500'
+                                                }`}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowPin(prev => !prev)}
+                                                className="absolute right-3 text-slate-400 hover:text-white p-1.5"
+                                                title={showPin ? 'Hide PIN' : 'Show PIN'}
+                                            >
+                                                <i className={`fas ${showPin ? 'fa-eye-slash text-amber-400' : 'fa-eye'}`}></i>
+                                            </button>
+                                        </div>
+                                        {pinError && (
+                                            <p className="text-xs text-rose-400 font-bold text-center mt-2">
+                                                <i className="fas fa-times-circle mr-1"></i>{pinError}
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    {/* Touch-Friendly PIN Keypad */}
+                                    <div className="grid grid-cols-3 gap-2 bg-slate-900/60 p-2.5 rounded-xl border border-slate-700">
+                                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                                            <button
+                                                key={num}
+                                                type="button"
+                                                onClick={() => handlePinPadDigit(num)}
+                                                className="h-12 bg-slate-800 hover:bg-slate-700 active:bg-rose-600 text-white font-bold text-xl rounded-lg border border-slate-700 transition shadow-sm select-none"
+                                            >
+                                                {num}
+                                            </button>
+                                        ))}
+                                        <button
+                                            type="button"
+                                            onClick={handlePinPadClear}
+                                            className="h-12 bg-red-900/30 hover:bg-red-900/50 text-red-300 font-bold text-sm rounded-lg border border-red-800/40 transition select-none"
+                                        >
+                                            CLR
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handlePinPadDigit(0)}
+                                            className="h-12 bg-slate-800 hover:bg-slate-700 active:bg-rose-600 text-white font-bold text-xl rounded-lg border border-slate-700 transition shadow-sm select-none"
+                                        >
+                                            0
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handlePinPadBackspace}
+                                            className="h-12 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-lg rounded-lg border border-slate-700 transition select-none"
+                                        >
+                                            <i className="fas fa-backspace"></i>
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    ) : (
+                        /* UNLOCKED: LIVE DYNAMIC KHQR SIMULATOR (Borrowed from KHQR Settings) */
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
+                            {/* Left Column: Official ABA PAY Standee Preview */}
+                            <div className="flex flex-col items-center">
+                                <div className="w-full max-w-[300px] flex items-center justify-between mb-2.5">
+                                    <span className="text-[11px] font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                                        <i className="fas fa-qrcode text-rose-400"></i>
+                                        <span>Live Dynamic QR</span>
+                                    </span>
+                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${simulatedDynamicPayload ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'}`}>
+                                        {simulatedDynamicPayload ? `Dynamic ${simCurrency} Active` : 'Static / Awaiting QR'}
+                                    </span>
+                                </div>
+
+                                <div className="w-full max-w-[300px] rounded-[22px] overflow-hidden shadow-2xl bg-[#004459] p-[7px] relative select-none border border-[#003647]">
+                                    <div
+                                        className="bg-white w-full h-full relative pt-5 pb-4 px-4 flex flex-col items-center overflow-hidden rounded-[16px]"
+                                        style={{ clipPath: 'polygon(18px 0, 100% 0, 100% 100%, 0 100%, 0 18px)' }}
+                                    >
+                                        <div className="flex items-center justify-center tracking-tight leading-none mt-1">
+                                            <span className="text-[28px] font-black text-[#004861] tracking-[0.04em]">ABA</span>
+                                            <span className="inline-block w-[5px] h-[12px] bg-[#D9232E] -mt-3.5 mx-[3px] rounded-[1px]"></span>
+                                            <span className="text-[28px] font-black text-[#26A9C8] tracking-[0.06em] ml-1">PAY</span>
+                                        </div>
+
+                                        <div className="text-[12.5px] italic font-medium text-stone-800 mt-1.5 mb-2.5 tracking-wide">
+                                            Scan. Pay. Done.
+                                        </div>
+
+                                        <div className="mb-2.5 px-3 py-1 rounded-full bg-stone-100/95 border border-stone-200/90 flex items-center gap-1.5 shadow-inner flex-wrap justify-center">
+                                            {simCurrency === 'KHR' ? (
+                                                <>
+                                                    <span className="text-sm font-black text-[#004861]">{simulatedKhr.toLocaleString()} ៛</span>
+                                                    <span className="text-stone-300">•</span>
+                                                    <span className="text-[11px] font-bold text-[#26A9C8]">≈ ${simulatedUsd}</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="text-sm font-black text-[#26A9C8]">${simulatedUsd} USD</span>
+                                                    <span className="text-stone-300">•</span>
+                                                    <span className="text-[11px] font-bold text-[#004861]">≈ {simulatedKhr.toLocaleString()} ៛</span>
+                                                </>
+                                            )}
+                                            {simInvoiceNo && (
+                                                <>
+                                                    <span className="text-stone-300">•</span>
+                                                    <span className="text-[9px] font-mono font-bold text-stone-500">{simInvoiceNo}</span>
+                                                </>
+                                            )}
+                                        </div>
+
+                                        <div className="relative p-3 my-0.5 flex items-center justify-center">
+                                            <div className="w-6 h-6 border-t-[2.5px] border-l-[2.5px] border-stone-300 rounded-tl-xl absolute top-0 left-0 pointer-events-none"></div>
+                                            <div className="w-6 h-6 border-t-[2.5px] border-r-[2.5px] border-stone-300 rounded-tr-xl absolute top-0 right-0 pointer-events-none"></div>
+                                            <div className="w-6 h-6 border-b-[2.5px] border-l-[2.5px] border-stone-300 rounded-bl-xl absolute bottom-0 left-0 pointer-events-none"></div>
+                                            <div className="w-6 h-6 border-b-[2.5px] border-r-[2.5px] border-stone-300 rounded-br-xl absolute bottom-0 right-0 pointer-events-none"></div>
+
+                                            <div className="relative w-44 h-44 flex items-center justify-center bg-white">
+                                                {simulatedDynamicPayload ? (
+                                                    <>
+                                                        <img
+                                                            src={window.SolarisKHQREngine.renderInstantQRDataURL(simulatedDynamicPayload, 440, 1, 'H')}
+                                                            alt="Live Dynamic KHQR"
+                                                            className="w-44 h-44 object-contain"
+                                                        />
+                                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                            <div className="w-9 h-9 rounded-full bg-white p-[2.5px] shadow-md flex items-center justify-center">
+                                                                <div className="w-full h-full rounded-full bg-[#E1232E] flex items-center justify-center">
+                                                                    <svg viewBox="0 0 36 36" className="w-5 h-5 text-white">
+                                                                        <rect x="9.5" y="9.5" width="17" height="17" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2.2" />
+                                                                        <rect x="9.5" y="9.5" width="17" height="17" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2.2" transform="rotate(45 18 18)" />
+                                                                        <path d="M20.5 14.8 A 4.2 4.2 0 1 0 20.5 21.2" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" />
+                                                                    </svg>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </>
+                                                ) : cfg.staticQrImage ? (
+                                                    <img src={cfg.staticQrImage} alt="Static KHQR" className="w-44 h-44 object-contain" />
+                                                ) : (
+                                                    <div className="w-44 h-44 rounded-xl border-2 border-dashed border-stone-200 flex flex-col items-center justify-center text-stone-400 p-4 text-center text-xs">
+                                                        <i className="fas fa-qrcode text-3xl mb-2 opacity-40"></i>
+                                                        <span>Configure KHQR in Settings &rarr; KHR &amp; Payment (ABA)</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-2 text-center z-10">
+                                            <div className="text-[14px] font-extrabold text-stone-700 tracking-wide uppercase leading-snug">
+                                                {displayMerchantName}
+                                            </div>
+                                            <div className="text-[10px] font-bold text-stone-500 mt-0.5 tracking-wider">
+                                                MID: {displayMid}
+                                            </div>
+                                            <div className="text-[9.5px] font-mono font-bold text-stone-400 mt-0.5">
+                                                {simCurrency === 'USD' ? `USD: ${cfg.usdAccount || 'N/A'}` : `KHR: ${cfg.khrAccount || 'N/A'}`}
+                                            </div>
+                                        </div>
+
+                                        <div className="w-full mt-3.5 pt-2 flex items-end justify-start gap-2.5 z-10 pr-10 border-t border-stone-100">
+                                            <div className="flex flex-col items-start pr-2.5 border-r border-stone-300">
+                                                <span className="text-[7px] italic text-stone-500 leading-none mb-0.5">Member of</span>
+                                                <span className="text-[12px] font-black tracking-wider text-[#E1232E] leading-none">KHQR</span>
+                                            </div>
+                                            <div className="flex flex-col items-start">
+                                                <span className="text-[7px] italic text-stone-500 leading-none mb-0.5">Accepted here</span>
+                                                <div className="flex items-center gap-1">
+                                                    <div className="h-[16px] px-1.5 rounded-[3px] bg-[#26A9C8] text-white flex items-center justify-center text-[6px] font-black tracking-wider">
+                                                        ABA PAY
+                                                    </div>
+                                                    <div className="h-[16px] px-1.5 rounded-[3px] bg-white border border-stone-200 flex items-center justify-center text-[6px] font-black italic text-[#1A1F71]">
+                                                        VISA
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="absolute -bottom-8 -right-8 w-24 h-24 pointer-events-none z-0">
+                                            <div className="w-full h-full rounded-[22px] border-[12px] border-[#D9232E] transform rotate-[18deg] flex items-center justify-center">
+                                                <div className="w-10 h-10 rounded-[10px] bg-[#D9232E]"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Right Column: Dynamic Amount, Currency & Purpose Controls */}
+                            <div className="space-y-4 bg-slate-900/70 p-4 rounded-2xl border border-slate-700">
+                                <div>
+                                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        1. Currency Selection
+                                    </label>
+                                    <div className="bg-slate-800 p-1 rounded-xl border border-slate-700 grid grid-cols-2 gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                if (simCurrency !== 'KHR') {
+                                                    setSimAmountKHR(Math.round((Number(simAmountUSD) || 0) * exchangeRate));
+                                                    setSimCurrency('KHR');
+                                                }
+                                            }}
+                                            className={`py-2 rounded-lg text-xs font-black transition ${
+                                                simCurrency === 'KHR'
+                                                    ? 'bg-[#004459] text-white shadow'
+                                                    : 'text-slate-400 hover:text-white'
+                                            }`}
+                                        >
+                                            🇰🇭 KHR (៛)
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                if (simCurrency !== 'USD') {
+                                                    setSimAmountUSD(((Number(simAmountKHR) || 0) / exchangeRate).toFixed(2));
+                                                    setSimCurrency('USD');
+                                                }
+                                            }}
+                                            className={`py-2 rounded-lg text-xs font-black transition ${
+                                                simCurrency === 'USD'
+                                                    ? 'bg-[#26A9C8] text-white shadow'
+                                                    : 'text-slate-400 hover:text-white'
+                                            }`}
+                                        >
+                                            🇺🇸 USD ($)
+                                        </button>
+                                    </div>
+                                    <p className="text-[10px] text-slate-500 mt-1 font-mono">
+                                        Shop Rate: $1 = ៛{khrFormatter.format(exchangeRate)}
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        2. Custom Amount ({simCurrency})
+                                    </label>
+                                    {simCurrency === 'KHR' ? (
+                                        <div className="space-y-2">
+                                            <div className="relative">
+                                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-lg font-black text-emerald-400">៛</span>
+                                                <input
+                                                    type="number"
+                                                    step="100"
+                                                    min="0"
+                                                    value={simAmountKHR}
+                                                    onChange={e => setSimAmountKHR(e.target.value)}
+                                                    className="w-full bg-slate-800 text-white text-xl font-black pl-9 pr-3 py-2.5 rounded-xl border border-slate-600 focus:border-emerald-500 outline-none font-mono"
+                                                    placeholder="0"
+                                                />
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-1.5">
+                                                {[5000, 10000, 20000, 50000].map(val => (
+                                                    <button
+                                                        key={val}
+                                                        type="button"
+                                                        onClick={() => setSimAmountKHR(val)}
+                                                        className="py-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-700 text-[11px] font-bold transition"
+                                                    >
+                                                        {val / 1000}K
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            <div className="relative">
+                                                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-lg font-black text-sky-400">$</span>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    value={simAmountUSD}
+                                                    onChange={e => setSimAmountUSD(e.target.value)}
+                                                    className="w-full bg-slate-800 text-white text-xl font-black pl-9 pr-3 py-2.5 rounded-xl border border-slate-600 focus:border-sky-500 outline-none font-mono"
+                                                    placeholder="0.00"
+                                                />
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-1.5">
+                                                {['1.00', '5.00', '10.00', '20.00'].map(val => (
+                                                    <button
+                                                        key={val}
+                                                        type="button"
+                                                        onClick={() => setSimAmountUSD(val)}
+                                                        className="py-1.5 rounded-lg bg-slate-800 hover:bg-sky-600 text-slate-300 hover:text-white border border-slate-700 text-[11px] font-bold transition"
+                                                    >
+                                                        ${parseInt(val, 10)}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        3. Reference / Purpose Note (Optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={simInvoiceNo}
+                                        onChange={e => setSimInvoiceNo(e.target.value)}
+                                        placeholder="e.g. DEPOSIT-01 or DELIVERY"
+                                        className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-xs font-mono font-bold"
+                                    />
+                                </div>
+
+                                <div className="pt-2 border-t border-slate-700/80 space-y-2">
+                                    <button
+                                        type="button"
+                                        onClick={handlePushToCustomerDisplay}
+                                        className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                    >
+                                        <i className="fas fa-tv"></i>
+                                        <span>{pushedToDisplay ? 'Updated on Customer Display!' : 'Push QR to Customer Display'}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setIsUnlocked(false); setPinInput(''); setPinError(''); }}
+                                        className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-600 flex items-center justify-center gap-1.5 transition"
+                                    >
+                                        <i className="fas fa-lock text-rose-400"></i>
+                                        <span>Lock Simulator</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </ModalBody>
+                <ModalFooter>
+                    <button onClick={handleCloseModal} type="button" className="bg-slate-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-slate-500 w-full sm:w-auto shadow-sm transition">
+                        Close
+                    </button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
     // --- 5. REUSABLE UI COMPONENTS ---
 
     const Card = memo(({ children, className = '' }) => (
@@ -5534,18 +6191,11 @@
         
         // --- NEW: Mobile Tab State ---
         const [activeMobileTab, setActiveMobileTab] = useState('products'); 
-        // --- NEW: Universal Catalog View Mode (Grid vs List/Table across Mobile, Tablet & Desktop) ---
-        const [catalogViewMode, setCatalogViewMode] = useState(() => {
-            try {
-                return localStorage.getItem('pos_catalogViewMode') || 'list';
-            } catch (e) {
-                return 'list';
-            }
-        });
+        // --- NEW: Universal Catalog View Mode (Defaults to Line/List View on every POS Terminal launch) ---
+        const [catalogViewMode, setCatalogViewMode] = useState('list');
 
         const handleSetCatalogViewMode = (mode) => {
             setCatalogViewMode(mode);
-            try { localStorage.setItem('pos_catalogViewMode', mode); } catch (e) {}
         };
 
         // Fast O(1) lookup for quantity of each product currently in the cart (for live badges on product cards/rows)
@@ -5579,6 +6229,9 @@
         
         // --- NEW: Bank AutoSum State ---
         const [showBankAutoSum, setShowBankAutoSum] = useState(false);
+
+        // --- NEW: PIN-Protected Live Dynamic KHQR Simulator State ---
+        const [showKhqrSimulator, setShowKhqrSimulator] = useState(false);
 
         // --- NEW: Clear Cart Confirmation State ---
         const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -6257,7 +6910,7 @@
         };
 
         // --- GLOBAL BARCODE SCANNER LISTENER (<35ms burst detection) ---
-        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showQuickGroupModal;
+        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showQuickGroupModal || showKhqrSimulator;
 
         useEffect(() => {
             const handleGlobalKeyDown = (e) => {
@@ -6367,69 +7020,65 @@
             return loyaltyRate > 0 ? Math.floor(cartTotal * (loyaltyRate / 100)) : 0;
         }, [selectedCustomerId, cartTotal, activeLoyaltyRule, loyaltyRate]);
 
-        // --- NEW: Broadcast Live POS Cart (status: 'CART' or 'IDLE') to Customer-Facing Display (`khqr-display.html`) ---
-        useEffect(() => {
+        // --- NEW: Broadcast Live POS Cart (status: 'CART' or 'IDLE') to Customer-Facing Display (`POS-KHRQ.html`) in 0ms ---
+        React.useLayoutEffect(() => {
             if (!selectedShopId || !window.SolarisPayWayVerifier) return;
             // When PaymentModal is open, PaymentModal manages the ACTIVE / PAID display states
             if (showPaymentModal || showReceiptModal || thankYouModalData) return;
 
-            const timer = setTimeout(() => {
-                const rate = Math.max(100, Number(effectiveCurrentShopObj?.khqrConfig?.exchangeRate) || 4000);
-                if (cart.length > 0) {
-                    const sanitizedItems = cart.map(item => ({
-                        productId: item.productId,
-                        code: item.code || '',
-                        name: item.name || 'Item',
-                        price: Number(item.price) || 0,
-                        originalPrice: Number(item.originalPrice ?? item.price) || 0,
-                        quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
-                        note: item.note || ''
-                    }));
-                    window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
-                        status: 'CART',
-                        shopId: selectedShopId,
-                        shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
-                        deviceId: currentDeviceId || '',
-                        deviceName: currentDevice?.name || 'Counter Terminal',
-                        cashierName: userProfile?.name || 'Cashier',
-                        items: sanitizedItems,
-                        itemCount: cartItemCount,
-                        subtotalKhr: cartTotal,
-                        discountKhr: 0, // Reset discount on active cart until explicitly applied in checkout
-                        rewardProductClaimed: null, // Reset reward product
-                        amountKhr: cartTotal,
-                        amountUsd: Number((cartTotal / rate).toFixed(2)),
-                        exchangeRate: rate,
-                        customerName: selectedCustomerObj ? selectedCustomerObj.name : null,
-                        customerPhone: selectedCustomerObj ? selectedCustomerObj.phone : null,
-                        customerPoints: selectedCustomerObj ? customerLoyaltyStatus.effectivePoints : 0,
-                        estimatedPointsEarned: estimatedPoints,
-                        loyaltyRule: activeLoyaltyRule,
-                        invoiceNo: '' // Clear previous invoice number
-                    });
-                } else {
-                    window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
-                        status: 'IDLE',
-                        shopId: selectedShopId,
-                        shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
-                        exchangeRate: rate,
-                        items: [],
-                        itemCount: 0,
-                        subtotalKhr: 0,
-                        discountKhr: 0,
-                        rewardProductClaimed: null,
-                        amountKhr: 0,
-                        amountUsd: 0,
-                        customerName: null,
-                        customerPoints: 0,
-                        estimatedPointsEarned: 0,
-                        loyaltyRule: activeLoyaltyRule,
-                        invoiceNo: ''
-                    });
-                }
-            }, 100);
-
-            return () => clearTimeout(timer);
+            const rate = Math.max(100, Number(effectiveCurrentShopObj?.khqrConfig?.exchangeRate) || 4000);
+            if (cart.length > 0) {
+                const sanitizedItems = cart.map(item => ({
+                    productId: item.productId,
+                    code: item.code || '',
+                    name: item.name || 'Item',
+                    price: Number(item.price) || 0,
+                    originalPrice: Number(item.originalPrice ?? item.price) || 0,
+                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
+                    note: item.note || ''
+                }));
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                    status: 'CART',
+                    shopId: selectedShopId,
+                    shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                    deviceId: currentDeviceId || '',
+                    deviceName: currentDevice?.name || 'Counter Terminal',
+                    cashierName: userProfile?.name || 'Cashier',
+                    items: sanitizedItems,
+                    itemCount: cartItemCount,
+                    subtotalKhr: cartTotal,
+                    discountKhr: 0,
+                    rewardProductClaimed: null,
+                    amountKhr: cartTotal,
+                    amountUsd: Number((cartTotal / rate).toFixed(2)),
+                    exchangeRate: rate,
+                    customerName: selectedCustomerObj ? selectedCustomerObj.name : null,
+                    customerPhone: selectedCustomerObj ? selectedCustomerObj.phone : null,
+                    customerPoints: selectedCustomerObj ? customerLoyaltyStatus.effectivePoints : 0,
+                    estimatedPointsEarned: estimatedPoints,
+                    loyaltyRule: activeLoyaltyRule,
+                    invoiceNo: ''
+                });
+            } else {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                    status: 'IDLE',
+                    shopId: selectedShopId,
+                    shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                    exchangeRate: rate,
+                    items: [],
+                    itemCount: 0,
+                    subtotalKhr: 0,
+                    discountKhr: 0,
+                    rewardProductClaimed: null,
+                    amountKhr: 0,
+                    amountUsd: 0,
+                    customerName: null,
+                    customerPoints: 0,
+                    estimatedPointsEarned: 0,
+                    loyaltyRule: activeLoyaltyRule,
+                    invoiceNo: ''
+                });
+            }
         }, [
             cart,
             cartTotal,
@@ -6964,6 +7613,17 @@
                     currentShift={currentShift} 
                     shop={effectiveCurrentShopObj} 
                 />
+
+                {/* NEW: PIN-Protected Live Dynamic KHQR Simulator Modal (Any Purpose) */}
+                <LiveDynamicKhqrSimulatorModal
+                    show={showKhqrSimulator}
+                    onClose={() => {
+                        setShowKhqrSimulator(false);
+                        refocusSearchInput();
+                    }}
+                    shop={effectiveCurrentShopObj}
+                    systemConfig={systemConfig}
+                />
                 
                 {/* SHIFT MODAL - Pass deviceId & optimistic shift state callback */}
                 {showShiftModal && (
@@ -7133,11 +7793,15 @@
                                     type="button"
                                     onClick={() => {
                                         const shopName = effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || 'POS';
-                                        const targetUrl = `https://jlw168.github.io/PO_Listener/POS-KHRQ.html?shopId=${encodeURIComponent(selectedShopId)}&shopName=${encodeURIComponent(shopName)}`;
-                                        window.open(targetUrl, '_blank', 'noopener');
+                                        const targetUrl = `https://jlw168.github.io/POS/POS-KHRQ.html?shopId=${encodeURIComponent(selectedShopId)}&shopName=${encodeURIComponent(shopName)}`;
+                                        const displayWin = window.open(targetUrl, 'solaris_customer_display');
+                                        if (displayWin) {
+                                            try { displayWin.focus(); } catch (e) {}
+                                            window.SolarisPayWayVerifier?.registerCustomerDisplayWindow(displayWin, selectedShopId);
+                                        }
                                     }}
                                     className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-xl border border-indigo-500/40 flex items-center justify-center shrink-0 transition"
-                                    title="Open Customer-Facing Live Cart & KHQR Display in New Window"
+                                    title="Open Customer-Facing Live Cart & KHQR Display in New Window (0ms Sync)"
                                 >
                                     <i className="fas fa-tv"></i>
                                 </button>
@@ -7209,623 +7873,591 @@
                                 >
                                     <i className="fas fa-university text-amber-400"></i>
                                 </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setShowKhqrSimulator(true)}
+                                    className="relative w-9 h-9 sm:w-10 sm:h-10 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white rounded-xl border border-rose-500/40 flex items-center justify-center shrink-0 transition"
+                                    title="Live Dynamic KHQR Simulator (PIN Required)"
+                                >
+                                    <i className="fas fa-qrcode"></i>
+                                    <i className="fas fa-lock text-[8px] absolute bottom-1 right-1 text-amber-300"></i>
+                                </button>
                             </div>
                         </div>
 
-                        {/* Offline Rush Resilience Reassurance Banner */}
-                        {!isOnline && (
-                            <div className="bg-amber-500/15 border-b border-amber-500/40 px-3 py-1.5 flex items-center justify-between text-xs text-amber-200">
-                                <div className="flex items-center gap-2">
-                                    <i className="fas fa-cloud-upload-alt text-amber-400"></i>
-                                    <span>
-                                        <strong>Offline Queue Active:</strong> Internet dropped, but you can continue ringing up sales normally.
-                                    </span>
-                                </div>
-                                <span className="font-mono font-bold text-amber-300 shrink-0 ml-2">
-                                    {pendingSyncCount} Pending Upload{pendingSyncCount === 1 ? '' : 's'}
-                                </span>
-                            </div>
-                        )}
+                        {/* Secondary Bar: Vendor Filter, Quick Access Groups & List/Grid View Switcher */}
+                        <div className="px-2.5 sm:px-3 py-2 bg-slate-900/40 border-b border-slate-700/70 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar flex-1 min-w-0">
+                                {/* Vendor Dropdown */}
+                                <select
+                                    value={selectedTab}
+                                    onChange={(e) => { setSelectedTab(e.target.value); refocusSearchInput(); }}
+                                    className="bg-slate-800 text-slate-200 px-2.5 py-1.5 rounded-lg border border-slate-600/80 text-xs font-bold outline-none focus:border-blue-500 shrink-0 max-w-[140px] truncate"
+                                    title="Filter by Vendor"
+                                >
+                                    {filterTabs.map(v => (
+                                        <option key={v} value={v}>{v === 'All' ? 'All Vendors' : v}</option>
+                                    ))}
+                                </select>
 
-                        {/* All + Vendor Dropdown, Quick Access Custom Product Groups (+), & Universal Grid/Table Switcher */}
-                        <div className="px-2.5 sm:px-3 py-2 bg-slate-800/90 border-b border-slate-700/80 flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 flex-1 min-w-0">
-                                {/* 1. Unified "All / All Vendors (n)" Droplist */}
-                                <div className="relative shrink-0">
-                                    <select
-                                        value={selectedTab}
-                                        onChange={(e) => {
-                                            const val = e.target.value;
-                                            setSelectedTab(val);
-                                            if (val === 'All') {
-                                                setActiveQuickGroupId('');
-                                            }
-                                            refocusSearchInput();
-                                        }}
-                                        className={`appearance-none pl-3 pr-7 py-1.5 rounded-xl text-xs font-bold border outline-none cursor-pointer transition-all max-w-[160px] sm:max-w-[200px] truncate ${
-                                            selectedTab !== 'All'
-                                                ? 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-900/40'
-                                                : !activeQuickGroupId
-                                                    ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
-                                                    : 'bg-slate-900/70 text-slate-300 border-slate-700 hover:border-slate-500'
-                                        }`}
-                                        title="Filter by All or Vendor"
-                                    >
-                                        <option value="All" className="bg-slate-900 text-slate-200">All Vendors ({filterTabs.length - 1})</option>
-                                        {filterTabs.filter(t => t !== 'All').map(tabName => (
-                                            <option key={tabName} value={tabName} className="bg-slate-900 text-white">{tabName}</option>
-                                        ))}
-                                    </select>
-                                    <i className={`fas fa-chevron-down absolute right-2.5 top-1/2 -translate-y-1/2 text-[9px] pointer-events-none ${selectedTab !== 'All' || !activeQuickGroupId ? 'text-white' : 'text-slate-400'}`}></i>
-                                </div>
-
-                                <div className="h-4 w-px bg-slate-700 mx-0.5 shrink-0"></div>
-
-                                {/* 2. Quick Access Custom Product Groups */}
-                                {quickGroups.map(grp => {
-                                    const isGrpActive = activeQuickGroupId === grp.id;
-                                    return (
-                                        <div key={grp.id} className="inline-flex items-center shrink-0">
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    setActiveQuickGroupId(isGrpActive ? '' : grp.id);
-                                                    refocusSearchInput();
-                                                }}
-                                                onDoubleClick={() => {
-                                                    setEditingQuickGroup(grp);
-                                                    setShowQuickGroupModal(true);
-                                                }}
-                                                className={`px-2.5 py-1.5 text-xs font-bold whitespace-nowrap transition-all flex items-center gap-1.5 border ${
-                                                    isGrpActive
-                                                        ? 'bg-amber-500 text-slate-950 border-amber-300 rounded-l-xl shadow-md shadow-amber-900/30'
-                                                        : 'bg-slate-900/70 text-amber-300/90 border-slate-700 hover:bg-slate-700 hover:text-amber-200 rounded-xl'
-                                                }`}
-                                                title={`${grp.name} (${(grp.productIds || []).length} items) — Click to filter`}
-                                            >
-                                                <i className="fas fa-bolt text-[10px]"></i>
-                                                <span>{grp.name}</span>
-                                                <span className={`text-[10px] px-1 rounded-full font-extrabold ${isGrpActive ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
-                                                    {(grp.productIds || []).length}
-                                                </span>
-                                            </button>
-                                            {isGrpActive && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setEditingQuickGroup(grp);
-                                                        setShowQuickGroupModal(true);
-                                                    }}
-                                                    className="px-2 py-1.5 bg-amber-600 hover:bg-amber-500 text-slate-950 text-xs font-bold rounded-r-xl border-y border-r border-amber-300 transition"
-                                                    title="Edit Quick Access Group"
-                                                >
-                                                    <i className="fas fa-pen text-[10px]"></i>
-                                                </button>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-
-                                {/* 4. Compact "+" Icon Button to Create a New Quick Access Group */}
+                                {/* Quick Access Group Pills */}
                                 <button
                                     type="button"
-                                    onClick={() => {
-                                        setEditingQuickGroup(null);
-                                        setShowQuickGroupModal(true);
-                                    }}
-                                    className="w-7 h-7 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/40 flex items-center justify-center transition-all shrink-0 shadow-sm active:scale-95"
-                                    title="Create Quick Access Product Group (+)"
+                                    onClick={() => { setActiveQuickGroupId(''); refocusSearchInput(); }}
+                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition shrink-0 border ${
+                                        !activeQuickGroupId
+                                            ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                                            : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                                    }`}
                                 >
-                                    <i className="fas fa-plus text-xs"></i>
+                                    All ({filteredProducts.length})
+                                </button>
+
+                                {quickGroups.map(grp => (
+                                    <div key={grp.id} className="inline-flex items-center shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setActiveQuickGroupId(activeQuickGroupId === grp.id ? '' : grp.id);
+                                                refocusSearchInput();
+                                            }}
+                                            className={`px-2.5 py-1.5 rounded-l-lg text-xs font-bold whitespace-nowrap transition border ${
+                                                activeQuickGroupId === grp.id
+                                                    ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
+                                                    : 'bg-slate-800 text-amber-300 border-slate-700 hover:bg-slate-700'
+                                            }`}
+                                        >
+                                            <i className="fas fa-bolt mr-1 text-[10px]"></i>
+                                            {grp.name}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setEditingQuickGroup(grp);
+                                                setShowQuickGroupModal(true);
+                                            }}
+                                            className="px-1.5 py-1.5 rounded-r-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border border-l-0 border-slate-700 text-[10px] transition"
+                                            title={`Edit "${grp.name}"`}
+                                        >
+                                            <i className="fas fa-pen"></i>
+                                        </button>
+                                    </div>
+                                ))}
+
+                                <button
+                                    type="button"
+                                    onClick={() => { setEditingQuickGroup(null); setShowQuickGroupModal(true); }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-dashed border-slate-600 text-xs font-bold whitespace-nowrap transition shrink-0"
+                                    title="Create Quick Access Group"
+                                >
+                                    <i className="fas fa-plus mr-1"></i>Quick Group
                                 </button>
                             </div>
 
-                            {/* Universal View Switcher (Grid Cards vs. Compact Table/List on all screens) */}
-                            <div className="flex items-center gap-2 shrink-0 pl-1 border-l border-slate-700">
-                                <span className="hidden xl:inline text-[11px] text-slate-400 font-semibold">
-                                    {filteredProducts.length} items
-                                </span>
-                                <div className="flex bg-slate-900 rounded-xl p-0.5 border border-slate-700">
-                                    <button 
-                                        type="button"
-                                        onClick={() => handleSetCatalogViewMode('grid')}
-                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${catalogViewMode === 'grid' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-                                        title="Touch Card Grid View"
-                                    >
-                                        <i className="fas fa-th-large"></i>
-                                        <span className="hidden sm:inline">Grid</span>
-                                    </button>
-                                    <button 
-                                        type="button"
-                                        onClick={() => handleSetCatalogViewMode('list')}
-                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${catalogViewMode === 'list' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-                                        title="Compact Table / List View"
-                                    >
-                                        <i className="fas fa-list"></i>
-                                        <span className="hidden sm:inline">List</span>
-                                    </button>
-                                </div>
+                            {/* Catalog View Switcher (Line/List Default vs 1:1 Photo Grid) */}
+                            <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-700 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={() => handleSetCatalogViewMode('list')}
+                                    className={`px-2.5 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition ${
+                                        catalogViewMode === 'list'
+                                            ? 'bg-blue-600 text-white shadow'
+                                            : 'text-slate-400 hover:text-white'
+                                    }`}
+                                    title="Line / List Product View (Default)"
+                                >
+                                    <i className="fas fa-list"></i>
+                                    <span className="hidden sm:inline">List</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleSetCatalogViewMode('grid')}
+                                    className={`px-2.5 py-1 rounded-md text-xs font-bold flex items-center gap-1.5 transition ${
+                                        catalogViewMode === 'grid'
+                                            ? 'bg-blue-600 text-white shadow'
+                                            : 'text-slate-400 hover:text-white'
+                                    }`}
+                                    title="1:1 Product Photo Grid View"
+                                >
+                                    <i className="fas fa-th-large"></i>
+                                    <span className="hidden sm:inline">Grid</span>
+                                </button>
                             </div>
                         </div>
 
-                        {/* Product Catalog Viewport (Adapts to Grid or List across Mobile, Tablet, and Desktop) */}
-                        <div className="flex-1 overflow-y-auto bg-slate-800/60 relative scroll-smooth min-h-0">
-                            {catalogViewMode === 'grid' ? (
-                                /* PROFESSIONAL MARKETING RETAIL TOUCH CARD GRID */
-                                <div className="p-2.5 sm:p-3.5 pb-28 md:pb-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 sm:gap-3.5">
-                                    {filteredProducts.slice(0, RENDER_LIMIT).map((product, index) => {
-                                        const stock = product.stockByShop?.[selectedShopId] || 0;
-                                        const inCartQty = cartQtyMap.get(product.id) || 0;
-                                        const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
+                        {/* Product Catalog Body (Line/List View or 1:1 Photo Grid View) */}
+                        <div className="flex-1 overflow-y-auto p-2.5 sm:p-3 min-h-0">
+                            {filteredProducts.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-500 p-8 text-center">
+                                    <i className="fas fa-box-open text-4xl mb-3 opacity-40"></i>
+                                    <p className="font-bold text-slate-300">No products found</p>
+                                    <p className="text-xs text-slate-500 mt-1">Try a different search keyword, barcode, or vendor filter.</p>
+                                </div>
+                            ) : catalogViewMode === 'list' ? (
+                                /* LINE / LIST PRODUCT DISPLAY (DEFAULT) */
+                                <div className="space-y-1.5">
+                                    {filteredProducts.slice(0, RENDER_LIMIT).map((prod, index) => {
+                                        const stock = prod.stockByShop?.[selectedShopId] || 0;
+                                        const manageStock = currentShopObj?.manageStock !== false;
+                                        const isOutOfStock = manageStock && stock <= 0;
+                                        const isLowStock = manageStock && stock > 0 && prod.minStock > 0 && stock <= prod.minStock;
+                                        const inCartQty = cartQtyMap.get(prod.id) || 0;
+                                        const shopPrice = getEffectiveShopPrice(prod, selectedShopId);
+                                        const basePrice = Number(prod.price) || 0;
+                                        const hasCustomShopPrice = Number(prod.priceByShop?.[selectedShopId]) > 0 && shopPrice !== basePrice;
                                         const isHighlighted = index === highlightedIndex;
-                                        const shopPrice = getEffectiveShopPrice(product, selectedShopId);
-                                        const hasCustomShopPrice = Number(product.priceByShop?.[selectedShopId]) > 0 && shopPrice !== (Number(product.price) || 0);
 
                                         return (
                                             <div
-                                                key={product.id}
-                                                onClick={() => addToCart(product)}
-                                                className={`group relative overflow-hidden rounded-2xl p-3 sm:p-3.5 flex flex-col justify-between min-h-[126px] sm:min-h-[136px] cursor-pointer transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] border ${
-                                                    inCartQty > 0
-                                                        ? 'bg-gradient-to-br from-blue-950/90 via-slate-900 to-indigo-950/80 border-blue-500/80 shadow-lg shadow-blue-950/50 ring-1 ring-blue-400/30'
-                                                        : isHighlighted
-                                                            ? 'bg-gradient-to-br from-slate-800 to-slate-900 border-blue-400 ring-2 ring-blue-500/30 shadow-md'
-                                                            : 'bg-gradient-to-br from-slate-800/95 via-slate-900/95 to-slate-950/95 hover:from-slate-800 hover:to-slate-900 border-slate-700/80 hover:border-blue-500/50 shadow-md hover:shadow-xl hover:shadow-blue-950/20'
+                                                key={prod.id}
+                                                onClick={() => addToCart(prod)}
+                                                onMouseEnter={() => setHighlightedIndex(index)}
+                                                className={`p-2.5 sm:px-3.5 sm:py-2.5 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition-all active:scale-[0.99] ${
+                                                    isHighlighted
+                                                        ? 'bg-blue-600/20 border-blue-500 shadow-md shadow-blue-950/30'
+                                                        : inCartQty > 0
+                                                            ? 'bg-emerald-950/25 border-emerald-500/40 hover:bg-emerald-950/40'
+                                                            : 'bg-slate-900/60 border-slate-700/80 hover:bg-slate-700/60 hover:border-slate-600'
                                                 }`}
                                             >
-                                                {/* Top Marketing Accent Gradient Bar */}
-                                                <div className={`absolute top-0 inset-x-0 h-1 transition-all duration-200 ${
-                                                    inCartQty > 0
-                                                        ? 'bg-gradient-to-r from-blue-400 via-cyan-400 to-emerald-400'
-                                                        : isNoOrNegativeStock
-                                                            ? 'bg-gradient-to-r from-rose-500/80 to-amber-500/80'
-                                                            : 'bg-gradient-to-r from-blue-500/40 via-indigo-500/40 to-emerald-500/40 opacity-60 group-hover:opacity-100'
-                                                }`}></div>
-
-                                                {/* Subtle Decorative Glow Orb */}
-                                                <div className="absolute -right-6 -top-6 w-20 h-20 rounded-full bg-blue-500/5 group-hover:bg-emerald-500/10 blur-xl pointer-events-none transition-all duration-300"></div>
-
-                                                {/* In-Cart Quantity Badge Overlay */}
-                                                {inCartQty > 0 && (
-                                                    <div className="absolute top-2 right-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-[11px] font-black min-w-[26px] h-[24px] px-2 rounded-full flex items-center justify-center gap-1 shadow-lg shadow-blue-950/80 border border-blue-300/40 z-10 animate-fade-in-up">
-                                                        <i className="fas fa-shopping-bag text-[9px]"></i>
-                                                        <span>{inCartQty}</span>
-                                                    </div>
-                                                )}
-
-                                                {/* 1st Line: Product Name */}
-                                                <div className={`flex items-start justify-between gap-1.5 mt-0.5 ${inCartQty > 0 ? 'pr-12' : ''}`}>
-                                                    <h4 className="text-slate-100 font-extrabold text-xs sm:text-[13.5px] line-clamp-2 leading-snug tracking-tight group-hover:text-white transition-colors">
-                                                        {product.name}
-                                                    </h4>
-                                                    {isNoOrNegativeStock && (
-                                                        <span
-                                                            className="inline-block w-2 h-2 rounded-full bg-rose-500 mt-1 shrink-0 ring-4 ring-rose-500/20 shadow-sm shadow-rose-500"
-                                                            title="Out of Stock / Low Stock"
-                                                        ></span>
+                                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                                    {/* Compact 1:1 Thumbnail (Optional) */}
+                                                    {prod.imageUrl ? (
+                                                        <img
+                                                            src={prod.imageUrl}
+                                                            alt={prod.name}
+                                                            loading="lazy"
+                                                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                                            className="w-10 h-10 rounded-lg object-cover aspect-square border border-slate-700 shrink-0 bg-slate-950"
+                                                        />
+                                                    ) : (
+                                                        <div className="w-10 h-10 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400 font-black text-xs shrink-0 uppercase">
+                                                            {(prod.name || '?').slice(0, 2)}
+                                                        </div>
                                                     )}
+
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-bold text-sm text-slate-100 truncate">{prod.name}</span>
+                                                            {inCartQty > 0 && (
+                                                                <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-slate-950 font-black text-[10px] shrink-0">
+                                                                    {inCartQty} in cart
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 font-mono mt-0.5">
+                                                            <span className="text-blue-300 font-semibold">{prod.code}</span>
+                                                            {prod.barcode && <span>• {prod.barcode}</span>}
+                                                            {manageStock && (
+                                                                <span className={`px-1.5 py-0.2 rounded font-sans font-bold text-[10px] ${
+                                                                    isOutOfStock
+                                                                        ? 'bg-red-500/20 text-red-400'
+                                                                        : isLowStock
+                                                                            ? 'bg-amber-500/20 text-amber-300'
+                                                                            : 'bg-slate-800 text-slate-300'
+                                                                }`}>
+                                                                    Stock: {stock}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
                                                 </div>
 
-                                                {/* 2nd Line: Barcode */}
-                                                <div className="my-2 flex items-center">
-                                                    <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-950/60 border border-slate-800/90 text-[10px] sm:text-[11px] font-mono text-slate-400 group-hover:text-slate-300 group-hover:border-slate-700 max-w-full truncate transition-colors">
-                                                        <i className="fas fa-barcode text-[10px] text-indigo-400/80 shrink-0"></i>
-                                                        <span className="truncate tracking-wider">{product.barcode || 'NO-BARCODE'}</span>
+                                                <div className="text-right shrink-0">
+                                                    <div className="text-sm sm:text-base font-black text-emerald-400 font-mono">
+                                                        ៛{khrFormatter.format(shopPrice)}
                                                     </div>
-                                                </div>
-
-                                                {/* 3rd Line: 2-Column Grid - Product Code | Price */}
-                                                <div className="grid grid-cols-2 items-center gap-1.5 pt-2 border-t border-slate-700/50">
-                                                    <div className="min-w-0 flex items-center">
-                                                        <span className="text-[10px] sm:text-[11px] font-mono font-bold text-sky-300/90 bg-sky-950/40 px-2 py-1 rounded-lg border border-sky-500/25 truncate">
-                                                            {product.code}
-                                                        </span>
-                                                    </div>
-                                                    <div className="text-right flex items-center justify-end gap-1">
-                                                        {hasCustomShopPrice && (
-                                                            <span
-                                                                className="text-[9px] font-bold px-1 py-0.5 rounded bg-indigo-500/25 text-indigo-300 border border-indigo-500/40 shrink-0"
-                                                                title={`Shop Selling Price (Base: ៛${khrFormatter.format(product.price)})`}
-                                                            >
-                                                                Shop
-                                                            </span>
-                                                        )}
-                                                        <span className="inline-flex items-baseline px-2.5 py-1 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/15 border border-emerald-500/40 group-hover:from-emerald-500 group-hover:to-teal-500 text-emerald-300 group-hover:text-slate-950 font-black text-xs sm:text-sm leading-none shadow-sm transition-all duration-200 truncate">
-                                                            ៛{khrFormatter.format(shopPrice)}
-                                                        </span>
-                                                    </div>
+                                                    {hasCustomShopPrice && (
+                                                        <div className="text-[10px] text-indigo-300 font-mono flex items-center justify-end gap-1">
+                                                            <span className="line-through text-slate-500">៛{khrFormatter.format(basePrice)}</span>
+                                                            <span className="px-1 rounded bg-indigo-500/20 border border-indigo-500/40 text-[9px] font-bold">Shop</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         );
                                     })}
                                     {filteredProducts.length > RENDER_LIMIT && (
-                                        <div className="col-span-full text-center py-4 text-slate-400 text-xs italic">
-                                            Showing top {RENDER_LIMIT} of {filteredProducts.length} items. Use search to refine...
-                                        </div>
+                                        <p className="text-center text-xs text-slate-500 py-2">
+                                            Showing first {RENDER_LIMIT} of {filteredProducts.length} items. Use search to narrow results.
+                                        </p>
                                     )}
                                 </div>
                             ) : (
-                                /* COMPACT LIST / TABLE VIEW (Responsive across Desktop, Tablet & Mobile) */
-                                <div className="pb-28 md:pb-2">
-                                    <table className="w-full text-left border-collapse">
-                                        <thead className="bg-slate-900/95 text-[11px] sm:text-xs uppercase text-slate-400 font-semibold sticky top-0 z-10 backdrop-blur-sm shadow-sm">
-                                            <tr>
-                                                <th className="py-2.5 px-3 sm:pl-4 font-bold border-b border-slate-700">Product</th>
-                                                <th className="py-2.5 px-3 border-b border-slate-700 text-right">Price</th>
-                                                <th className="py-2.5 pr-3 sm:pr-4 border-b border-slate-700 w-12"></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-700/50">
-                                            {filteredProducts.slice(0, RENDER_LIMIT).map((product, index) => {
-                                                const stock = product.stockByShop?.[selectedShopId] || 0;
-                                                const inCartQty = cartQtyMap.get(product.id) || 0;
-                                                const isNoOrNegativeStock = currentShopObj?.manageStock !== false && (stock <= 0 || inCartQty > stock);
-                                                const isHighlighted = index === highlightedIndex;
-                                                const shopPrice = getEffectiveShopPrice(product, selectedShopId);
-                                                const hasCustomShopPrice = Number(product.priceByShop?.[selectedShopId]) > 0 && shopPrice !== (Number(product.price) || 0);
-                                                
-                                                return (
-                                                    <tr 
-                                                        key={product.id} 
-                                                        onClick={() => addToCart(product)}
-                                                        className={`group transition-all duration-150 cursor-pointer active:bg-slate-700 ${
-                                                            inCartQty > 0
-                                                                ? 'bg-blue-950/30 border-l-4 border-l-blue-500'
-                                                                : isHighlighted
-                                                                    ? 'bg-blue-600/20 border-l-4 border-l-blue-400'
-                                                                    : 'hover:bg-slate-700/50 border-l-4 border-l-transparent'
-                                                        }`}
-                                                    >
-                                                        <td className="py-2.5 px-3 sm:pl-4">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className={`font-bold text-xs sm:text-sm md:text-base flex items-center ${isHighlighted || inCartQty > 0 ? 'text-white' : 'text-slate-200'}`}>
-                                                                    <span>{product.name}</span>
-                                                                    {isNoOrNegativeStock && (
-                                                                        <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-1.5 shadow-sm shadow-red-500/60 shrink-0"></span>
-                                                                    )}
-                                                                </span>
-                                                                {inCartQty > 0 && (
-                                                                    <span className="bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full">
-                                                                        {inCartQty} in cart
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <div className="flex items-center gap-2 text-[10px] sm:text-xs text-slate-400 mt-0.5">
-                                                                <span className="bg-slate-900/80 px-1.5 py-0.5 rounded border border-slate-700 font-mono">{product.code}</span>
-                                                                {product.barcode && <span className="opacity-75 hidden sm:inline"><i className="fas fa-barcode mr-1"></i>{product.barcode}</span>}
-                                                            </div>
-                                                        </td>
-                                                        <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                                                            <div className="font-black text-sm sm:text-base text-emerald-400 group-hover:text-emerald-300">
-                                                                ៛{khrFormatter.format(shopPrice)}
-                                                            </div>
-                                                            {hasCustomShopPrice && (
-                                                                <div className="text-[10px] text-indigo-300 font-semibold">
-                                                                    Shop <span className="text-slate-500 line-through ml-1">៛{khrFormatter.format(product.price)}</span>
-                                                                </div>
-                                                            )}
-                                                        </td>
-                                                        <td className="py-2.5 pr-3 sm:pr-4 text-right">
-                                                            <button type="button" className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center transition-all shadow-sm ml-auto ${inCartQty > 0 || isHighlighted ? 'bg-blue-600 text-white' : 'bg-slate-700/70 text-slate-300 group-hover:bg-blue-600 group-hover:text-white'}`}>
-                                                                <i className="fas fa-plus text-xs"></i>
-                                                            </button>
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        </tbody>
-                                    </table>
-                                    {filteredProducts.length > RENDER_LIMIT && (
-                                        <div className="text-center py-4 text-slate-400 text-xs italic border-t border-slate-700/50">
-                                            Showing top {RENDER_LIMIT} of {filteredProducts.length} items. Use search to refine...
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                                /* 1:1 PRODUCT PHOTO GRID LAYOUT */
+                                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 sm:gap-3">
+                                    {filteredProducts.slice(0, RENDER_LIMIT).map((prod, index) => {
+                                        const stock = prod.stockByShop?.[selectedShopId] || 0;
+                                        const manageStock = currentShopObj?.manageStock !== false;
+                                        const isOutOfStock = manageStock && stock <= 0;
+                                        const isLowStock = manageStock && stock > 0 && prod.minStock > 0 && stock <= prod.minStock;
+                                        const inCartQty = cartQtyMap.get(prod.id) || 0;
+                                        const shopPrice = getEffectiveShopPrice(prod, selectedShopId);
+                                        const basePrice = Number(prod.price) || 0;
+                                        const hasCustomShopPrice = Number(prod.priceByShop?.[selectedShopId]) > 0 && shopPrice !== basePrice;
+                                        const isHighlighted = index === highlightedIndex;
 
-                            {/* Empty State */}
-                            {filteredProducts.length === 0 && (
-                                <div className="flex flex-col items-center justify-center h-64 text-slate-500 p-6 text-center">
-                                    <i className="fas fa-box-open text-4xl mb-3 opacity-40"></i>
-                                    <p className="text-sm font-semibold text-slate-400">No products match your filter</p>
-                                    <p className="text-xs text-slate-500 mt-1">Try clearing the search bar or switching categories.</p>
+                                        return (
+                                            <div
+                                                key={prod.id}
+                                                onClick={() => addToCart(prod)}
+                                                onMouseEnter={() => setHighlightedIndex(index)}
+                                                className={`group rounded-2xl border overflow-hidden flex flex-col cursor-pointer transition-all active:scale-[0.98] ${
+                                                    isHighlighted
+                                                        ? 'bg-slate-900 border-blue-500 ring-2 ring-blue-500/40 shadow-lg'
+                                                        : inCartQty > 0
+                                                            ? 'bg-slate-900 border-emerald-500/60 shadow-md shadow-emerald-950/30'
+                                                            : 'bg-slate-900/80 border-slate-700/80 hover:border-slate-500'
+                                                }`}
+                                            >
+                                                {/* 1:1 Aspect-Square Product Photo Container */}
+                                                <div className="relative w-full aspect-square bg-slate-950 overflow-hidden flex items-center justify-center">
+                                                    {prod.imageUrl ? (
+                                                        <img
+                                                            src={prod.imageUrl}
+                                                            alt={prod.name}
+                                                            loading="lazy"
+                                                            onError={(e) => {
+                                                                e.currentTarget.style.display = 'none';
+                                                                if (e.currentTarget.nextElementSibling) {
+                                                                    e.currentTarget.nextElementSibling.style.display = 'flex';
+                                                                }
+                                                            }}
+                                                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                                        />
+                                                    ) : null}
+                                                    <div
+                                                        style={{ display: prod.imageUrl ? 'none' : 'flex' }}
+                                                        className="w-full h-full flex-col items-center justify-center bg-gradient-to-br from-slate-800 via-slate-900 to-slate-950 text-slate-400 p-3 text-center"
+                                                    >
+                                                        <span className="text-2xl sm:text-3xl font-black tracking-tight text-slate-300/80 uppercase">
+                                                            {(prod.name || 'PR').slice(0, 2)}
+                                                        </span>
+                                                        <span className="text-[10px] text-slate-500 font-semibold mt-1 truncate max-w-full">
+                                                            {prod.category || prod.vendorName || 'Product'}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Top-Left Product Code Badge */}
+                                                    <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-slate-950/80 backdrop-blur-sm text-[9px] font-mono font-bold text-slate-200 border border-slate-700/80">
+                                                        {prod.code}
+                                                    </span>
+
+                                                    {/* Top-Right In-Cart Quantity Badge */}
+                                                    {inCartQty > 0 && (
+                                                        <span className="absolute top-1.5 right-1.5 min-w-[22px] h-[22px] px-1.5 rounded-full bg-emerald-500 text-slate-950 font-black text-[11px] flex items-center justify-center shadow-lg border-2 border-slate-900">
+                                                            {inCartQty}
+                                                        </span>
+                                                    )}
+
+                                                    {/* Bottom-Left Stock Alert Pill */}
+                                                    {manageStock && (
+                                                        <span className={`absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-black backdrop-blur-sm border ${
+                                                            isOutOfStock
+                                                                ? 'bg-red-600/90 text-white border-red-400/50'
+                                                                : isLowStock
+                                                                    ? 'bg-amber-500/90 text-slate-950 border-amber-300/50'
+                                                                    : 'bg-slate-950/75 text-slate-200 border-slate-700/70'
+                                                        }`}>
+                                                            {isOutOfStock ? 'OUT' : `Qty: ${stock}`}
+                                                        </span>
+                                                    )}
+
+                                                    {/* Bottom-Right Custom Shop Price Badge */}
+                                                    {hasCustomShopPrice && (
+                                                        <span className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded-md bg-indigo-600/90 text-white text-[9px] font-black uppercase border border-indigo-400/50">
+                                                            Shop
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                {/* Card Footer: Name & Price */}
+                                                <div className="p-2.5 flex flex-col justify-between flex-1 gap-1.5">
+                                                    <div className="min-w-0">
+                                                        <div className="text-xs font-bold text-slate-100 line-clamp-2 leading-snug" title={prod.name}>
+                                                            {prod.name}
+                                                        </div>
+                                                        {prod.barcode && (
+                                                            <div className="text-[10px] font-mono text-slate-500 truncate mt-0.5">
+                                                                {prod.barcode}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <div className="pt-1 border-t border-slate-800 flex items-baseline justify-between gap-1">
+                                                        <span className="text-sm font-black text-emerald-400 font-mono">
+                                                            ៛{khrFormatter.format(shopPrice)}
+                                                        </span>
+                                                        {hasCustomShopPrice && (
+                                                            <span className="text-[10px] text-slate-500 line-through font-mono">
+                                                                ៛{khrFormatter.format(basePrice)}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
-
-                        {/* Floating Mobile Quick-Checkout Bar (Shown on Mobile Products Tab when Cart has items) */}
-                        {cart.length > 0 && activeMobileTab === 'products' && (
-                            <div className="md:hidden absolute bottom-2 left-2.5 right-2.5 z-20 animate-fade-in-up">
-                                <div className="bg-slate-900/95 backdrop-blur-md border border-blue-500/50 rounded-2xl p-2.5 shadow-2xl flex items-center justify-between gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => setActiveMobileTab('cart')}
-                                        className="flex items-center gap-2.5 flex-1 min-w-0 text-left"
-                                    >
-                                        <div className="w-10 h-10 rounded-xl bg-blue-600 text-white font-black text-sm flex items-center justify-center shrink-0 shadow-md">
-                                            {cartItemCount}
-                                        </div>
-                                        <div className="min-w-0">
-                                            <div className="text-[10px] font-bold uppercase tracking-wider text-blue-300 flex items-center gap-1">
-                                                <span>Current Ticket</span>
-                                                <i className="fas fa-chevron-up text-[9px]"></i>
-                                            </div>
-                                            <div className="text-base font-black text-white truncate">
-                                                ៛{khrFormatter.format(cartTotal)}
-                                            </div>
-                                        </div>
-                                    </button>
-                                    <div className="flex items-center gap-1.5 shrink-0">
-                                        <button
-                                            type="button"
-                                            onClick={() => setActiveMobileTab('cart')}
-                                            className="px-3 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700"
-                                        >
-                                            Review
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowPaymentModal(true)}
-                                            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shadow-lg shadow-blue-600/30 flex items-center gap-1.5"
-                                        >
-                                            <span>Pay Now</span>
-                                            <i className="fas fa-arrow-right text-[10px]"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
                     </div>
 
-                    {/* RIGHT: Cart / Ticket (Adaptive width on Tablet & Desktop OR full-screen when Mobile Tab is 'cart') */}
-                    <div className={`w-full md:w-[330px] lg:w-[380px] xl:w-[410px] shrink-0 bg-slate-800 rounded-xl border border-slate-700/80 flex flex-col shadow-xl overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
-                        {/* Customer Selection Header */}
-                        <div className="p-2.5 sm:p-3 bg-slate-900/60 border-b border-slate-700/80">
-                            <div className="flex gap-1.5 relative">
+                    {/* RIGHT: POS Cart / Current Ticket (Visible on Tablet/Desktop OR when Mobile Tab is 'cart') */}
+                    <div className={`w-full md:w-[340px] lg:w-[390px] xl:w-[420px] shrink-0 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
+                        {/* Cart Header: Customer Selector + Quick Add Customer */}
+                        <div className="p-2.5 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 space-y-2 shrink-0">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-sm font-black text-white flex items-center gap-2">
+                                    <i className="fas fa-shopping-cart text-blue-400"></i>
+                                    <span>Current Ticket</span>
+                                    <span className="px-2 py-0.5 rounded-full bg-blue-600/25 text-blue-300 border border-blue-500/40 text-xs font-mono">
+                                        {cartItemCount}
+                                    </span>
+                                </h3>
+                                <div className="flex items-center gap-1.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowHeldTicketsModal(true)}
+                                        className="relative px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-600 text-xs font-bold transition flex items-center gap-1"
+                                        title="Recall Saved / Held Bills"
+                                    >
+                                        <i className="fas fa-folder-open text-[11px]"></i>
+                                        <span className="hidden sm:inline">Recall</span>
+                                        {heldTicketsCount > 0 && (
+                                            <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-slate-950 font-black text-[10px]">
+                                                {heldTicketsCount}
+                                            </span>
+                                        )}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleOpenSaveTicket}
+                                        disabled={cart.length === 0}
+                                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-orange-600 text-orange-300 hover:text-white border border-slate-600 text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                                        title="Hold / Save Current Bill"
+                                    >
+                                        <i className="fas fa-pause text-[10px]"></i>
+                                        <span className="hidden sm:inline">Hold</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowClearConfirm(true)}
+                                        disabled={cart.length === 0}
+                                        className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-red-600 text-red-400 hover:text-white border border-slate-600 text-xs font-bold transition disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title="Clear Cart"
+                                    >
+                                        <i className="fas fa-trash-alt text-[11px]"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Customer Search & Quick Add Bar */}
+                            <div className="relative flex items-center gap-1.5">
                                 {selectedCustomerObj ? (
-                                    <div className="flex-1 min-w-0 bg-slate-800 text-left pl-8 pr-7 py-2 rounded-xl border border-blue-500/60 text-white shadow-sm shadow-blue-900/20 relative flex items-center justify-between">
-                                        <i className="fas fa-user-check text-blue-400 absolute left-3 top-1/2 -translate-y-1/2 text-xs"></i>
-                                        <div className="truncate text-xs sm:text-sm font-semibold">
-                                            <span>{selectedCustomerObj.name} <span className="text-slate-400 font-normal">({selectedCustomerObj.phone})</span></span>
+                                    <div className="flex-1 bg-amber-500/10 border border-amber-500/40 rounded-xl px-3 py-1.5 flex items-center justify-between gap-2 min-w-0">
+                                        <div className="min-w-0">
+                                            <div className="text-xs font-bold text-amber-300 truncate flex items-center gap-1.5">
+                                                <i className="fas fa-user-check text-[11px]"></i>
+                                                <span className="truncate">{selectedCustomerObj.name}</span>
+                                                <span className="text-[10px] font-mono text-slate-400">{selectedCustomerObj.phone}</span>
+                                            </div>
+                                            <div className="text-[10px] text-slate-300 flex items-center gap-2 mt-0.5">
+                                                <span>
+                                                    Points: <strong className="text-amber-300">{khrFormatter.format(customerLoyaltyStatus.effectivePoints)}</strong>
+                                                </span>
+                                                {estimatedPoints > 0 && (
+                                                    <span className="text-emerald-400 font-bold">+{estimatedPoints} pts</span>
+                                                )}
+                                            </div>
                                         </div>
                                         <button
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                setSelectedCustomerId('');
-                                                setCustomerSearchTerm('');
-                                                refocusSearchInput();
-                                            }}
-                                            className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-slate-700 hover:bg-red-500/80 text-slate-300 hover:text-white flex items-center justify-center text-[10px] transition"
-                                            title="Clear Customer (Set to Walk-in)"
+                                            type="button"
+                                            onClick={() => { setSelectedCustomerId(''); setCustomerSearchTerm(''); }}
+                                            className="text-slate-400 hover:text-red-400 p-1 shrink-0"
+                                            title="Remove Customer"
                                         >
-                                            <i className="fas fa-times"></i>
+                                            <i className="fas fa-times-circle"></i>
                                         </button>
                                     </div>
                                 ) : (
-                                    <div className="flex-1 min-w-0 relative">
-                                        <i className="fas fa-search text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 text-xs"></i>
+                                    <div className="relative flex-1 min-w-0">
                                         <input
                                             type="text"
                                             value={customerSearchTerm}
-                                            onChange={(e) => {
-                                                setCustomerSearchTerm(e.target.value);
-                                                setIsCustomerSearchFocused(true);
-                                            }}
                                             onFocus={() => setIsCustomerSearchFocused(true)}
-                                            onBlur={() => setTimeout(() => setIsCustomerSearchFocused(false), 200)}
-                                            placeholder="Search Customer by name or phone..."
-                                            className="w-full bg-slate-800 hover:bg-slate-750 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600/80 hover:border-slate-500 focus:border-blue-500 outline-none transition text-xs sm:text-sm"
+                                            onBlur={() => setTimeout(() => setIsCustomerSearchFocused(false), 180)}
+                                            onChange={(e) => setCustomerSearchTerm(e.target.value)}
+                                            placeholder="Search customer name or phone..."
+                                            className="w-full bg-slate-800 text-slate-100 pl-8 pr-3 py-1.5 rounded-xl border border-slate-600/80 focus:border-blue-500 outline-none text-xs"
                                         />
-                                        {isCustomerSearchFocused && (
-                                            <div className="absolute z-50 w-full mt-1 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl max-h-60 overflow-y-auto divide-y divide-slate-700">
-                                                {filteredCustomers.length > 0 ? (
-                                                    filteredCustomers.map(c => (
-                                                        <div
-                                                            key={c.id}
-                                                            onMouseDown={() => {
-                                                                setSelectedCustomerId(c.id);
-                                                                setCustomerSearchTerm('');
-                                                                setIsCustomerSearchFocused(false);
-                                                            }}
-                                                            className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex justify-between items-center transition"
-                                                        >
-                                                            <div>
-                                                                <div className="text-sm font-bold text-slate-200">{c.name}</div>
-                                                                <div className="text-[10px] text-slate-400">{c.phone}</div>
-                                                            </div>
-                                                            <div className="text-[10px] font-bold text-emerald-400">
-                                                                Select
-                                                            </div>
+                                        <i className="fas fa-user absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+
+                                        {isCustomerSearchFocused && filteredCustomers.length > 0 && (
+                                            <div className="absolute z-40 left-0 right-0 mt-1 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl max-h-48 overflow-y-auto divide-y divide-slate-700/70">
+                                                {filteredCustomers.map(c => (
+                                                    <div
+                                                        key={c.id}
+                                                        onMouseDown={() => {
+                                                            setSelectedCustomerId(c.id);
+                                                            setCustomerSearchTerm('');
+                                                            setIsCustomerSearchFocused(false);
+                                                        }}
+                                                        className="px-3 py-2 hover:bg-slate-700 cursor-pointer flex items-center justify-between gap-2 text-xs"
+                                                    >
+                                                        <div className="min-w-0">
+                                                            <div className="font-bold text-slate-100 truncate">{c.name}</div>
+                                                            <div className="text-[10px] text-slate-400 font-mono">{c.phone}</div>
                                                         </div>
-                                                    ))
-                                                ) : (
-                                                    <div className="px-3 py-4 text-center text-slate-400 text-xs">
-                                                        No matching customers found.
+                                                        <span className="text-[10px] font-bold text-amber-400 shrink-0">
+                                                            {khrFormatter.format(c.points || 0)} Pts
+                                                        </span>
                                                     </div>
-                                                )}
-                                                <div
-                                                    onMouseDown={() => setShowAddCustomerModal(true)}
-                                                    className="px-3 py-2.5 cursor-pointer bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white flex items-center justify-center gap-2 transition font-bold text-xs"
-                                                >
-                                                    <i className="fas fa-plus"></i>
-                                                    <span>Add New Customer</span>
-                                                </div>
+                                                ))}
                                             </div>
                                         )}
                                     </div>
                                 )}
-                                
-                                <button 
-                                    onClick={handleOpenSaveTicket}
-                                    className="bg-slate-700 hover:bg-slate-600 text-orange-400 border border-slate-600 px-2.5 rounded-xl flex items-center justify-center transition shadow-md shrink-0"
-                                    title="Save Bill / Hold"
+
+                                <button
+                                    type="button"
+                                    onClick={() => setShowAddCustomerModal(true)}
+                                    className="w-8 h-8 rounded-xl bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 flex items-center justify-center shrink-0 transition"
+                                    title="Quick Add Customer"
                                 >
-                                    <i className="fas fa-save text-xs"></i>
-                                </button>
-                                <button 
-                                    onClick={() => setShowHeldTicketsModal(true)}
-                                    className="relative bg-slate-700 hover:bg-slate-600 text-orange-400 border border-slate-600 px-2.5 rounded-xl flex items-center justify-center transition shadow-md shrink-0"
-                                    title="Recall Saved Bill"
-                                >
-                                    <i className="fas fa-folder-open text-xs"></i>
-                                    {heldTicketsCount > 0 && (
-                                        <span className="absolute -top-1.5 -right-1.5 bg-orange-500 text-slate-950 text-[10px] font-extrabold min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center shadow border border-slate-900">
-                                            {heldTicketsCount}
-                                        </span>
-                                    )}
+                                    <i className="fas fa-user-plus text-xs"></i>
                                 </button>
                             </div>
-                            {/* Display Customer Points & Live Redeem Eligibility in Ticket Header */}
-                            {selectedCustomerObj && (
-                                <div className="mt-2 flex flex-col gap-1 px-2.5 py-1.5 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs">
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-orange-300 font-medium flex items-center gap-1.5">
-                                            <span>Loyalty Points:</span>
-                                            {customerLoyaltyStatus.isExpired && (
-                                                <span className="px-1.5 py-0.5 text-[9px] font-black uppercase bg-red-500/20 text-red-300 border border-red-500/30 rounded">
-                                                    Expired ({activeLoyaltyRule?.expirationPeriod})
-                                                </span>
-                                            )}
-                                        </span>
-                                        <span className="text-orange-400 font-bold">
-                                            <i className="fas fa-star mr-1"></i>
-                                            {khrFormatter.format(customerLoyaltyStatus.effectivePoints)} Pts
-                                        </span>
-                                    </div>
-                                    {activeLoyaltyRule && Number(activeLoyaltyRule.redeemPointsRequired) > 0 && (
-                                        <div className="flex justify-between items-center text-[10px] pt-1 border-t border-orange-500/15">
-                                            <span className="text-slate-400">
-                                                Rule: Spend ៛{khrFormatter.format(activeLoyaltyRule.spendAmountKhr || 0)} = +{activeLoyaltyRule.earnPoints || 1} Pt
-                                            </span>
-                                            {customerLoyaltyStatus.effectivePoints >= Number(activeLoyaltyRule.redeemPointsRequired) ? (
-                                                <span className="text-emerald-400 font-bold flex items-center gap-1">
-                                                    <i className="fas fa-gift"></i> Eligible for 1 Free Item (&le; ៛{khrFormatter.format(activeLoyaltyRule.maxRewardPriceKhr || 0)})
-                                                </span>
-                                            ) : (
-                                                <span className="text-slate-400">
-                                                    {Number(activeLoyaltyRule.redeemPointsRequired) - customerLoyaltyStatus.effectivePoints} more pts for Free Item
-                                                </span>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
                         </div>
 
-                        {/* Cart Items List */}
-                        <div className="flex-1 overflow-y-auto p-2.5 sm:p-3 space-y-2 min-h-0">
+                        {/* Cart Line Items List */}
+                        <div className="flex-1 overflow-y-auto p-2.5 space-y-2 min-h-0">
                             {cart.length === 0 ? (
-                                <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-60 py-8">
-                                    <i className="fas fa-shopping-basket text-4xl mb-2"></i>
-                                    <p className="text-sm font-semibold">Ticket is empty</p>
-                                    <p className="text-xs text-slate-400 mt-0.5">Tap any product or scan a barcode</p>
+                                <div className="h-full flex flex-col items-center justify-center text-slate-500 p-6 text-center">
+                                    <i className="fas fa-shopping-basket text-4xl mb-3 opacity-30"></i>
+                                    <p className="text-sm font-bold text-slate-400">Cart is Empty</p>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        {currentShift
+                                            ? 'Scan a barcode or tap a product to begin.'
+                                            : 'Open a shift first to start ringing up sales.'}
+                                    </p>
                                 </div>
                             ) : (
                                 cart.map(item => {
-                                    const hasCustomPrice = item.originalPrice !== undefined && item.price !== item.originalPrice;
-                                    const itemAvailStock = getAvailableStock(item.productId);
-                                    const isCartItemNoStock = currentShopObj?.manageStock !== false && (itemAvailStock <= 0 || (Number(item.quantity) || 0) > itemAvailStock);
+                                    const qty = Number(item.quantity) || 1;
+                                    const lineSubtotal = (Number(item.price) || 0) * qty;
+                                    const isPriceModified = item.originalPrice !== undefined && item.price !== item.originalPrice;
+
                                     return (
-                                    <div key={item.productId} className="bg-slate-700/40 p-2.5 rounded-xl border border-slate-700/60 hover:border-slate-600 transition-colors">
-                                        <div className="flex justify-between items-center gap-2">
-                                            <div 
-                                                className={`flex-1 min-w-0 pr-1 ${canEditLineItem ? 'cursor-pointer group/item' : ''}`}
-                                                onClick={() => canEditLineItem && setEditingCartItem(item)}
-                                                title={canEditLineItem ? "Tap to open NumPad, override price, or add note" : ""}
-                                            >
-                                                <div className={`text-slate-100 font-bold text-xs sm:text-sm truncate flex items-center gap-1.5 ${canEditLineItem ? 'group-hover/item:text-blue-400 transition-colors' : ''}`}>
-                                                    <span className="truncate">{item.name}</span>
-                                                    {isCartItemNoStock && (
-                                                        <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 shadow-sm shadow-red-500/60"></span>
-                                                    )}
-                                                    {canEditLineItem && (
-                                                        <i className="fas fa-calculator text-[10px] text-slate-500 opacity-0 group-hover/item:opacity-100 transition-opacity shrink-0"></i>
-                                                    )}
-                                                </div>
-                                                <div className="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap mt-0.5">
-                                                    <span className={hasCustomPrice ? "text-amber-400 font-bold" : ""}>
-                                                        ៛{khrFormatter.format(item.price)}
-                                                    </span>
-                                                    {hasCustomPrice && (
-                                                        <span className="line-through text-[10px] text-slate-500">
-                                                            ៛{khrFormatter.format(item.originalPrice)}
+                                        <div
+                                            key={item.productId}
+                                            className="bg-slate-900/70 p-2.5 rounded-xl border border-slate-700/80 hover:border-slate-600 transition flex flex-col gap-2"
+                                        >
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div
+                                                    onClick={() => canEditLineItem && setEditingCartItem(item)}
+                                                    className="min-w-0 flex-1 cursor-pointer"
+                                                    title="Tap to edit quantity, price (PIN), or note"
+                                                >
+                                                    <div className="text-xs sm:text-sm font-bold text-slate-100 leading-snug break-words">
+                                                        {item.name}
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-slate-400 mt-0.5">
+                                                        <span className={isPriceModified ? 'text-amber-400 font-bold' : 'text-emerald-400'}>
+                                                            ៛{khrFormatter.format(item.price)}
                                                         </span>
-                                                    )}
-                                                    <span>× {item.quantity || 0}</span>
+                                                        {isPriceModified && (
+                                                            <span className="line-through text-slate-500 text-[10px]">
+                                                                ៛{khrFormatter.format(item.originalPrice)}
+                                                            </span>
+                                                        )}
+                                                        {item.note && (
+                                                            <span className="text-[10px] italic text-amber-300 truncate max-w-[140px]">
+                                                                • {item.note}
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                 </div>
+
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeFromCart(item.productId)}
+                                                    className="w-7 h-7 rounded-lg bg-red-500/10 hover:bg-red-600 text-red-400 hover:text-white flex items-center justify-center shrink-0 transition"
+                                                    title="Delete Item from Cart (Logged)"
+                                                >
+                                                    <i className="fas fa-times text-xs"></i>
+                                                </button>
                                             </div>
-                                            <div className="flex items-center gap-1.5 shrink-0">
-                                                <div className="flex items-center bg-slate-800 rounded-xl border border-slate-600 p-0.5">
-                                                    <button type="button" onClick={() => updateQty(item.productId, -1)} className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition">-</button>
+
+                                            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
+                                                <div className="flex items-center gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateQty(item.productId, -1)}
+                                                        className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 flex items-center justify-center text-xs font-bold transition active:scale-95"
+                                                    >
+                                                        <i className="fas fa-minus text-[10px]"></i>
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => canEditLineItem && setEditingCartItem(item)}
-                                                        className={`min-w-[2.2rem] h-6 sm:h-7 px-1.5 bg-slate-900/90 text-center text-xs sm:text-sm font-extrabold rounded-lg border border-slate-700 transition flex items-center justify-center ${canEditLineItem ? 'hover:bg-blue-600/30 text-blue-300 hover:text-white hover:border-blue-400 cursor-pointer' : 'text-slate-300 cursor-default'}`}
-                                                        title={canEditLineItem ? "Tap for Touch NumPad & Price Override" : ""}
+                                                        className="min-w-[36px] h-7 px-2 rounded-lg bg-slate-950 hover:bg-blue-600/20 text-white border border-slate-700 hover:border-blue-500 font-mono text-xs font-black transition"
+                                                        title="Tap to enter quantity via NumPad"
                                                     >
-                                                        {item.quantity}
+                                                        {qty}
                                                     </button>
-                                                    <button type="button" onClick={() => updateQty(item.productId, 1)} className="w-6 h-6 sm:w-7 sm:h-7 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition">+</button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateQty(item.productId, 1)}
+                                                        className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 flex items-center justify-center text-xs font-bold transition active:scale-95"
+                                                    >
+                                                        <i className="fas fa-plus text-[10px]"></i>
+                                                    </button>
                                                 </div>
-                                                <div className="w-16 sm:w-20 text-right font-black text-slate-100 text-xs sm:text-sm">
-                                                    ៛{khrFormatter.format(item.price * (Number(item.quantity) || 0))}
+
+                                                <div className="text-right font-mono font-black text-sm text-emerald-400">
+                                                    ៛{khrFormatter.format(lineSubtotal)}
                                                 </div>
-                                                <button type="button" onClick={() => removeFromCart(item.productId)} className="text-red-400 hover:text-red-300 p-1">
-                                                    <i className="fas fa-times"></i>
-                                                </button>
                                             </div>
                                         </div>
-                                        {item.note && (
-                                            <div 
-                                                onClick={() => canEditLineItem && setEditingCartItem(item)}
-                                                className={`mt-1.5 text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-lg flex items-center gap-1.5 ${canEditLineItem ? 'cursor-pointer hover:bg-amber-500/20' : ''}`}
-                                            >
-                                                <i className="fas fa-sticky-note text-[10px]"></i>
-                                                <span className="truncate">{item.note}</span>
-                                            </div>
-                                        )}
-                                    </div>
-                                )})
+                                    );
+                                })
                             )}
                         </div>
 
-                        {/* Totals & Action Footer */}
-                        <div className="p-3 sm:p-4 bg-slate-900 border-t border-slate-700/80 space-y-2.5 shrink-0">
-                            {selectedCustomerId && estimatedPoints > 0 && (
-                                <div className="flex justify-between items-center text-xs text-orange-400 bg-orange-900/20 px-2.5 py-1 rounded-lg border border-orange-500/20">
-                                    <span>Points to Earn:</span>
-                                    <span className="font-bold">+{khrFormatter.format(estimatedPoints)} Pts</span>
+                        {/* Cart Footer: Totals & Checkout Button */}
+                        <div className="p-3 bg-slate-900/90 border-t border-slate-700 space-y-2.5 shrink-0">
+                            <div className="flex items-baseline justify-between">
+                                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Grand Total</span>
+                                <div className="text-right">
+                                    <div className="text-xl sm:text-2xl font-black text-emerald-400 font-mono leading-none">
+                                        ៛{khrFormatter.format(cartTotal)}
+                                    </div>
+                                    <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                        ≈ ${(cartTotal / Math.max(100, Number(effectiveCurrentShopObj?.khqrConfig?.exchangeRate) || 4000)).toFixed(2)} USD
+                                    </div>
                                 </div>
-                            )}
-                            <div className="flex justify-between items-baseline">
-                                <div>
-                                    <span className="text-xs text-slate-400 font-semibold block">Total ({cartItemCount} {cartItemCount === 1 ? 'item' : 'items'})</span>
-                                    <span className="text-[11px] text-slate-500 font-mono">
-                                        ≈ {usdFormatter.format(cartTotal / (Number(effectiveCurrentShopObj?.khqrConfig?.exchangeRate) || 4000))} USD
-                                    </span>
-                                </div>
-                                <span className="text-2xl sm:text-3xl font-black text-emerald-400 tracking-tight">៛{khrFormatter.format(cartTotal)}</span>
                             </div>
-                            
-                            <div className="grid grid-cols-3 gap-2">
-                                <button 
+
+                            {!currentShift ? (
+                                <button
                                     type="button"
-                                    onClick={() => setShowClearConfirm(true)} 
-                                    disabled={cart.length === 0}
-                                    className="col-span-1 py-3 bg-red-600/20 text-red-400 border border-red-600/30 rounded-xl font-bold hover:bg-red-600 hover:text-white transition disabled:opacity-40 disabled:cursor-not-allowed text-xs sm:text-sm"
+                                    onClick={() => setShowShiftModal(true)}
+                                    className="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm shadow-lg shadow-amber-900/30 flex items-center justify-center gap-2 transition active:scale-95"
                                 >
-                                    Clear
+                                    <i className="fas fa-play-circle text-base"></i>
+                                    <span>Open Shift to Start Selling</span>
                                 </button>
-                                <button 
+                            ) : (
+                                <button
                                     type="button"
-                                    disabled={cart.length === 0}
+                                    disabled={cart.length === 0 || isProcessing}
                                     onClick={() => setShowPaymentModal(true)}
-                                    className="col-span-2 py-3 bg-blue-600 text-white rounded-xl font-black hover:bg-blue-500 transition shadow-lg shadow-blue-600/30 disabled:bg-slate-700 disabled:text-slate-500 disabled:shadow-none disabled:cursor-not-allowed flex items-center justify-center gap-2 text-sm sm:text-base active:scale-[0.99]"
+                                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 transition active:scale-95"
                                 >
-                                    <span>Pay Now</span>
-                                    <i className="fas fa-arrow-right text-xs"></i>
+                                    <i className="fas fa-cash-register"></i>
+                                    <span>Checkout • ៛{khrFormatter.format(cartTotal)}</span>
                                 </button>
-                            </div>
+                            )}
                         </div>
                     </div>
                 </div>
