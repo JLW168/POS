@@ -208,6 +208,159 @@
             window.addEventListener('DOMContentLoaded', () => {
                 window.SolarisPWAManager.init('POS Terminal');
             });
+
+            // ====================================================================
+            // SOLARIS ALWAYS-ON KEEP-AWAKE ENGINE (POS TERMINAL NEVER SLEEPS/LOCKS)
+            // Layer 1: Native Screen Wake Lock API with auto-reacquire on release/visibility/focus
+            // Layer 2: Live canvas.captureStream() silent video loop fallback for iPad/iOS/older tablets
+            // Layer 3: 30-second watchdog heartbeat to keep POS terminal ready 24/7 while open
+            // ====================================================================
+            window.SolarisKeepAwakeManager = {
+                wakeLock: null,
+                noSleepVideo: null,
+                noSleepCanvas: null,
+                noSleepDrawTimer: null,
+                watchdogTimer: null,
+                isActive: false,
+                started: false,
+                listeners: new Set(),
+
+                subscribe(fn) {
+                    this.listeners.add(fn);
+                    try { fn(this.getState()); } catch (e) {}
+                    return () => this.listeners.delete(fn);
+                },
+                notify() {
+                    const state = this.getState();
+                    this.listeners.forEach(fn => { try { fn(state); } catch (e) {} });
+                },
+                getState() {
+                    const hasNativeLock = !!(this.wakeLock && !this.wakeLock.released);
+                    const hasVideoLock = !!(this.noSleepVideo && !this.noSleepVideo.paused);
+                    return {
+                        isActive: hasNativeLock || hasVideoLock || this.isActive,
+                        mode: hasNativeLock ? 'WakeLock' : (hasVideoLock ? 'NoSleep' : 'Standby')
+                    };
+                },
+                async requestNativeWakeLock() {
+                    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return false;
+                    if (document.visibilityState !== 'visible') return false;
+                    if (this.wakeLock && !this.wakeLock.released) {
+                        this.isActive = true;
+                        return true;
+                    }
+                    try {
+                        const sentinel = await navigator.wakeLock.request('screen');
+                        this.wakeLock = sentinel;
+                        this.isActive = true;
+                        sentinel.addEventListener('release', () => {
+                            this.wakeLock = null;
+                            this.notify();
+                            if (document.visibilityState === 'visible') {
+                                setTimeout(() => this.requestNativeWakeLock(), 500);
+                            }
+                        });
+                        this.notify();
+                        return true;
+                    } catch (e) {
+                        this.notify();
+                        return false;
+                    }
+                },
+                startNoSleepVideoFallback() {
+                    try {
+                        if (this.noSleepVideo && !this.noSleepVideo.paused) {
+                            this.isActive = true;
+                            this.notify();
+                            return true;
+                        }
+                        if (!this.noSleepCanvas) {
+                            const canvas = document.createElement('canvas');
+                            canvas.width = 2;
+                            canvas.height = 2;
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {
+                                ctx.fillStyle = '#0f172a';
+                                ctx.fillRect(0, 0, 2, 2);
+                            }
+                            this.noSleepCanvas = canvas;
+                        }
+                        if (!this.noSleepDrawTimer && this.noSleepCanvas) {
+                            let toggle = false;
+                            this.noSleepDrawTimer = setInterval(() => {
+                                const ctx = this.noSleepCanvas.getContext('2d');
+                                if (ctx) {
+                                    toggle = !toggle;
+                                    ctx.fillStyle = toggle ? '#0f172a' : '#111827';
+                                    ctx.fillRect(0, 0, 2, 2);
+                                }
+                            }, 10000);
+                        }
+                        if (typeof this.noSleepCanvas.captureStream !== 'function') return false;
+                        if (!this.noSleepVideo) {
+                            const video = document.createElement('video');
+                            video.muted = true;
+                            video.loop = true;
+                            video.playsInline = true;
+                            video.setAttribute('muted', '');
+                            video.setAttribute('playsinline', '');
+                            video.setAttribute('webkit-playsinline', '');
+                            video.style.cssText = 'position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-1;';
+                            video.srcObject = this.noSleepCanvas.captureStream(1);
+                            document.body.appendChild(video);
+                            this.noSleepVideo = video;
+                        }
+                        const playPromise = this.noSleepVideo.play();
+                        if (playPromise && typeof playPromise.then === 'function') {
+                            playPromise.then(() => {
+                                this.isActive = true;
+                                this.notify();
+                            }).catch(() => {});
+                        }
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                },
+                async engage(fromUserGesture = false) {
+                    const nativeOk = await this.requestNativeWakeLock();
+                    if (!nativeOk || fromUserGesture) {
+                        this.startNoSleepVideoFallback();
+                    }
+                    this.notify();
+                },
+                start() {
+                    if (this.started) {
+                        this.engage(false);
+                        return;
+                    }
+                    this.started = true;
+                    this.engage(false);
+
+                    const onGesture = () => this.engage(true);
+                    const onVisibleOrFocus = () => {
+                        if (document.visibilityState === 'visible') {
+                            this.engage(false);
+                        }
+                    };
+
+                    window.addEventListener('pointerdown', onGesture, { passive: true });
+                    window.addEventListener('touchstart', onGesture, { passive: true });
+                    window.addEventListener('keydown', onGesture, { passive: true });
+                    document.addEventListener('visibilitychange', onVisibleOrFocus);
+                    window.addEventListener('focus', onVisibleOrFocus);
+                    window.addEventListener('pageshow', onVisibleOrFocus);
+
+                    this.watchdogTimer = setInterval(() => {
+                        if (document.visibilityState === 'visible') {
+                            const state = this.getState();
+                            if (!state.isActive) {
+                                this.engage(false);
+                            }
+                        }
+                    }, 30000);
+                }
+            };
         </script>
         
         <!-- Tailwind CSS -->
@@ -5712,6 +5865,7 @@
         const [syncToast, setSyncToast] = useState(null);
         const [isFullscreen, setIsFullscreen] = useState(() => !!(document.fullscreenElement || document.webkitFullscreenElement));
         const [pwaState, setPwaState] = useState(() => window.SolarisPWAManager ? window.SolarisPWAManager.getState() : { canInstallPrompt: false, isInstalled: false });
+        const [keepAwakeState, setKeepAwakeState] = useState(() => window.SolarisKeepAwakeManager ? window.SolarisKeepAwakeManager.getState() : { isActive: false, mode: 'Standby' });
         const menuRef = useRef(null);
 
         const isSyncingNow = isMasterSyncing || !!productSyncStatus?.isFullSyncing;
@@ -5756,26 +5910,20 @@
         }, []);
 
         useEffect(() => {
-            const onFsChange = () => {
-                setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
-            };
-            document.addEventListener('fullscreenchange', onFsChange);
-            document.addEventListener('webkitfullscreenchange', onFsChange);
+            if (!window.SolarisKeepAwakeManager) return;
+            return window.SolarisKeepAwakeManager.subscribe(setKeepAwakeState);
+        }, []);
+
+        useEffect(() => {
+            const onFs = () => setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
+            document.addEventListener('fullscreenchange', onFs);
+            document.addEventListener('webkitfullscreenchange', onFs);
             return () => {
-                document.removeEventListener('fullscreenchange', onFsChange);
-                document.removeEventListener('webkitfullscreenchange', onFsChange);
+                document.removeEventListener('fullscreenchange', onFs);
+                document.removeEventListener('webkitfullscreenchange', onFs);
             };
         }, []);
 
-        const handleToggleKioskFullscreen = () => {
-            if (document.fullscreenElement || document.webkitFullscreenElement) {
-                window.SolarisPWAManager?.exitKioskFullscreen();
-            } else {
-                window.SolarisPWAManager?.enterKioskFullscreen();
-            }
-        };
-
-        // Close dropdown when clicking outside
         useEffect(() => {
             const handleClickOutside = (e) => {
                 if (menuRef.current && !menuRef.current.contains(e.target)) {
@@ -5783,119 +5931,126 @@
                 }
             };
             document.addEventListener('mousedown', handleClickOutside);
-            document.addEventListener('touchstart', handleClickOutside);
-            return () => {
-                document.removeEventListener('mousedown', handleClickOutside);
-                document.removeEventListener('touchstart', handleClickOutside);
-            };
+            return () => document.removeEventListener('mousedown', handleClickOutside);
         }, []);
 
-        const handleSignOutClick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (isSigningOut) return;
+        const toggleKioskFullscreen = () => {
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                window.SolarisPWAManager?.exitKioskFullscreen();
+            } else {
+                window.SolarisPWAManager?.enterKioskFullscreen();
+            }
+        };
+
+        const handleSignOut = async () => {
             setIsSigningOut(true);
-            setIsUserMenuOpen(false);
             await window.safeSignOut();
+            setIsSigningOut(false);
         };
 
         return (
-            <header className="bg-slate-800 shadow-md h-14 sm:h-16 flex items-center justify-between px-3 sm:px-6 z-30 border-b border-slate-700/80 shrink-0">
-                <div className="flex items-center min-w-0">
-                    <button onClick={toggleSidebar} className="w-9 h-9 rounded-xl bg-slate-700/60 hover:bg-slate-700 text-slate-300 hover:text-white mr-2.5 sm:mr-4 flex items-center justify-center transition border border-slate-600/60 shrink-0" title="Toggle Navigation Sidebar">
-                        <i className="fas fa-bars text-lg"></i>
-                    </button>
-                    {/* Add Application icon and Name at header left hand */}
-                    <div className="hidden sm:flex items-center gap-2.5 mr-4 pr-4 border-r border-slate-600/60 shrink-0">
-                        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-blue-900/30">
-                            <i className="fas fa-file-invoice-dollar text-sm"></i>
-                        </div>
-                        <h1 className="text-base font-black text-white tracking-tight truncate">{systemConfig?.appName || 'PO System'}</h1>
+            <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-700/80 px-3 sm:px-5 flex items-center justify-between shrink-0 z-20 relative">
+                {syncToast && (
+                    <div className="fixed top-16 right-4 z-[120] bg-emerald-600 text-white px-4 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
+                        <i className="fas fa-check-circle"></i>
+                        <span>{syncToast}</span>
                     </div>
-                    <h2 className="text-base sm:text-lg font-bold text-slate-200 truncate">{pageTitle}</h2>
-                </div>
-                <div className="flex items-center space-x-2 sm:space-x-3" ref={menuRef}>
-                    {/* Quick Full-Screen Kiosk Toggle Button (Desktop / Tablet) */}
+                )}
+
+                <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
                     <button
                         type="button"
-                        onClick={handleToggleKioskFullscreen}
-                        className={`hidden md:flex px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-bold items-center gap-1.5 transition shadow-sm active:scale-95 ${
-                            isFullscreen
-                                ? 'bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border-blue-500/40'
-                                : 'bg-slate-700/70 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-600'
-                        }`}
-                        title={isFullscreen ? "Exit Full-Screen Kiosk Mode (Esc)" : "Enter Full-Screen Kiosk Mode"}
+                        onClick={toggleSidebar}
+                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition shrink-0"
+                        title="Open Navigation Menu"
                     >
-                        <i className={`fas ${isFullscreen ? 'fa-compress' : 'fa-expand'}`}></i>
-                        <span className="hidden lg:inline">{isFullscreen ? 'Kiosk Active' : 'Full Screen'}</span>
+                        <i className="fas fa-bars"></i>
+                    </button>
+                    <h2 className="text-base sm:text-xl font-black text-white truncate tracking-tight">
+                        {pageTitle || systemConfig?.appName || 'POS Terminal'}
+                    </h2>
+                </div>
+
+                <div className="flex items-center space-x-2 sm:space-x-2.5" ref={menuRef}>
+                    {/* Always-On Keep-Awake Status Pill */}
+                    <button
+                        type="button"
+                        onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
+                        className={`hidden sm:flex px-2.5 py-1.5 rounded-xl border text-xs font-bold items-center gap-1.5 transition shadow-sm active:scale-95 ${
+                            keepAwakeState.isActive
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                        }`}
+                        title={keepAwakeState.isActive ? `Keep-Awake Active (${keepAwakeState.mode}) — Screen will never sleep or lock while open` : 'Tap once to lock POS screen awake'}
+                    >
+                        <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'}`}></i>
+                        <span className="hidden lg:inline">{keepAwakeState.isActive ? 'Always Awake' : 'Keep Awake'}</span>
                     </button>
 
-                    {/* Master AppSync: 1-Click Force Full Cloud Sync Icon Button */}
-                    <div className="relative flex items-center">
-                        {syncToast && (
-                            <div className="hidden sm:flex items-center gap-1.5 mr-2 px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold whitespace-nowrap animate-fade-in-up">
-                                <i className="fas fa-check-circle text-emerald-400"></i>
-                                <span>{syncToast}</span>
-                            </div>
-                        )}
+                    {/* Master Cloud AppSync Button */}
+                    <button
+                        type="button"
+                        onClick={handleMasterAppSync}
+                        disabled={isSyncingNow}
+                        className="w-9 h-9 sm:w-auto sm:px-3 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 border border-slate-700 flex items-center justify-center gap-1.5 text-xs font-bold transition disabled:opacity-50"
+                        title="Sync Products, Vendors & Categories from Cloud"
+                    >
+                        <i className={`fas fa-sync-alt ${isSyncingNow ? 'fa-spin text-amber-400' : ''}`}></i>
+                        <span className="hidden md:inline">{isSyncingNow ? 'Syncing...' : 'AppSync'}</span>
+                    </button>
+
+                    {/* Fullscreen Kiosk Toggle */}
+                    <button
+                        type="button"
+                        onClick={toggleKioskFullscreen}
+                        className="hidden sm:flex w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 items-center justify-center transition"
+                        title={isFullscreen ? 'Exit Full-Screen' : 'Enter Full-Screen Kiosk Mode'}
+                    >
+                        <i className={`fas ${isFullscreen ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
+                    </button>
+
+                    {/* Install PWA Shortcut */}
+                    {!pwaState.isInstalled && onOpenInstallModal && (
                         <button
                             type="button"
-                            onClick={handleMasterAppSync}
-                            disabled={isSyncingNow}
-                            title={`Master AppSync — 1-Click Force Full Cloud Sync (IDB Cache: ${khrFormatter.format(productSyncStatus?.cachedCount || 0)} items | +${productSyncStatus?.deltaReadsSession || 0} delta)`}
-                            className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 disabled:opacity-60 ${
-                                isSyncingNow
-                                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                                    : 'bg-slate-700/70 hover:bg-blue-600/25 text-emerald-400 hover:text-blue-300 border-slate-600 hover:border-blue-500/50'
-                            }`}
+                            onClick={onOpenInstallModal}
+                            className="w-9 h-9 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/40 flex items-center justify-center transition"
+                            title="Install App to Home Screen"
                         >
-                            <i className={`fas fa-cloud-arrow-down text-sm sm:text-base ${isSyncingNow ? ' hidden' : ''}`}></i>
-                            {isSyncingNow && <i className="fas fa-sync-alt fa-spin text-sm sm:text-base text-amber-300"></i>}
-                            <span
-                                className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border-2 border-slate-800 ${
-                                    isSyncingNow
-                                        ? 'bg-amber-400 animate-ping'
-                                        : productSyncStatus?.mode === 'offline-cache'
-                                            ? 'bg-amber-400'
-                                            : 'bg-emerald-400'
-                                }`}
-                            ></span>
+                            <i className="fas fa-download text-xs"></i>
                         </button>
-                    </div>
+                    )}
 
-                    <div className="hidden md:flex flex-col items-end">
-                        <span className="text-sm font-medium text-slate-200">{userProfile?.name || 'User'}</span>
-                        <span className="text-xs text-slate-400 capitalize">{userProfile?.role || 'Staff'}</span>
-                    </div>
+                    {/* User Account Dropdown */}
                     <div className="relative">
                         <button
                             type="button"
                             onClick={() => setIsUserMenuOpen(prev => !prev)}
-                            className="flex items-center gap-2 p-1 rounded-full hover:bg-slate-700/60 transition focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            title="Account Menu"
+                            className="flex items-center gap-2 pl-2 pr-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
                         >
-                            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold shadow-lg border-2 border-slate-600">
-                                {(userProfile?.name || 'U').charAt(0).toUpperCase()}
+                            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-xs flex items-center justify-center uppercase">
+                                {(userProfile?.name || 'U').slice(0, 2)}
                             </div>
-                            <i className={`fas fa-chevron-down text-xs text-slate-400 hidden sm:inline transition-transform duration-200 mr-1 ${isUserMenuOpen ? 'rotate-180 text-white' : ''}`}></i>
+                            <div className="hidden md:block text-left leading-tight">
+                                <div className="text-xs font-bold text-white max-w-[110px] truncate">{userProfile?.name || 'User'}</div>
+                                <div className="text-[10px] text-slate-400">{userProfile?.role || 'Staff'}</div>
+                            </div>
+                            <i className="fas fa-chevron-down text-[10px] text-slate-400"></i>
                         </button>
 
                         {isUserMenuOpen && (
-                            <div className="absolute right-0 mt-2 w-56 bg-slate-800 rounded-xl shadow-2xl py-2 border border-slate-600 z-50 animate-fade-in-up">
-                                <div className="px-4 py-2.5 border-b border-slate-700">
-                                    <p className="text-sm font-bold text-white truncate">{userProfile?.name || 'User'}</p>
-                                    <p className="text-xs text-slate-400 truncate">{userProfile?.email || ''}</p>
-                                    <span className="inline-block mt-1 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-blue-500/20 text-blue-300 rounded border border-blue-500/30">
-                                        {userProfile?.role || 'Staff'}
-                                    </span>
+                            <div className="absolute right-0 mt-2 w-52 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl py-2 z-50 animate-fade-in-up">
+                                <div className="px-4 py-2 border-b border-slate-800">
+                                    <div className="text-xs font-black text-white truncate">{userProfile?.name || 'User'}</div>
+                                    <div className="text-[11px] text-slate-400 truncate">{userProfile?.email || ''}</div>
                                 </div>
                                 <button
                                     type="button"
                                     disabled={isSigningOut}
-                                    onClick={handleSignOutClick}
-                                    className="w-full text-left px-4 py-2.5 text-sm font-bold text-red-400 hover:bg-red-500/10 hover:text-red-300 flex items-center gap-2.5 transition disabled:opacity-50"
+                                    onClick={handleSignOut}
+                                    className="w-full text-left px-4 py-2.5 text-xs font-bold text-red-400 hover:bg-red-500/15 flex items-center gap-2 transition"
                                 >
-                                    <i className="fas fa-sign-out-alt"></i>
+                                    <i className={`fas ${isSigningOut ? 'fa-spinner fa-spin' : 'fa-sign-out-alt'}`}></i>
                                     <span>{isSigningOut ? 'Signing Out...' : 'Sign Out'}</span>
                                 </button>
                             </div>
@@ -5906,251 +6061,123 @@
         );
     };
 
-    // --- 8. PAGE & FEATURE COMPONENTS ---
-
-    // --- NEW: Device Setup Wizard (Professional One-Time Set) ---
+    // --- Device Terminal Setup Wizard (When POS Terminal has no local device selected) ---
     const DeviceSetup = ({ userProfile }) => {
-        const { shops, devices, setLocalDevice } = useData();
-        const [selectedShopId, setSelectedShopId] = useState('');
-        const [selectedDeviceId, setSelectedDeviceId] = useState('');
-        const [isSubmitting, setIsSubmitting] = useState(false);
-        const [busyDevices, setBusyDevices] = useState([]); // Stores IDs of devices with open shifts
+        const { devices, shops, setLocalDevice } = useData();
+        const [selectedDevId, setSelectedDevId] = useState('');
 
-        // 1. Filter shops based on user permissions
-        const availableShops = useMemo(() => {
-            if (!userProfile || userProfile.role === 'Admin') return shops;
-            const assigned = userProfile.assignedShops || [];
-            return shops.filter(s => assigned.includes(s.id));
-        }, [shops, userProfile]);
-
-        // 2. Auto-select shop if user only has one assigned
-        useEffect(() => {
-            if (availableShops.length === 1) {
-                setSelectedShopId(availableShops[0].id);
-            }
-        }, [availableShops]);
-
-        // 3. Real-time check for BUSY devices (Open Shifts)
-        useEffect(() => {
-            if (!selectedShopId) {
-                setBusyDevices([]);
-                return;
-            }
-
-            // Query active shifts for this shop
-            const unsubscribe = db.collection('shifts')
-                .where('shopId', '==', selectedShopId)
-                .where('status', '==', 'open')
-                .onSnapshot(snapshot => {
-                    const busyList = snapshot.docs.map(doc => {
-                        const data = doc.data();
-                        return {
-                            deviceId: data.deviceId,
-                            cashierId: data.cashierId,
-                            cashierName: data.cashierName
-                        };
-                    });
-                    setBusyDevices(busyList);
-                });
-            return () => unsubscribe();
-        }, [selectedShopId]);
-
-        // 4. Filter Available Devices
         const availableDevices = useMemo(() => {
-            if (!selectedShopId) return [];
-            
-            const shopDevices = devices.filter(d => d.shopId === selectedShopId);
-            
-            return shopDevices.map(device => {
-                const busyInfo = busyDevices.find(b => b.deviceId === device.id);
-                // A device is "Available" if:
-                // 1. It has no open shift (busyInfo is undefined)
-                // 2. OR It has an open shift, but it belongs to ME (Resume Session)
-                const isMine = busyInfo && busyInfo.cashierId === userProfile.uid;
-                const isBusy = busyInfo && !isMine;
-                
-                return {
-                    ...device,
-                    isBusy,
-                    isMine,
-                    statusLabel: isBusy ? `Busy (${busyInfo.cashierName})` : isMine ? 'Resume Session' : 'Available'
-                };
-            }).filter(d => !d.isBusy); // STRICT: Hide devices busy by others as requested
-        }, [devices, selectedShopId, busyDevices, userProfile.uid]);
-
-        // NOTE: Auto-select logic for devices has been REMOVED as requested.
-
-        const handleInitialize = () => {
-            if (!selectedDeviceId) return;
-            setIsSubmitting(true);
-            // Simulate processing for UX
-            setTimeout(() => {
-                setLocalDevice(selectedDeviceId);
-                setIsSubmitting(false);
-            }, 500);
-        };
+            if (!devices) return [];
+            if (userProfile?.role === 'Admin') return devices;
+            const allowed = userProfile?.assignedShops || [];
+            return devices.filter(d => allowed.includes(d.shopId));
+        }, [devices, userProfile]);
 
         return (
-            <div className="flex items-center justify-center h-full bg-slate-900 p-4">
-                <div className="bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md border border-slate-700 overflow-hidden animate-fade-in-up">
-                    <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6 text-center">
-                        <i className="fas fa-cash-register text-5xl text-white mb-4 opacity-90"></i>
-                        <h2 className="text-2xl font-bold text-white">Terminal Setup</h2>
-                        <p className="text-blue-100 text-sm mt-1">Identify this device to start selling.</p>
+            <div className="flex items-center justify-center h-full p-4">
+                <div className="bg-slate-800 p-6 sm:p-8 rounded-2xl border border-slate-700 max-w-md w-full shadow-2xl space-y-5 text-center">
+                    <div className="w-16 h-16 rounded-2xl bg-blue-600/20 border border-blue-500/40 text-blue-400 flex items-center justify-center mx-auto">
+                        <i className="fas fa-desktop text-3xl"></i>
                     </div>
-                    
-                    <div className="p-8 space-y-6">
-                        {/* Shop Selection */}
-                        <div>
-                            <label className="block text-sm font-medium text-slate-400 mb-2 uppercase tracking-wider">
-                                1. Select Location
-                            </label>
-                            <div className="relative">
-                                <select 
-                                    value={selectedShopId} 
-                                    onChange={(e) => { setSelectedShopId(e.target.value); setSelectedDeviceId(''); }}
-                                    className="w-full bg-slate-900 text-white pl-4 pr-10 py-3 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none appearance-none transition-all hover:border-slate-500"
-                                >
-                                    <option value="">-- Choose Shop --</option>
-                                    {availableShops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-slate-400">
-                                    <i className="fas fa-store"></i>
-                                </div>
-                            </div>
-                            {userProfile.role !== 'Admin' && availableShops.length === 0 && (
-                                <p className="text-xs text-red-400 mt-2">No shops assigned to your account.</p>
-                            )}
-                        </div>
-
-                        {/* Device Selection */}
-                        <div className={`transition-all duration-300 ${!selectedShopId ? 'opacity-50 grayscale pointer-events-none' : 'opacity-100'}`}>
-                            <label className="block text-sm font-medium text-slate-400 mb-2 uppercase tracking-wider">
-                                2. Select Available Terminal
-                            </label>
-                            <div className="relative">
-                                <select 
-                                    value={selectedDeviceId} 
-                                    onChange={(e) => setSelectedDeviceId(e.target.value)}
-                                    className="w-full bg-slate-900 text-white pl-4 pr-10 py-3 rounded-xl border border-slate-600 focus:ring-2 focus:ring-blue-500 outline-none appearance-none transition-all hover:border-slate-500"
-                                    disabled={!selectedShopId}
-                                >
-                                    <option value="">-- Choose Device --</option>
-                                    {availableDevices.map(d => (
-                                        <option key={d.id} value={d.id}>
-                                            {d.name} {d.isMine ? '(Resume)' : ''}
-                                        </option>
-                                    ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-slate-400">
-                                    <i className="fas fa-desktop"></i>
-                                </div>
-                            </div>
-                            
-                            {selectedShopId && availableDevices.length === 0 ? (
-                                <p className="text-xs text-red-400 mt-2">
-                                    <i className="fas fa-exclamation-circle mr-1"></i>
-                                    All terminals in this shop are currently busy.
-                                </p>
-                            ) : (
-                                <p className="text-xs text-slate-500 mt-2">
-                                    Only showing available terminals.
-                                </p>
-                            )}
-                        </div>
-
-                        <button 
-                            onClick={handleInitialize}
-                            disabled={!selectedDeviceId || isSubmitting}
-                            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                        >
-                            {isSubmitting ? <div className="loader w-5 h-5 border-white/30 border-t-white"></div> : <i className="fas fa-check-circle"></i>}
-                            {isSubmitting ? 'Initializing...' : 'Initialize Terminal'}
-                        </button>
+                    <div>
+                        <h2 className="text-xl font-black text-white">Initialize POS Terminal</h2>
+                        <p className="text-xs sm:text-sm text-slate-400 mt-1">
+                            Select which registered counter terminal this device represents.
+                        </p>
                     </div>
+                    <select
+                        value={selectedDevId}
+                        onChange={(e) => setSelectedDevId(e.target.value)}
+                        className="w-full bg-slate-900 text-white px-4 py-3 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm font-semibold"
+                    >
+                        <option value="">-- Select Counter Terminal --</option>
+                        {availableDevices.map(d => {
+                            const sName = shops.find(s => s.id === d.shopId)?.name || 'Unknown Shop';
+                            return <option key={d.id} value={d.id}>{d.name} ({sName})</option>;
+                        })}
+                    </select>
+                    <button
+                        type="button"
+                        disabled={!selectedDevId}
+                        onClick={() => setLocalDevice(selectedDevId)}
+                        className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black text-sm shadow-lg transition"
+                    >
+                        Activate Terminal
+                    </button>
                 </div>
             </div>
         );
     };
 
-    // --- NEW: Add Customer Modal (Inline) ---
-    const AddCustomerModal = ({ onClose, onSave, shops, defaultShopId, initialSearchTerm = '' }) => {
-        const [formData, setFormData] = useState({
-            name: isNaN(initialSearchTerm) ? initialSearchTerm : '', 
-            phone: !isNaN(initialSearchTerm) && initialSearchTerm.trim() !== '' ? initialSearchTerm : '', 
-            email: '', registeredShopId: defaultShopId || '', points: 0, visitCount: 0, totalSpent: 0
-        });
-        const [isSubmitting, setIsSubmitting] = useState(false);
-        const [error, setError] = useState('');
-
-        const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
+    // --- Quick Add Customer Inline Modal for POS Terminal ---
+    const AddCustomerModal = ({ onClose, onSave, shops = [], defaultShopId = '', initialSearchTerm = '' }) => {
+        const isLikelyPhone = /^[0-9+\-\s]{4,}$/.test(String(initialSearchTerm || '').trim());
+        const [name, setName] = useState(isLikelyPhone ? '' : String(initialSearchTerm || '').trim());
+        const [phone, setPhone] = useState(isLikelyPhone ? String(initialSearchTerm || '').trim() : '');
+        const [email, setEmail] = useState('');
+        const [registeredShopId, setRegisteredShopId] = useState(defaultShopId || '');
+        const [saving, setSaving] = useState(false);
 
         const handleSubmit = async (e) => {
             e.preventDefault();
-            if (!formData.name || !formData.phone) {
-                setError('Name and Phone are required.');
-                return;
-            }
-            setIsSubmitting(true);
-            setError('');
+            if (!name.trim() || !phone.trim()) return;
+            setSaving(true);
             try {
-                const dataToSave = {
-                    ...formData,
-                    points: Number(formData.points) || 0,
-                    visitCount: Number(formData.visitCount) || 0,
-                    totalSpent: Number(formData.totalSpent) || 0,
+                const payload = {
+                    name: name.trim(),
+                    phone: phone.trim(),
+                    email: email.trim(),
+                    registeredShopId: registeredShopId || defaultShopId || '',
+                    points: 0,
+                    visitCount: 0,
+                    totalSpent: 0,
                     createdAt: firebase.firestore.FieldValue.serverTimestamp()
                 };
-                
-                let newDocRefId;
-                if (window.SolarisCollectionMutator) {
-                     newDocRefId = db.collection('customers').doc().id; 
-                     window.SolarisCollectionMutator.upsertDoc('customers', newDocRefId, dataToSave, true);
-                } else {
-                     const docRef = await db.collection('customers').add(dataToSave);
-                     newDocRefId = docRef.id;
+                const newId = window.SolarisCollectionMutator
+                    ? window.SolarisCollectionMutator.upsertDoc('customers', null, payload, true)
+                    : (await db.collection('customers').add(payload)).id;
+                if (typeof onSave === 'function') {
+                    onSave({ id: newId, ...payload });
                 }
-
-                if (onSave) onSave({ id: newDocRefId, ...dataToSave });
             } catch (err) {
-                console.error(err);
-                setError('Failed to add customer.');
-                setIsSubmitting(false);
+                console.error('Quick add customer error:', err);
+            } finally {
+                setSaving(false);
             }
         };
 
         return (
-            <Modal show={true} onClose={onClose} maxWidth="max-w-xl">
+            <Modal show={true} onClose={onClose} maxWidth="max-w-md">
                 <ModalHeader title="Quick Add Customer" onClose={onClose} />
-                <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+                <form onSubmit={handleSubmit}>
                     <ModalBody>
-                        {error && <div className="mb-4 text-red-200 bg-red-500/20 border border-red-500/50 p-2.5 rounded-lg text-sm flex items-center gap-2"><i className="fas fa-exclamation-circle"></i>{error}</div>}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-3.5">
                             <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Name *</label>
-                                <input type="text" name="name" required value={formData.name} onChange={handleChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" autoFocus placeholder="e.g. Sokha" />
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Customer Name *</label>
+                                <input type="text" required value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Sok Dara" className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm" autoFocus />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Phone *</label>
-                                <input type="text" name="phone" required value={formData.phone} onChange={handleChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" placeholder="012345678" />
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Phone Number *</label>
+                                <input type="tel" required value={phone} onChange={e => setPhone(e.target.value)} placeholder="e.g. 012 345 678" className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm font-mono" />
                             </div>
-                            <div className="sm:col-span-2">
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Email (Optional)</label>
-                                <input type="email" name="email" value={formData.email} onChange={handleChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none" placeholder="email@example.com" />
+                            <div>
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Email (Optional)</label>
+                                <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="customer@example.com" className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm" />
                             </div>
-                            <div className="sm:col-span-2">
-                                <label className="block text-sm font-medium text-slate-300 mb-1">Registered Shop</label>
-                                <select name="registeredShopId" value={formData.registeredShopId} onChange={handleChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none">
-                                    <option value="">Unknown / None</option>
-                                    {(shops || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Registered Shop</label>
+                                <select value={registeredShopId} onChange={e => setRegisteredShopId(e.target.value)} className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 outline-none text-sm">
+                                    <option value="">Select Shop</option>
+                                    {shops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                 </select>
                             </div>
                         </div>
                     </ModalBody>
                     <ModalFooter>
-                        <button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-slate-500 transition">Cancel</button>
-                        <button type="submit" disabled={isSubmitting} className="bg-blue-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-blue-700 transition flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 disabled:opacity-50">
-                            {isSubmitting ? <div className="loader w-4 h-4 border-white/30 border-t-white"></div> : <i className="fas fa-check"></i>} Save Customer
+                        <button type="button" onClick={onClose} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-5 rounded-xl text-sm">Cancel</button>
+                        <button type="submit" disabled={saving} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-6 rounded-xl text-sm flex items-center gap-2">
+                            {saving ? <div className="loader w-4 h-4"></div> : <i className="fas fa-user-plus"></i>}
+                            <span>Save Customer</span>
                         </button>
                     </ModalFooter>
                 </form>
@@ -6158,293 +6185,174 @@
         );
     };
 
-    // --- PHASE 1 & 2: POS Terminal Component ---
+    // --- 7. POS TERMINAL COMPONENT ---
     const POSTerminal = ({ userProfile }) => {
-        const { products, shops, customers, loyaltyRules, systemConfig, devices, currentDeviceId } = useData(); // <-- ADDED loyaltyRules, devices & currentDeviceId
-        const canEditLineItem = true; // Available to all users; Unit Price override is protected by 6-digit Shop PIN
+        const { products, shops, customers, loyaltyRules, devices, currentDeviceId, systemConfig } = useData();
+        const currentDevice = useMemo(() => devices.find(d => d.id === currentDeviceId) || null, [devices, currentDeviceId]);
+
+        const [selectedShopId, setSelectedShopId] = useState(() => {
+            if (currentDevice?.shopId) return currentDevice.shopId;
+            return shops[0]?.id || '';
+        });
+        const [currentShift, setCurrentShift] = useState(null);
         const [cart, setCart] = useState([]);
         const [searchTerm, setSearchTerm] = useState('');
+        const [selectedTab, setSelectedTab] = useState('All');
+        const [activeMobileTab, setActiveMobileTab] = useState('products');
+        const [catalogViewMode, setCatalogViewMode] = useState('list'); // Line/List Product Display as Default
+        const [highlightedIndex, setHighlightedIndex] = useState(0);
+        const RENDER_LIMIT = 60;
+
+        // Customer Selection State
+        const [selectedCustomerId, setSelectedCustomerId] = useState('');
         const [customerSearchTerm, setCustomerSearchTerm] = useState('');
         const [isCustomerSearchFocused, setIsCustomerSearchFocused] = useState(false);
 
-        const filteredCustomers = useMemo(() => {
-            if (!customers) return [];
-            if (!customerSearchTerm.trim()) return customers.slice(0, 5);
-            const lower = customerSearchTerm.toLowerCase();
-            return customers.filter(c => c.name.toLowerCase().includes(lower) || (c.phone && c.phone.includes(lower))).slice(0, 10);
-        }, [customers, customerSearchTerm]);
-        
-        // --- NEW: Find current device object ---
-        const currentDevice = useMemo(() => devices.find(d => d.id === currentDeviceId), [devices, currentDeviceId]);
-
-        // Changed state name to be generic, logic switches to Vendor
-        const [selectedTab, setSelectedTab] = useState('All'); 
-        
-        // --- NEW: Quick Access Custom Product Groups State ---
-        const [quickGroups, setQuickGroups] = useState([]);
-        const [activeQuickGroupId, setActiveQuickGroupId] = useState('');
-        const [showQuickGroupModal, setShowQuickGroupModal] = useState(false);
-        const [editingQuickGroup, setEditingQuickGroup] = useState(null);
-
-        const [selectedShopId, setSelectedShopId] = useState('');
-        const [selectedCustomerId, setSelectedCustomerId] = useState('');
-        
-        // --- NEW: Mobile Tab State ---
-        const [activeMobileTab, setActiveMobileTab] = useState('products'); 
-        // --- NEW: Universal Catalog View Mode (Defaults to Line/List View on every POS Terminal launch) ---
-        const [catalogViewMode, setCatalogViewMode] = useState('list');
-
-        const handleSetCatalogViewMode = (mode) => {
-            setCatalogViewMode(mode);
-        };
-
-        // Fast O(1) lookup for quantity of each product currently in the cart (for live badges on product cards/rows)
-        const cartQtyMap = useMemo(() => {
-            const map = new Map();
-            cart.forEach(item => {
-                map.set(item.productId, Number(item.quantity) || 0);
-            });
-            return map;
-        }, [cart]);
-
-        // --- NEW: Shift State ---
-        const [currentShift, setCurrentShift] = useState(null);
-        const [showShiftModal, setShowShiftModal] = useState(false);
-
-        // --- PERFORMANCE LIMIT ---
-        const RENDER_LIMIT = 50; 
-
-        // --- PHASE 2 STATE ---
+        // Modal & Workflow States
+        const [isProcessing, setIsProcessing] = useState(false);
         const [showPaymentModal, setShowPaymentModal] = useState(false);
         const [showReceiptModal, setShowReceiptModal] = useState(false);
         const [lastSaleData, setLastSaleData] = useState(null);
         const [thankYouModalData, setThankYouModalData] = useState(null);
-        const [isProcessing, setIsProcessing] = useState(false);
-
-        // --- PHASE 3 STATE ---
         const [showSalesHistory, setShowSalesHistory] = useState(false);
         const [showDailyReport, setShowDailyReport] = useState(false);
-        // --- NEW: Add Customer State ---
-        const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
-        
-        // --- NEW: Bank AutoSum State ---
         const [showBankAutoSum, setShowBankAutoSum] = useState(false);
-
-        // --- NEW: PIN-Protected Live Dynamic KHQR Simulator State ---
         const [showKhqrSimulator, setShowKhqrSimulator] = useState(false);
-
-        // --- NEW: Clear Cart Confirmation State ---
-        const [showClearConfirm, setShowClearConfirm] = useState(false);
-
-        // --- NEW: Hold/Recall State (Shared single listener for Badge + Modal) ---
-        const [showHeldTicketsModal, setShowHeldTicketsModal] = useState(false);
+        const [showShiftModal, setShowShiftModal] = useState(false);
+        const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
         const [showSaveTicketModal, setShowSaveTicketModal] = useState(false);
-        const [heldTickets, setHeldTickets] = useState([]); // <-- SHARED HELD TICKETS CACHE
-        const [heldTicketsLoading, setHeldTicketsLoading] = useState(true);
-        const heldTicketsCount = heldTickets.length;
-        const [editingCartItem, setEditingCartItem] = useState(null); // <-- TOUCH NUMPAD & LINE-ITEM OVERRIDE MODAL
-
-        // --- SHARED TODAY'S SALES CACHE (Eliminates 3 duplicate listeners on 'sales') ---
-        const [todaySales, setTodaySales] = useState([]);
-        const [todaySalesLoading, setTodaySalesLoading] = useState(true);
-
-        // --- NON-BLOCKING POS DIALOG STATE ---
-        const [posMessage, setPosMessage] = useState({ show: false, title: '', message: '', isError: false });
+        const [showHeldTicketsModal, setShowHeldTicketsModal] = useState(false);
+        const [showClearConfirm, setShowClearConfirm] = useState(false);
         const [pendingRestoreTicket, setPendingRestoreTicket] = useState(null);
+        const [editingCartItem, setEditingCartItem] = useState(null);
+        const canEditLineItem = true;
 
-        const showPosAlert = useCallback((title, message, isError = true) => {
-            setPosMessage({ show: true, title, message, isError });
+        // Quick Access Product Groups
+        const [quickGroups, setQuickGroups] = useState(() => {
+            try {
+                const raw = localStorage.getItem('solaris_pos_quick_groups_v1');
+                const parsed = raw ? JSON.parse(raw) : [];
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (e) { return []; }
+        });
+        const [activeQuickGroupId, setActiveQuickGroupId] = useState('');
+        const [showQuickGroupModal, setShowQuickGroupModal] = useState(false);
+        const [editingQuickGroup, setEditingQuickGroup] = useState(null);
+
+        const saveQuickGroups = useCallback((nextGroups) => {
+            setQuickGroups(nextGroups);
+            try { localStorage.setItem('solaris_pos_quick_groups_v1', JSON.stringify(nextGroups)); } catch (e) {}
         }, []);
 
-        const closePosAlert = useCallback(() => {
-            setPosMessage(prev => ({ ...prev, show: false }));
-            setTimeout(() => searchInputRef.current?.focus(), 50);
+        const handleSetCatalogViewMode = useCallback((mode) => {
+            setCatalogViewMode(mode === 'grid' ? 'grid' : 'list');
         }, []);
 
-        // --- BARCODE & KEYBOARD NAVIGATION STATE ---
-        const searchInputRef = useRef(null);
-        const [highlightedIndex, setHighlightedIndex] = useState(0);
-        const scannerBufferRef = useRef({ chars: '', lastKeyTime: 0, isRapidBurst: false, preBurstSearchTerm: '' });
+        // Shared Held Tickets & Today's Sales Listeners
+        const [heldTickets, setHeldTickets] = useState([]);
+        const [heldTicketsLoading, setHeldTicketsLoading] = useState(false);
+        const heldTicketsCount = heldTickets.length;
 
-        // --- REAL-TIME STOCK WARNING BANNER STATE ---
-        const [stockWarning, setStockWarning] = useState(null);
-        const stockWarningTimerRef = useRef(null);
+        const [todaySales, setTodaySales] = useState([]);
+        const [todaySalesLoading, setTodaySalesLoading] = useState(false);
 
-        // --- OFFLINE RUSH RESILIENCE & AUTO-SYNC QUEUE STATE ---
+        // Network & Alerts State
         const [isOnline, setIsOnline] = useState(() => navigator.onLine);
         const [pendingSyncCount, setPendingSyncCount] = useState(0);
         const [isSyncing, setIsSyncing] = useState(false);
+        const [posMessage, setPosMessage] = useState({ show: false, title: '', message: '', isError: false });
+        const [stockWarning, setStockWarning] = useState(null);
 
-        useEffect(() => {
-            const handleOnline = () => {
-                setIsOnline(true);
-                setIsSyncing(true);
-                db.waitForPendingWrites()
-                    .then(() => {
-                        setPendingSyncCount(0);
-                        setIsSyncing(false);
-                    })
-                    .catch(() => {
-                        setIsSyncing(false);
-                    });
-            };
-            const handleOffline = () => {
-                setIsOnline(false);
-            };
-            window.addEventListener('online', handleOnline);
-            window.addEventListener('offline', handleOffline);
-            return () => {
-                window.removeEventListener('online', handleOnline);
-                window.removeEventListener('offline', handleOffline);
-            };
+        const searchInputRef = useRef(null);
+        const stockWarningTimerRef = useRef(null);
+        const scannerBufferRef = useRef({ chars: '', lastKeyTime: 0, isRapidBurst: false, preBurstSearchTerm: '' });
+
+        const showPosAlert = useCallback((title, message, isError = false) => {
+            setPosMessage({ show: true, title, message, isError });
         }, []);
-
-        // --- SINGLE SHARED TODAY'S SALES LISTENER (Hydrates immediately from Local Ledger + Single-Field Query) ---
-        useEffect(() => {
-            if (!selectedShopId) return;
-
-            const startOfDay = new Date();
-            startOfDay.setHours(0, 0, 0, 0);
-
-            const mergeTodaySales = (cloudDocs = []) => {
-                const map = new Map();
-                if (window.SolarisLocalSalesStore) {
-                    window.SolarisLocalSalesStore.getSales().forEach(s => {
-                        if (!s || !s.id || s.shopId !== selectedShopId) return;
-                        const dt = safeToDate(s.timestamp || s.createdAt);
-                        if (dt && dt >= startOfDay) map.set(s.id, s);
-                    });
-                }
-                (cloudDocs || []).forEach(s => {
-                    if (!s || !s.id || s.shopId !== selectedShopId) return;
-                    const dt = safeToDate(s.timestamp || s.createdAt);
-                    if (dt && dt >= startOfDay) {
-                        map.set(s.id, { ...(map.get(s.id) || {}), ...s });
-                    }
-                });
-                return Array.from(map.values()).sort((a, b) => {
-                    return (safeToDate(b.timestamp || b.createdAt) || 0) - (safeToDate(a.timestamp || a.createdAt) || 0);
-                });
-            };
-
-            // 1. Hydrate immediately from Local Sales Ledger so History & Daily Report survive page refresh in 0ms
-            setTodaySales(mergeTodaySales([]));
-            setTodaySalesLoading(false);
-
-            if (!showSalesHistory && !showDailyReport) return;
-
-            let latestCloudDocs = [];
-            const unsubLocal = window.SolarisLocalSalesStore
-                ? window.SolarisLocalSalesStore.subscribe(() => {
-                    setTodaySales(mergeTodaySales(latestCloudDocs));
-                })
-                : () => {};
-
-            // 2. Query on `timestamp` only (single-field index) + filter `shopId` in memory so it NEVER fails due to missing composite index!
-            const unsubscribe = db.collection('sales')
-                .where('timestamp', '>=', startOfDay)
-                .onSnapshot({ includeMetadataChanges: true }, (snapshot) => {
-                    latestCloudDocs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    if (latestCloudDocs.length > 0 && window.SolarisLocalSalesStore) {
-                        window.SolarisLocalSalesStore.recordSalesBatch(latestCloudDocs);
-                    }
-                    setTodaySales(mergeTodaySales(latestCloudDocs));
-                    setTodaySalesLoading(false);
-                }, (err) => {
-                    console.warn("Today's sales listener warning:", err?.code || err?.message);
-                    setTodaySales(mergeTodaySales(latestCloudDocs));
-                    setTodaySalesLoading(false);
-                });
-
-            return () => {
-                unsubLocal();
-                unsubscribe();
-            };
-        }, [selectedShopId, showSalesHistory, showDailyReport]);
-
-        // --- SINGLE SHARED HELD TICKETS LISTENER (Powers both badge count and HeldTicketsModal) ---
-        useEffect(() => {
-            if (!selectedShopId) {
-                setHeldTickets([]);
-                setHeldTicketsLoading(false);
-                return;
-            }
-            setHeldTicketsLoading(true);
-            const unsubscribe = db.collection('heldTickets')
-                .where('shopId', '==', selectedShopId)
-                .onSnapshot((snapshot) => {
-                    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    data.sort((a, b) => {
-                        const dateA = safeToDate(a.savedAt) || new Date(0);
-                        const dateB = safeToDate(b.savedAt) || new Date(0);
-                        return dateB - dateA;
-                    });
-                    setHeldTickets(data);
-                    setHeldTicketsLoading(false);
-                }, (err) => {
-                    console.warn("Held tickets listener error:", err);
-                    setHeldTicketsLoading(false);
-                });
-            return () => unsubscribe();
-        }, [selectedShopId]);
-
-        // --- LOAD QUICK ACCESS PRODUCT GROUPS PER SHOP (Local + Firestore Sync) ---
-        useEffect(() => {
-            if (!selectedShopId) return;
-            const localKey = `solaris_quick_groups_${selectedShopId}`;
-            try {
-                const cached = localStorage.getItem(localKey);
-                if (cached) setQuickGroups(JSON.parse(cached));
-            } catch (e) {}
-
-            const unsub = db.collection('system_settings').doc(`quick_groups_${selectedShopId}`).onSnapshot(doc => {
-                if (doc.exists && Array.isArray(doc.data()?.groups)) {
-                    const groups = doc.data().groups;
-                    setQuickGroups(groups);
-                    try { localStorage.setItem(localKey, JSON.stringify(groups)); } catch (e) {}
-                }
-            }, () => {});
-            return () => unsub();
-        }, [selectedShopId]);
-
-        const saveQuickGroups = useCallback(async (updatedGroups) => {
-            setQuickGroups(updatedGroups);
-            if (!selectedShopId) return;
-            try {
-                localStorage.setItem(`solaris_quick_groups_${selectedShopId}`, JSON.stringify(updatedGroups));
-            } catch (e) {}
-            try {
-                await db.collection('system_settings').doc(`quick_groups_${selectedShopId}`).set({
-                    shopId: selectedShopId,
-                    groups: updatedGroups,
-                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
-            } catch (e) {
-                console.warn("Quick groups cloud sync warning:", e);
-            }
-        }, [selectedShopId]);
-
+        const closePosAlert = useCallback(() => {
+            setPosMessage(prev => ({ ...prev, show: false }));
+        }, []);
         const refocusSearchInput = useCallback(() => {
             setTimeout(() => {
-                // Only refocus if no modal is open and user isn't actively typing in a text/number input
-                const activeEl = document.activeElement;
-                const isTypingInput = activeEl && (
-                    (activeEl.tagName === 'INPUT' && activeEl !== searchInputRef.current) ||
-                    activeEl.tagName === 'TEXTAREA'
-                );
-                if (!isTypingInput) {
-                    searchInputRef.current?.focus();
-                }
+                if (window.innerWidth >= 768) searchInputRef.current?.focus();
             }, 30);
         }, []);
 
-        const triggerStockWarning = useCallback((message) => {
-            if (stockWarningTimerRef.current) clearTimeout(stockWarningTimerRef.current);
-            setStockWarning(message);
-            stockWarningTimerRef.current = setTimeout(() => {
-                setStockWarning(null);
-            }, 3500);
+        // Online/Offline Status Listener
+        useEffect(() => {
+            const onOnline = () => {
+                setIsOnline(true);
+                setIsSyncing(true);
+                setTimeout(() => { setIsSyncing(false); setPendingSyncCount(0); }, 1500);
+            };
+            const onOffline = () => setIsOnline(false);
+            window.addEventListener('online', onOnline);
+            window.addEventListener('offline', onOffline);
+            return () => {
+                window.removeEventListener('online', onOnline);
+                window.removeEventListener('offline', onOffline);
+            };
         }, []);
+
+        // Held Tickets Real-Time Listener
+        useEffect(() => {
+            if (!selectedShopId) return;
+            setHeldTicketsLoading(true);
+            const unsub = db.collection('heldTickets')
+                .where('shopId', '==', selectedShopId)
+                .onSnapshot(snap => {
+                    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+                        .sort((a, b) => (safeToDate(b.savedAt) || 0) - (safeToDate(a.savedAt) || 0));
+                    setHeldTickets(list);
+                    setHeldTicketsLoading(false);
+                }, () => setHeldTicketsLoading(false));
+            return () => unsub();
+        }, [selectedShopId]);
+
+        // Today's Sales Real-Time Listener (Shared by SalesHistoryModal, DailyReportModal, ShiftManagementModal)
+        useEffect(() => {
+            if (!selectedShopId) return;
+            const startOfDay = new Date();
+            startOfDay.setHours(0, 0, 0, 0);
+
+            if (window.SolarisLocalSalesStore) {
+                const localToday = window.SolarisLocalSalesStore.getSales().filter(s => {
+                    const d = safeToDate(s.timestamp || s.createdAt);
+                    return s.shopId === selectedShopId && d && d >= startOfDay;
+                });
+                if (localToday.length > 0) setTodaySales(localToday);
+            }
+
+            setTodaySalesLoading(true);
+            const unsub = db.collection('sales')
+                .where('timestamp', '>=', startOfDay)
+                .onSnapshot({ includeMetadataChanges: true }, snap => {
+                    const cloudToday = snap.docs
+                        .map(d => ({ id: d.id, ...d.data() }))
+                        .filter(s => s.shopId === selectedShopId)
+                        .sort((a, b) => (safeToDate(b.timestamp || b.createdAt) || 0) - (safeToDate(a.timestamp || a.createdAt) || 0));
+                    setTodaySales(cloudToday);
+                    setTodaySalesLoading(false);
+                }, () => setTodaySalesLoading(false));
+            return () => unsub();
+        }, [selectedShopId]);
+
+        const cartQtyMap = useMemo(() => {
+            const map = new Map();
+            cart.forEach(item => map.set(item.productId, Number(item.quantity) || 0));
+            return map;
+        }, [cart]);
+
+        const filteredCustomers = useMemo(() => {
+            if (!customers || customers.length === 0) return [];
+            const q = customerSearchTerm.trim().toLowerCase();
+            if (!q) return customers.slice(0, 15);
+            return customers.filter(c =>
+                (c.name || '').toLowerCase().includes(q) ||
+                String(c.phone || '').toLowerCase().includes(q)
+            ).slice(0, 15);
+        }, [customers, customerSearchTerm]);
 
         useEffect(() => {
             return () => {
@@ -8045,19 +7953,27 @@
                                                                 </span>
                                                             )}
                                                         </div>
-                                                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 font-mono mt-0.5">
-                                                            <span className="text-blue-300 font-semibold">{prod.code}</span>
-                                                            {prod.barcode && <span>• {prod.barcode}</span>}
+                                                        <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+                                                            <span className="text-blue-300 font-semibold shrink-0">{prod.code}</span>
+                                                            {prod.barcode && (
+                                                                <>
+                                                                    <span className="text-slate-600 shrink-0">•</span>
+                                                                    <span className="truncate">{prod.barcode}</span>
+                                                                </>
+                                                            )}
                                                             {manageStock && (
-                                                                <span className={`px-1.5 py-0.2 rounded font-sans font-bold text-[10px] ${
-                                                                    isOutOfStock
-                                                                        ? 'bg-red-500/20 text-red-400'
-                                                                        : isLowStock
-                                                                            ? 'bg-amber-500/20 text-amber-300'
-                                                                            : 'bg-slate-800 text-slate-300'
-                                                                }`}>
-                                                                    Stock: {stock}
-                                                                </span>
+                                                                <>
+                                                                    <span className="text-slate-600 shrink-0">•</span>
+                                                                    <span className={`font-bold shrink-0 ${
+                                                                        isOutOfStock
+                                                                            ? 'text-red-400'
+                                                                            : isLowStock
+                                                                                ? 'text-amber-300'
+                                                                                : 'text-slate-200'
+                                                                    }`}>
+                                                                        {stock}
+                                                                    </span>
+                                                                </>
                                                             )}
                                                         </div>
                                                     </div>
@@ -8687,6 +8603,7 @@
 
         const isRoleAuthorized = userProfile?.role === 'Admin' ||
                                  userProfile?.role === 'Shop Manager' ||
+                                 userProfile?.role === 'Shop Supervisor' ||
                                  (userProfile?.permissions || []).includes('inventory') ||
                                  (userProfile?.permissions || []).includes('settings');
 
@@ -9976,15 +9893,13 @@
                                         <span className="text-xs font-bold uppercase tracking-wider text-slate-300 block">Net Shift Variance</span>
                                         <span className="text-[11px] text-slate-400">
                                             {reconciliation.totalVariance === 0
-                                                ? (reconciliation.accountedVoidTotal > 0
-                                                    ? 'Balanced with system sales (Voided included — No-Refund Policy)'
-                                                    : 'Balanced with system sales')
+                                                ? (reconciliation.accountedVoidTotal > 0 ? 'Balanced (Incl. Voided Funds)' : 'Perfectly Balanced')
                                                 : reconciliation.totalVariance > 0
-                                                    ? 'Surplus (Over)'
-                                                    : 'Shortage (Under)'}
+                                                    ? 'Cash / Bank Over'
+                                                    : 'Cash / Bank Short'}
                                         </span>
                                     </div>
-                                    <span className={`text-xl font-black font-mono ${getVarColor(reconciliation.totalVariance)}`}>
+                                    <span className={`text-xl sm:text-2xl font-black font-mono ${getVarColor(reconciliation.totalVariance)}`}>
                                         {reconciliation.totalVariance > 0 ? '+' : ''}៛{khrFormatter.format(reconciliation.totalVariance)}
                                     </span>
                                 </div>
@@ -9992,7 +9907,6 @@
                         </div>
                     </div>
                 </ModalBody>
-
                 <ModalFooter>
                     <button
                         type="button"
@@ -19126,7 +19040,8 @@
     // --- NEW: Sale Report Page ---
     const SaleReportPage = ({ userProfile }) => {
         const { shops, products } = useData();
-        const canManageSales = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
+        const isAdmin = userProfile?.role === 'Admin';
+        const canEditSales = isAdmin || userProfile?.role === 'Shop Manager' || userProfile?.role === 'Shop Supervisor' || userProfile?.role === 'Staff' || userProfile?.role === 'Cashier';
         const [activeTab, setActiveTab] = useState('summary');
         const [salesData, setSalesData] = useState([]);
         const [loading, setLoading] = useState(false);
@@ -20227,6 +20142,7 @@
         }, []);
 
         const handleBulkDeleteBankState = async () => {
+            if (!isAdmin) return;
             const targetList = filteredBankStateData.length > 0 ? filteredBankStateData : bankStateData;
             if (!targetList || targetList.length === 0) return;
 
@@ -20284,7 +20200,7 @@
         };
 
         const handleDeleteSingleBankState = async (paymentObj) => {
-            if (!paymentObj) return;
+            if (!isAdmin || !paymentObj) return;
             const idsToDelete = Array.from(new Set(
                 [paymentObj.id, paymentObj.trxId, paymentObj.docId].map(x => String(x || '').trim()).filter(Boolean)
             ));
@@ -20330,6 +20246,7 @@
         };
 
         const handleDeleteClearedCart = async (id) => {
+            if (!isAdmin) return;
             try {
                 if (window.SolarisLocalSalesStore) {
                     window.SolarisLocalSalesStore.deleteClearedCart(id);
@@ -21140,9 +21057,9 @@
             }
         };
 
-        // --- NEW: Admin / Shop Manager Edit & Delete Sale Handlers ---
+        // --- NEW: Admin / Shop Manager / Cashier Edit & Admin-Only Delete Sale Handlers ---
         const handleOpenEditSale = (sale) => {
-            if (!sale || !canManageSales) return;
+            if (!sale || !canEditSales) return;
             const { discountVal } = computeSaleFinancials(sale);
             setEditingSale({
                 ...sale,
@@ -21292,7 +21209,7 @@
         };
 
         const handleConfirmDeleteSale = async () => {
-            if (!deletingSale || isDeletingSale) return;
+            if (!deletingSale || isDeletingSale || !isAdmin) return;
             setIsDeletingSale(true);
             const targetSale = deletingSale;
 
@@ -21680,7 +21597,7 @@
                                     </div>
                                 </div>
 
-                                {activeTab === 'bank-state' && (
+                                {activeTab === 'bank-state' && isAdmin && (
                                     <button 
                                         type="button"
                                         onClick={() => setModal({ type: 'confirmBulkDeleteBankState' })}
@@ -22699,15 +22616,15 @@
                                                                             <button onClick={() => setViewReceipt(sale)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View / Print Receipt">
                                                                                 <i className="fas fa-print"></i>
                                                                             </button>
-                                                                            {canManageSales && (
-                                                                                <>
-                                                                                    <button onClick={() => handleOpenEditSale(sale)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
-                                                                                        <i className="fas fa-edit"></i>
-                                                                                    </button>
-                                                                                    <button onClick={() => setDeletingSale(sale)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
-                                                                                        <i className="fas fa-trash"></i>
-                                                                                    </button>
-                                                                                </>
+                                                                            {canEditSales && (
+                                                                                <button onClick={() => handleOpenEditSale(sale)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                                    <i className="fas fa-edit"></i>
+                                                                                </button>
+                                                                            )}
+                                                                            {isAdmin && (
+                                                                                <button onClick={() => setDeletingSale(sale)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt (Admin Only)">
+                                                                                    <i className="fas fa-trash"></i>
+                                                                                </button>
                                                                             )}
                                                                         </div>
                                                                     </td>
@@ -22953,15 +22870,15 @@
                                                                         <button onClick={() => setViewReceipt(item.saleObj)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="View Receipt">
                                                                             <i className="fas fa-eye"></i>
                                                                         </button>
-                                                                        {canManageSales && (
-                                                                            <>
-                                                                                <button onClick={() => handleOpenEditSale(item.saleObj)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
-                                                                                    <i className="fas fa-edit"></i>
-                                                                                </button>
-                                                                                <button onClick={() => setDeletingSale(item.saleObj)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt">
-                                                                                    <i className="fas fa-trash"></i>
-                                                                                </button>
-                                                                            </>
+                                                                        {canEditSales && (
+                                                                            <button onClick={() => handleOpenEditSale(item.saleObj)} className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-900/30 rounded-lg transition" title="Edit Receipt">
+                                                                                <i className="fas fa-edit"></i>
+                                                                            </button>
+                                                                        )}
+                                                                        {isAdmin && (
+                                                                            <button onClick={() => setDeletingSale(item.saleObj)} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Receipt (Admin Only)">
+                                                                                <i className="fas fa-trash"></i>
+                                                                            </button>
                                                                         )}
                                                                     </div>
                                                                 </td>
@@ -23491,7 +23408,7 @@
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">APV/Trx</th>
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Invoice Note</th>
                                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
-                                                    <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
+                                                    {isAdmin && <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>}
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
@@ -23560,7 +23477,7 @@
                                                                         <span className="px-2 py-0.5 rounded bg-amber-900/50 text-amber-300 border border-amber-500/50 text-[10px] font-black uppercase">
                                                                             UnVerified
                                                                         </span>
-                                                                        {(userProfile.role === 'Admin' || userProfile.role === 'Shop Manager') && (
+                                                                        {(userProfile.role === 'Admin' || userProfile.role === 'Shop Manager' || userProfile.role === 'Shop Supervisor') && (
                                                                             <button 
                                                                                 onClick={() => setLinkPaymentData(b)} 
                                                                                 className="mt-1.5 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded border border-blue-500 text-[10px] font-bold transition shadow"
@@ -23571,16 +23488,18 @@
                                                                     </div>
                                                                 )}
                                                             </td>
-                                                            <td className="px-4 py-3 text-center whitespace-nowrap">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => setModal({ type: 'confirmDeleteSingleBankState', data: b })}
-                                                                    className="p-2 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 transition"
-                                                                    title="Delete Transaction"
-                                                                >
-                                                                    <i className="fas fa-trash-alt text-xs"></i>
-                                                                </button>
-                                                            </td>
+                                                            {isAdmin && (
+                                                                <td className="px-4 py-3 text-center whitespace-nowrap">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => setModal({ type: 'confirmDeleteSingleBankState', data: b })}
+                                                                        className="p-2 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 transition"
+                                                                        title="Delete Transaction (Admin Only)"
+                                                                    >
+                                                                        <i className="fas fa-trash-alt text-xs"></i>
+                                                                    </button>
+                                                                </td>
+                                                            )}
                                                         </tr>
                                                     );
                                                 })}
@@ -23666,7 +23585,7 @@
                                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Items Summary</th>
                                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Total QTY</th>
                                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Amount</th>
-                                                    <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>
+                                                    {isAdmin && <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Action</th>}
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-700">
@@ -23704,17 +23623,20 @@
                                                                 <td className="px-4 py-3 text-sm text-slate-300 truncate max-w-[200px]" title={itemSummary}>{itemSummary || 'No items'}</td>
                                                                 <td className="px-4 py-3 text-sm text-center font-bold text-amber-400">{log.totalQty}</td>
                                                                 <td className="px-4 py-3 text-sm text-right font-bold text-rose-400">៛{khrFormatter.format(log.totalAmount)}</td>
-                                                                <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                                                                    <button onClick={() => setModal({ type: 'confirmDeleteClearedCart', data: log.id })} className="text-red-500 hover:text-red-400 px-2 py-1" title="Delete Log">
-                                                                        <i className="fas fa-trash"></i>
-                                                                    </button>
-                                                                </td>
+                                                                {isAdmin && (
+                                                                    <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                                                                        <button onClick={() => setModal({ type: 'confirmDeleteClearedCart', data: log.id })} className="text-red-500 hover:text-red-400 px-2 py-1" title="Delete Log (Admin Only)">
+                                                                            <i className="fas fa-trash"></i>
+                                                                        </button>
+                                                                    </td>
+                                                                )}
                                                             </tr>
                                                             {isExpanded && (
                                                                 <tr className="bg-slate-900/60">
-                                                                    <td colSpan="9" className={`px-8 py-3 border-l-4 ${isDeleteItem ? 'border-amber-500' : 'border-rose-500'}`}>
-                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-2">
-                                                                            {isDeleteItem ? 'Deleted Item from Cart' : 'Cleared Items'} ({log.items?.length || 0})
+                                                                    <td colSpan={isAdmin ? 9 : 8} className={`px-8 py-3 border-l-4 ${isDeleteItem ? 'border-amber-500' : 'border-rose-500'}`}>
+                                                                        <div className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center justify-between">
+                                                                            <span>{isDeleteItem ? 'Deleted Item Detail' : 'Cleared Cart Items'} ({log.items?.length || 0})</span>
+                                                                            {log.deviceName && <span className="font-mono text-slate-500">Terminal: {log.deviceName}</span>}
                                                                         </div>
                                                                         <div className="space-y-1">
                                                                             {(log.items || []).map((item, idx) => (
@@ -23745,7 +23667,8 @@
     // --- UPDATED: Shift Report Sub-Component (Pure Presentation + Optimistic 0ms Delete/Edit + AM/PM Shift Filter) ---
     const ShiftReportList = ({ shifts, loading, userProfile, shiftNameFilter = 'ALL', onShiftNameFilterChange, onOptimisticDeleteShift, onOptimisticUpdateShift }) => {
         const { shops } = useData(); 
-        const canEdit = userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager';
+        const isAdmin = userProfile?.role === 'Admin';
+        const canEdit = isAdmin || userProfile?.role === 'Shop Manager' || userProfile?.role === 'Shop Supervisor' || userProfile?.role === 'Staff' || userProfile?.role === 'Cashier';
         
         const [editData, setEditData] = useState(null);
         const [deletingShift, setDeletingShift] = useState(null);
@@ -23753,7 +23676,7 @@
         const [isSubmitting, setIsSubmitting] = useState(false);
 
         const confirmDelete = () => {
-            if (!deletingShift) return;
+            if (!deletingShift || !isAdmin) return;
             const targetShift = deletingShift;
             setDeletingShift(null);
 
@@ -24070,7 +23993,9 @@
                                         {canEdit && (
                                             <td className="px-4 py-3 text-center space-x-3 whitespace-nowrap">
                                                 <button onClick={() => setEditData({ ...shift })} className="text-blue-400 hover:text-blue-300" title="Edit Shift"><i className="fas fa-edit"></i></button>
-                                                <button onClick={() => setDeletingShift(shift)} className="text-red-500 hover:text-red-400" title="Delete Shift"><i className="fas fa-trash"></i></button>
+                                                {isAdmin && (
+                                                    <button onClick={() => setDeletingShift(shift)} className="text-red-500 hover:text-red-400" title="Delete Shift (Admin Only)"><i className="fas fa-trash"></i></button>
+                                                )}
                                             </td>
                                         )}
                                     </tr>
@@ -32427,8 +32352,12 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                         <select name="role" value={formData.role} onChange={handleInputChange} className="w-full bg-slate-700 text-slate-100 px-3 py-2.5 text-sm border border-slate-600 rounded-xl focus:border-blue-500 focus:ring-2 outline-none">
                                             <option value="Admin">Admin</option>
                                             <option value="Shop Manager">Shop Manager</option>
+                                            <option value="Shop Supervisor">Shop Supervisor</option>
                                             <option value="Staff">Staff</option>
                                         </select>
+                                        <p className="text-[11px] text-slate-400 mt-1">
+                                            Hierarchy: Admin &gt; Shop Manager &gt; Shop Supervisor (manages all Cashiers) &gt; Staff
+                                        </p>
                                     </div>
 
                                     {/* Assigned Shops Section */}
@@ -32534,7 +32463,9 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                                         ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
                                                         : user.role === 'Shop Manager'
                                                             ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
-                                                            : 'bg-slate-700 text-slate-300 border-slate-600'
+                                                            : user.role === 'Shop Supervisor'
+                                                                ? 'bg-teal-500/15 text-teal-300 border-teal-500/30'
+                                                                : 'bg-slate-700 text-slate-300 border-slate-600'
                                                 }`}>
                                                     {user.role}
                                                 </span>
@@ -32597,25 +32528,11 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         const [pageData, setPageData] = useState(null);
         const { backgroundFetchInitiated, backgroundLoadComplete, systemConfig, activateHeavyCollections } = useData(); // Get config & lazy-loader
 
-        // --- NEW: Screen Wake Lock (Keep Display Awake) ---
+        // --- Always-On Screen Keep-Awake Engine (POS Terminal Never Sleeps or Locks) ---
         useEffect(() => {
-            let wakeLock = null;
-            const requestWakeLock = async () => {
-                try {
-                    if ('wakeLock' in navigator) {
-                        wakeLock = await navigator.wakeLock.request('screen');
-                    }
-                } catch (e) {}
-            };
-            requestWakeLock();
-            const handleVis = () => {
-                if (document.visibilityState === 'visible') requestWakeLock();
-            };
-            document.addEventListener('visibilitychange', handleVis);
-            return () => {
-                document.removeEventListener('visibilitychange', handleVis);
-                if (wakeLock) wakeLock.release().catch(() => {});
-            };
+            if (window.SolarisKeepAwakeManager) {
+                window.SolarisKeepAwakeManager.start();
+            }
         }, []);
 
         // --- NEW: Update Document Title & Dynamic PWA Manifest on Dashboard Load ---
@@ -32915,37 +32832,26 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             return () => unsubscribe();
         }, []);
 
-        // Track user activity & auto-lock when idle or returning after >30 minutes
+        // Keep POS Session Continuously Active While Application Is Open (Never Auto-Lock / Never Auto Sign-Out on Standby)
         useEffect(() => {
             if (!authState.userProfile) return;
 
-            let lastRecorded = Date.now();
-            const recordActivity = () => {
-                const now = Date.now();
-                // Throttle localStorage writes to once every 15 seconds
-                if (now - lastRecorded > 15000) {
-                    lastRecorded = now;
-                    localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(now));
-                }
-            };
-
-            const checkInactivityExpiration = () => {
-                const lastActive = parseInt(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0', 10);
-                if (lastActive > 0 && Date.now() - lastActive > MAX_INACTIVITY_MS) {
-                    window.safeSignOut();
-                } else if (document.visibilityState === 'visible') {
+            const keepSessionAlive = () => {
+                try {
                     localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                }
+                } catch (e) {}
             };
 
+            keepSessionAlive();
             const activityEvents = ['mousedown', 'keydown', 'touchstart', 'scroll'];
-            activityEvents.forEach(evt => window.addEventListener(evt, recordActivity, { passive: true }));
-            document.addEventListener('visibilitychange', checkInactivityExpiration);
-            const intervalId = setInterval(checkInactivityExpiration, 30000);
+            activityEvents.forEach(evt => window.addEventListener(evt, keepSessionAlive, { passive: true }));
+            document.addEventListener('visibilitychange', keepSessionAlive);
+            // Heartbeat every 30s ensures the open POS Terminal never expires or locks screen during slow standby periods
+            const intervalId = setInterval(keepSessionAlive, 30000);
 
             return () => {
-                activityEvents.forEach(evt => window.removeEventListener(evt, recordActivity));
-                document.removeEventListener('visibilitychange', checkInactivityExpiration);
+                activityEvents.forEach(evt => window.removeEventListener(evt, keepSessionAlive));
+                document.removeEventListener('visibilitychange', keepSessionAlive);
                 clearInterval(intervalId);
             };
         }, [authState.userProfile]);
