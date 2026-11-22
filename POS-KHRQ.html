@@ -712,6 +712,165 @@
         }, { once: true, passive: true });
 
         // ====================================================================
+        // 3C. ALWAYS-ON KEEP-AWAKE ENGINE (NEVER SLEEP / NEVER LOCK SCREEN)
+        // Layer 1: Native Screen Wake Lock API with auto-reacquire on release/focus/visibility
+        // Layer 2: Live canvas.captureStream() silent video loop fallback for iPad/iOS/older tablets
+        // Layer 3: 30-second watchdog heartbeat to guarantee continuous standby readiness
+        // ====================================================================
+        window.SolarisKeepAwakeManager = {
+            wakeLock: null,
+            noSleepVideo: null,
+            noSleepCanvas: null,
+            noSleepDrawTimer: null,
+            watchdogTimer: null,
+            isActive: false,
+            started: false,
+            listeners: new Set(),
+
+            subscribe(fn) {
+                this.listeners.add(fn);
+                try { fn(this.getState()); } catch (e) {}
+                return () => this.listeners.delete(fn);
+            },
+
+            notify() {
+                const state = this.getState();
+                this.listeners.forEach(fn => { try { fn(state); } catch (e) {} });
+            },
+
+            getState() {
+                const hasNativeLock = !!(this.wakeLock && !this.wakeLock.released);
+                const hasVideoLock = !!(this.noSleepVideo && !this.noSleepVideo.paused);
+                return {
+                    isActive: hasNativeLock || hasVideoLock || this.isActive,
+                    mode: hasNativeLock ? 'WakeLock' : (hasVideoLock ? 'NoSleep' : 'Standby')
+                };
+            },
+
+            async requestNativeWakeLock() {
+                if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return false;
+                if (document.visibilityState !== 'visible') return false;
+                if (this.wakeLock && !this.wakeLock.released) {
+                    this.isActive = true;
+                    return true;
+                }
+                try {
+                    const sentinel = await navigator.wakeLock.request('screen');
+                    this.wakeLock = sentinel;
+                    this.isActive = true;
+                    sentinel.addEventListener('release', () => {
+                        this.wakeLock = null;
+                        this.notify();
+                        if (document.visibilityState === 'visible') {
+                            setTimeout(() => this.requestNativeWakeLock(), 500);
+                        }
+                    });
+                    this.notify();
+                    return true;
+                } catch (e) {
+                    this.notify();
+                    return false;
+                }
+            },
+
+            startNoSleepVideoFallback() {
+                try {
+                    if (this.noSleepVideo && !this.noSleepVideo.paused) {
+                        this.isActive = true;
+                        this.notify();
+                        return true;
+                    }
+                    if (!this.noSleepCanvas) {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 2;
+                        canvas.height = 2;
+                        const ctx = canvas.getContext('2d');
+                        if (ctx) {
+                            ctx.fillStyle = '#020617';
+                            ctx.fillRect(0, 0, 2, 2);
+                        }
+                        this.noSleepCanvas = canvas;
+                    }
+                    if (!this.noSleepDrawTimer && this.noSleepCanvas) {
+                        let toggle = false;
+                        this.noSleepDrawTimer = setInterval(() => {
+                            const ctx = this.noSleepCanvas.getContext('2d');
+                            if (ctx) {
+                                toggle = !toggle;
+                                ctx.fillStyle = toggle ? '#020617' : '#030712';
+                                ctx.fillRect(0, 0, 2, 2);
+                            }
+                        }, 10000);
+                    }
+                    if (typeof this.noSleepCanvas.captureStream !== 'function') return false;
+                    if (!this.noSleepVideo) {
+                        const video = document.createElement('video');
+                        video.muted = true;
+                        video.loop = true;
+                        video.playsInline = true;
+                        video.setAttribute('muted', '');
+                        video.setAttribute('playsinline', '');
+                        video.setAttribute('webkit-playsinline', '');
+                        video.style.cssText = 'position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-1;';
+                        video.srcObject = this.noSleepCanvas.captureStream(1);
+                        document.body.appendChild(video);
+                        this.noSleepVideo = video;
+                    }
+                    const playPromise = this.noSleepVideo.play();
+                    if (playPromise && typeof playPromise.then === 'function') {
+                        playPromise.then(() => {
+                            this.isActive = true;
+                            this.notify();
+                        }).catch(() => {});
+                    }
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            },
+
+            async engage(fromUserGesture = false) {
+                const nativeOk = await this.requestNativeWakeLock();
+                if (!nativeOk || fromUserGesture) {
+                    this.startNoSleepVideoFallback();
+                }
+                this.notify();
+            },
+
+            start() {
+                if (this.started) {
+                    this.engage(false);
+                    return;
+                }
+                this.started = true;
+                this.engage(false);
+
+                const onGesture = () => this.engage(true);
+                const onVisibleOrFocus = () => {
+                    if (document.visibilityState === 'visible') {
+                        this.engage(false);
+                    }
+                };
+
+                window.addEventListener('pointerdown', onGesture, { passive: true });
+                window.addEventListener('touchstart', onGesture, { passive: true });
+                window.addEventListener('keydown', onGesture, { passive: true });
+                document.addEventListener('visibilitychange', onVisibleOrFocus);
+                window.addEventListener('focus', onVisibleOrFocus);
+                window.addEventListener('pageshow', onVisibleOrFocus);
+
+                this.watchdogTimer = setInterval(() => {
+                    if (document.visibilityState === 'visible') {
+                        const state = this.getState();
+                        if (!state.isActive) {
+                            this.engage(false);
+                        }
+                    }
+                }, 30000);
+            }
+        };
+
+        // ====================================================================
         // 4. REUSABLE MODALS (INSTALL APP KIOSK PROMPT)
         // ====================================================================
         const Modal = ({ children, show, maxWidth = 'max-w-md' }) => {
@@ -868,6 +1027,9 @@
             });
             const [paidDismissedToIdle, setPaidDismissedToIdle] = useState(false);
             const [audioNeedsTapUnlock, setAudioNeedsTapUnlock] = useState(false);
+            const [keepAwakeState, setKeepAwakeState] = useState(() =>
+                window.SolarisKeepAwakeManager ? window.SolarisKeepAwakeManager.getState() : { isActive: false, mode: 'Standby' }
+            );
 
             useEffect(() => {
                 PaymentVoiceAnnouncer._onAutoplayBlocked = () => setAudioNeedsTapUnlock(true);
@@ -938,25 +1100,11 @@
                 commitUpdate();
             }, []);
 
-            // Keep Customer Counter Display Awake
+            // Always-On Keep-Awake Engine (Customer Display Never Sleeps or Locks Screen)
             useEffect(() => {
-                let wakeLock = null;
-                const requestWakeLock = async () => {
-                    try {
-                        if ('wakeLock' in navigator) {
-                            wakeLock = await navigator.wakeLock.request('screen');
-                        }
-                    } catch (e) {}
-                };
-                requestWakeLock();
-                const handleVis = () => {
-                    if (document.visibilityState === 'visible') requestWakeLock();
-                };
-                document.addEventListener('visibilitychange', handleVis);
-                return () => {
-                    document.removeEventListener('visibilitychange', handleVis);
-                    if (wakeLock) wakeLock.release().catch(() => {});
-                };
+                if (!window.SolarisKeepAwakeManager) return;
+                window.SolarisKeepAwakeManager.start();
+                return window.SolarisKeepAwakeManager.subscribe(setKeepAwakeState);
             }, []);
 
             // Live Clock, Network & Fullscreen Listeners
@@ -1600,6 +1748,19 @@
                                         <i className={`fas ${syncChannelBadge.includes('0ms') ? 'fa-bolt text-amber-400' : 'fa-cloud text-sky-400'}`}></i>
                                         {syncChannelBadge}{syncChannelBadge !== 'Standby' ? ` (${lastLatencyMs}ms)` : ''}
                                     </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
+                                        className={`hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-bold transition ${
+                                            keepAwakeState.isActive
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                                : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse cursor-pointer'
+                                        }`}
+                                        title={keepAwakeState.isActive ? `Screen Keep-Awake Active (${keepAwakeState.mode}) — Never Sleeps` : 'Tap once to lock screen awake'}
+                                    >
+                                        <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'}`}></i>
+                                        <span>{keepAwakeState.isActive ? 'Always Awake' : 'Tap: Keep Awake'}</span>
+                                    </button>
                                 </div>
                                 <div className="text-[10px] sm:text-xs text-slate-400 font-mono truncate">
                                     {deviceId} • Rate: $1 = ៛{resolvedExchangeRate.toLocaleString()}
