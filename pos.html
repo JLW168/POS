@@ -1963,101 +1963,845 @@
         );
     };
 
+    // --- Interactive Bill Counter Modal (KHR & USD Denominations) ---
+    const BillCounterModal = ({ show, onClose, onApply, initialKhr = 0, initialUsd = 0 }) => {
+        const khrDenoms = [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 100];
+        const usdDenoms = [100, 50, 20, 10, 5, 1];
+
+        const [khrCounts, setKhrCounts] = useState({});
+        const [usdCounts, setUsdCounts] = useState({});
+        const [activeTab, setActiveTab] = useState('KHR');
+
+        useEffect(() => {
+            if (!show) return;
+            setActiveTab('KHR');
+        }, [show]);
+
+        const khrTotal = useMemo(
+            () => khrDenoms.reduce((sum, d) => sum + d * (parseInt(khrCounts[d], 10) || 0), 0),
+            [khrCounts]
+        );
+        const usdTotal = useMemo(
+            () => usdDenoms.reduce((sum, d) => sum + d * (parseInt(usdCounts[d], 10) || 0), 0),
+            [usdCounts]
+        );
+
+        const updateCount = (currency, denom, deltaOrVal, isAbsolute = false) => {
+            const setter = currency === 'KHR' ? setKhrCounts : setUsdCounts;
+            setter(prev => {
+                const cur = parseInt(prev[denom], 10) || 0;
+                const next = isAbsolute ? Math.max(0, parseInt(deltaOrVal, 10) || 0) : Math.max(0, cur + deltaOrVal);
+                return { ...prev, [denom]: next === 0 ? '' : next };
+            });
+        };
+
+        const handleClearAll = () => {
+            setKhrCounts({});
+            setUsdCounts({});
+        };
+
+        if (!show) return null;
+
+        return (
+            <Modal show={show} onClose={onClose} maxWidth="max-w-lg">
+                <ModalHeader title="Physical Bill Counter (KHR & USD)" onClose={onClose} />
+                <ModalBody>
+                    <div className="space-y-4">
+                        {/* Live Summary Banner */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div
+                                onClick={() => setActiveTab('KHR')}
+                                className={`p-3 rounded-xl border cursor-pointer transition ${activeTab === 'KHR' ? 'bg-emerald-950/50 border-emerald-500/60 shadow' : 'bg-slate-900 border-slate-700 hover:border-slate-600'}`}
+                            >
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">KHR Total</div>
+                                <div className="text-lg sm:text-xl font-black text-white font-mono mt-0.5">៛{khrFormatter.format(khrTotal)}</div>
+                            </div>
+                            <div
+                                onClick={() => setActiveTab('USD')}
+                                className={`p-3 rounded-xl border cursor-pointer transition ${activeTab === 'USD' ? 'bg-sky-950/50 border-sky-500/60 shadow' : 'bg-slate-900 border-slate-700 hover:border-slate-600'}`}
+                            >
+                                <div className="text-[10px] font-bold uppercase tracking-wider text-sky-400">USD Total</div>
+                                <div className="text-lg sm:text-xl font-black text-white font-mono mt-0.5">${usdTotal.toFixed(2)}</div>
+                            </div>
+                        </div>
+
+                        {/* Denomination Rows */}
+                        <div className="bg-slate-900/70 rounded-xl border border-slate-700 divide-y divide-slate-800 max-h-[45vh] overflow-y-auto">
+                            {(activeTab === 'KHR' ? khrDenoms : usdDenoms).map(denom => {
+                                const countVal = activeTab === 'KHR' ? (khrCounts[denom] ?? '') : (usdCounts[denom] ?? '');
+                                const numericCount = parseInt(countVal, 10) || 0;
+                                const lineTotal = denom * numericCount;
+                                return (
+                                    <div key={`${activeTab}_${denom}`} className="px-3.5 py-2.5 flex items-center justify-between gap-2">
+                                        <div className="w-24 font-mono font-black text-sm text-slate-200">
+                                            {activeTab === 'KHR' ? `៛${khrFormatter.format(denom)}` : `$${denom}`}
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={() => updateCount(activeTab, denom, -1)}
+                                                className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-black border border-slate-700"
+                                            >
+                                                -
+                                            </button>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                value={countVal}
+                                                onChange={e => updateCount(activeTab, denom, e.target.value, true)}
+                                                placeholder="0"
+                                                className="w-16 h-8 bg-slate-950 text-white text-center font-mono font-bold text-sm rounded-lg border border-slate-600 focus:border-blue-500 outline-none"
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => updateCount(activeTab, denom, 1)}
+                                                className="w-8 h-8 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white font-black border border-blue-500/40"
+                                            >
+                                                +
+                                            </button>
+                                        </div>
+                                        <div className="w-28 text-right font-mono font-bold text-xs sm:text-sm text-emerald-400">
+                                            {activeTab === 'KHR' ? `៛${khrFormatter.format(lineTotal)}` : `$${lineTotal.toFixed(2)}`}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter>
+                    <button
+                        type="button"
+                        onClick={handleClearAll}
+                        className="bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold py-2 px-4 rounded-xl text-xs sm:text-sm mr-auto"
+                    >
+                        Clear All
+                    </button>
+                    <button type="button" onClick={onClose} className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-2 px-4 rounded-xl text-xs sm:text-sm">
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            onApply({ khrTotal, usdTotal });
+                            onClose();
+                        }}
+                        className="bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2 px-5 rounded-xl text-xs sm:text-sm flex items-center gap-1.5"
+                    >
+                        <i className="fas fa-check"></i>
+                        <span>Apply Count</span>
+                    </button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
+    // --- Complete Open / Close Shift & Cash Reconciliation Modal ---
     const ShiftManagementModal = ({ show, onClose, activeShift, activeShop, userProfile, currentDevice, onShiftChanged }) => {
-        const [shiftName, setShiftName] = useState('AM');
-        const [startCash, setStartCash] = useState('0');
-        const [actualCashKHR, setActualCashKHR] = useState('');
-        const [actualBankKHR, setActualBankKHR] = useState('');
-        const [note, setNote] = useState('');
+        const [shiftName, setShiftName] = useState(() => (new Date().getHours() < 14 ? 'AM' : 'PM'));
+        const [startCash, setStartCash] = useState('');
+        const [openNote, setOpenNote] = useState('');
+
+        // Close Shift & Reconciliation States
+        const [exchangeRate, setExchangeRate] = useState(() => Number(activeShop?.khqrConfig?.exchangeRate) || 4000);
+        const [actualFloatKHR, setActualFloatKHR] = useState('');
+        const [cashDropKHR, setCashDropKHR] = useState('');
+        const [cashDropUSD, setCashDropUSD] = useState('');
+        const [bankDropKHR, setBankDropKHR] = useState('');
+        const [bankDropUSD, setBankDropUSD] = useState('');
+        const [closeNote, setCloseNote] = useState('');
+        const [showBillCounter, setShowBillCounter] = useState(false);
+
+        // Live Shift Sales & Handover Summary States
+        const [shiftSales, setShiftSales] = useState([]);
+        const [loadingSales, setLoadingSales] = useState(false);
         const [saving, setSaving] = useState(false);
+        const [handoverSummary, setHandoverSummary] = useState(null);
+        const [savingPng, setSavingPng] = useState(false);
+        const handoverRef = useRef(null);
+
+        const formatNumInput = (val) => {
+            if (val === '' || val === null || val === undefined) return '';
+            const clean = String(val).replace(/[^0-9.]/g, '');
+            if (!clean) return '';
+            const parts = clean.split('.');
+            parts[0] = (parseInt(parts[0], 10) || 0).toLocaleString('en-US');
+            return parts.length > 1 ? `${parts[0]}.${parts[1]}` : parts[0];
+        };
+
+        const parseNum = (val) => parseFloat(String(val || '').replace(/,/g, '')) || 0;
+
+        // Reset modal fields when opened
+        useEffect(() => {
+            if (!show) {
+                setHandoverSummary(null);
+                return;
+            }
+            const defaultRate = Number(activeShop?.khqrConfig?.exchangeRate) || 4000;
+            setExchangeRate(defaultRate);
+
+            if (!activeShift) {
+                setShiftName(new Date().getHours() < 14 ? 'AM' : 'PM');
+                const defaultFloat = Number(activeShop?.floatCash) || 0;
+                setStartCash(defaultFloat > 0 ? String(defaultFloat) : '0');
+                setOpenNote('');
+            } else {
+                setActualFloatKHR('');
+                setCashDropKHR('');
+                setCashDropUSD('');
+                setBankDropKHR('');
+                setBankDropUSD('');
+                setCloseNote('');
+            }
+        }, [show, activeShift?.id, activeShop?.id]);
+
+        // Load live sales belonging to this active shift (Local Ledger + Firestore)
+        useEffect(() => {
+            if (!show || !activeShift?.id) {
+                setShiftSales([]);
+                return;
+            }
+            const shiftStartMs = safeToDate(activeShift.startTime || activeShift.createdAt)?.getTime() || 0;
+
+            const collectLocal = () => {
+                const localList = window.SolarisLocalSalesStore?.getSales() || [];
+                return localList.filter(s => {
+                    if (!s || s.shopId !== activeShift.shopId) return false;
+                    if (s.shiftId) return s.shiftId === activeShift.id;
+                    const ts = safeToDate(s.createdAt || s.timestamp)?.getTime() || 0;
+                    return shiftStartMs > 0 && ts >= shiftStartMs;
+                });
+            };
+
+            const initialLocal = collectLocal();
+            setShiftSales(initialLocal);
+            setLoadingSales(initialLocal.length === 0);
+
+            const unsub = db.collection('sales')
+                .where('shiftId', '==', activeShift.id)
+                .onSnapshot(snap => {
+                    const cloudDocs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    const merged = new Map();
+                    collectLocal().forEach(s => { if (s?.id) merged.set(s.id, s); });
+                    cloudDocs.forEach(s => { if (s?.id) merged.set(s.id, { ...(merged.get(s.id) || {}), ...s }); });
+                    setShiftSales(Array.from(merged.values()));
+                    setLoadingSales(false);
+                }, () => {
+                    setShiftSales(collectLocal());
+                    setLoadingSales(false);
+                });
+
+            return () => unsub();
+        }, [show, activeShift?.id, activeShift?.shopId]);
+
+        // Compute 5-Column KPIs + Reconciliation Ledger Metrics
+        const shiftStats = useMemo(() => {
+            let grossSale = 0;
+            let discounts = 0;
+            let netSale = 0;
+            let totalCost = 0;
+            let voidedTotal = 0;
+            let voidedCount = 0;
+            let cashSales = 0;
+            let bankSales = 0;
+            let noRefundVoidCash = 0;
+            let noRefundVoidBank = 0;
+            let activeTxCount = 0;
+
+            if (shiftSales.length > 0) {
+                shiftSales.forEach(s => {
+                    const grand = Number(s.grandTotal) || 0;
+                    const disc = Number(s.discount) || (Number(s.manualDiscount || 0) + Number(s.redemptionAmount || 0));
+                    const sub = Number(s.subtotal) || (grand + disc);
+                    const cost = Number(s.totalCost) || 0;
+                    const isCash = s.paymentMethod === 'Cash';
+
+                    if (s.status === 'void') {
+                        voidedCount += 1;
+                        voidedTotal += grand;
+                        if (s.voidNoRefund || s.noRefund) {
+                            if (isCash) noRefundVoidCash += grand;
+                            else noRefundVoidBank += grand;
+                        }
+                    } else {
+                        activeTxCount += 1;
+                        grossSale += sub;
+                        discounts += disc;
+                        netSale += grand;
+                        totalCost += cost;
+                        if (isCash) cashSales += grand;
+                        else bankSales += grand;
+                    }
+                });
+            } else if (activeShift) {
+                // Fallback to running counters on activeShift if sales array is empty
+                cashSales = Number(activeShift.totalCashSales) || 0;
+                bankSales = Number(activeShift.totalKHQRSales) || 0;
+                netSale = Number(activeShift.totalSales) || (cashSales + bankSales);
+                grossSale = netSale;
+                activeTxCount = Number(activeShift.transactionCount) || 0;
+            }
+
+            const saleMarginPct = netSale > 0 ? ((netSale - totalCost) / netSale) * 100 : 0;
+            const expectedFloat = Number(activeShift?.startCash) || 0;
+            const expectedCashDrop = cashSales + noRefundVoidCash;
+            const expectedBankDrop = bankSales + noRefundVoidBank;
+
+            const validRate = Math.max(100, Number(exchangeRate) || 4000);
+            const enteredFloat = parseNum(actualFloatKHR);
+            const cKhr = parseNum(cashDropKHR);
+            const cUsd = parseNum(cashDropUSD);
+            const bKhr = parseNum(bankDropKHR);
+            const bUsd = parseNum(bankDropUSD);
+
+            const actualCashDropTotal = cKhr + (cUsd * validRate);
+            const actualBankDropTotal = bKhr + (bUsd * validRate);
+
+            const diffFloat = enteredFloat - expectedFloat;
+            const diffCash = actualCashDropTotal - expectedCashDrop;
+            const diffBank = actualBankDropTotal - expectedBankDrop;
+            const totalVariance = diffFloat + diffCash + diffBank;
+
+            return {
+                grossSale, discounts, netSale, totalCost, saleMarginPct,
+                voidedTotal, voidedCount, activeTxCount,
+                cashSales, bankSales, noRefundVoidCash, noRefundVoidBank,
+                expectedFloat, enteredFloat, diffFloat,
+                expectedCashDrop, actualCashDropTotal, diffCash,
+                expectedBankDrop, actualBankDropTotal, diffBank,
+                totalVariance, validRate, cKhr, cUsd, bKhr, bUsd
+            };
+        }, [shiftSales, activeShift, exchangeRate, actualFloatKHR, cashDropKHR, cashDropUSD, bankDropKHR, bankDropUSD]);
 
         const handleOpenShift = async () => {
-            if (!activeShop?.id) return;
+            if (!activeShop?.id || saving) return;
             setSaving(true);
             const ref = db.collection('shifts').doc();
             const nowIso = new Date().toISOString();
+            const numericStartCash = parseNum(startCash);
             const shiftObj = {
-                id: ref.id, shopId: activeShop.id, cashierId: userProfile.uid, cashierName: userProfile.name || 'Cashier',
-                shiftName, deviceId: currentDevice?.id || '', deviceName: currentDevice?.name || 'POS-01',
-                startCash: Number(startCash) || 0, totalSales: 0, totalCashSales: 0, totalKHQRSales: 0, transactionCount: 0,
-                status: 'open', startTime: nowIso, createdAt: nowIso
+                id: ref.id,
+                shopId: activeShop.id,
+                shopName: activeShop.name || '',
+                cashierId: userProfile.uid,
+                cashierName: userProfile.name || 'Cashier',
+                shiftName,
+                deviceId: currentDevice?.id || '',
+                deviceName: currentDevice?.name || 'POS-01',
+                startCash: numericStartCash,
+                openNote: openNote.trim(),
+                totalSales: 0,
+                totalCashSales: 0,
+                totalKHQRSales: 0,
+                transactionCount: 0,
+                status: 'open',
+                startTime: nowIso,
+                createdAt: nowIso
             };
             try { localStorage.setItem(`solaris_active_shift_${activeShop.id}`, JSON.stringify(shiftObj)); } catch (e) {}
             onShiftChanged(shiftObj);
-            ref.set({ ...shiftObj, startTime: firebase.firestore.FieldValue.serverTimestamp(), createdAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+            ref.set({
+                ...shiftObj,
+                startTime: firebase.firestore.FieldValue.serverTimestamp(),
+                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            }).catch(() => {});
             setSaving(false);
             onClose();
         };
 
         const handleCloseShift = async () => {
-            if (!activeShift?.id) return;
+            if (!activeShift?.id || saving) return;
             setSaving(true);
-            const actCash = Number(actualCashKHR) || 0;
-            const actBank = Number(actualBankKHR) || 0;
-            const expCash = Number(activeShift.totalCashSales) || 0;
-            const expBank = Number(activeShift.totalKHQRSales) || 0;
+            const closedAtIso = new Date().toISOString();
+
             const updatePayload = {
-                status: 'closed', closedBy: userProfile.name || 'Cashier',
-                closeInputCashKHR: actCash, closeInputBankKHR: actBank, closeNote: note,
-                actualCash: actCash, expectedCash: expCash, differenceCash: actCash - expCash,
-                actualKHQR: actBank, expectedKHQR: expBank, differenceKHQR: actBank - expBank,
-                difference: (actCash - expCash) + (actBank - expBank),
-                endTime: firebase.firestore.FieldValue.serverTimestamp()
+                status: 'closed',
+                closedBy: userProfile.name || 'Cashier',
+                closeExchangeRate: shiftStats.validRate,
+                closeInputCashKHR: shiftStats.cKhr,
+                closeInputCashUSD: shiftStats.cUsd,
+                closeInputBankKHR: shiftStats.bKhr,
+                closeInputBankUSD: shiftStats.bUsd,
+                closeNote: closeNote.trim(),
+                expectedFloat: shiftStats.expectedFloat,
+                actualFloat: shiftStats.enteredFloat,
+                differenceFloat: shiftStats.diffFloat,
+                expectedCash: shiftStats.expectedCashDrop,
+                actualCash: shiftStats.actualCashDropTotal,
+                differenceCash: shiftStats.diffCash,
+                expectedKHQR: shiftStats.expectedBankDrop,
+                actualKHQR: shiftStats.actualBankDropTotal,
+                differenceKHQR: shiftStats.diffBank,
+                difference: shiftStats.totalVariance,
+                statsGross: shiftStats.grossSale,
+                statsDiscount: shiftStats.discounts,
+                statsNet: shiftStats.netSale,
+                statsMargin: Number(shiftStats.saleMarginPct.toFixed(2)),
+                statsVoid: shiftStats.voidedTotal,
+                statsVoidCount: shiftStats.voidedCount,
+                totalSales: shiftStats.netSale,
+                totalCashSales: shiftStats.cashSales,
+                totalKHQRSales: shiftStats.bankSales,
+                transactionCount: shiftStats.activeTxCount
             };
+
             try { localStorage.removeItem(`solaris_active_shift_${activeShop.id}`); } catch (e) {}
             onShiftChanged(null);
-            db.collection('shifts').doc(activeShift.id).set(updatePayload, { merge: true }).catch(() => {});
+
+            db.collection('shifts').doc(activeShift.id).set({
+                ...updatePayload,
+                endTime: firebase.firestore.FieldValue.serverTimestamp(),
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }, { merge: true }).catch(() => {});
+
+            setHandoverSummary({
+                ...activeShift,
+                ...updatePayload,
+                endTime: closedAtIso,
+                shopName: activeShop?.brandingName || activeShop?.name || 'POS Terminal',
+                stats: shiftStats
+            });
             setSaving(false);
-            onClose();
+        };
+
+        const handleSaveHandoverPng = () => {
+            if (!handoverRef.current || typeof html2canvas !== 'function' || savingPng) return;
+            setSavingPng(true);
+            html2canvas(handoverRef.current, { scale: 2.5, backgroundColor: '#0f172a', useCORS: true })
+                .then(canvas => {
+                    const link = document.createElement('a');
+                    const safeShop = String(handoverSummary?.shopName || 'POS').replace(/[^a-zA-Z0-9]/g, '_');
+                    const safeDate = new Date().toISOString().slice(0, 10);
+                    link.download = `Shift-Handover-${safeShop}-${handoverSummary?.shiftName || 'Shift'}-${safeDate}.png`;
+                    link.href = canvas.toDataURL('image/png');
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                })
+                .catch(() => {})
+                .finally(() => setSavingPng(false));
+        };
+
+        const formatVarianceBadge = (val) => {
+            if (Math.abs(val) < 1) return <span className="text-emerald-400 font-black font-mono">៛0 (Matched)</span>;
+            return (
+                <span className={`font-black font-mono ${val > 0 ? 'text-sky-400' : 'text-rose-400'}`}>
+                    {val > 0 ? `+៛${khrFormatter.format(Math.round(val))} (Over)` : `-៛${khrFormatter.format(Math.abs(Math.round(val)))} (Short)`}
+                </span>
+            );
         };
 
         return (
-            <Modal show={show} onClose={onClose} maxWidth="max-w-md">
-                <ModalHeader title={activeShift ? `Close Shift (${activeShift.shiftName})` : 'Open New Shift'} onClose={onClose} />
-                <ModalBody>
-                    {!activeShift ? (
-                        <div className="space-y-4">
-                            <div className="grid grid-cols-2 gap-2">
-                                {['AM', 'PM'].map(s => (
-                                    <button key={s} type="button" onClick={() => setShiftName(s)} className={`py-2.5 rounded-xl font-bold text-sm border ${shiftName === s ? 'bg-blue-600 text-white border-blue-400' : 'bg-slate-900 text-slate-400 border-slate-700'}`}>
-                                        {s} Shift
-                                    </button>
-                                ))}
+            <>
+                <BillCounterModal
+                    show={showBillCounter}
+                    onClose={() => setShowBillCounter(false)}
+                    onApply={({ khrTotal, usdTotal }) => {
+                        setCashDropKHR(khrTotal > 0 ? String(khrTotal) : '');
+                        setCashDropUSD(usdTotal > 0 ? String(usdTotal) : '');
+                    }}
+                />
+
+                <Modal
+                    show={show}
+                    onClose={() => { setHandoverSummary(null); onClose(); }}
+                    maxWidth={handoverSummary ? 'max-w-lg' : activeShift ? 'max-w-3xl' : 'max-w-md'}
+                >
+                    <ModalHeader
+                        title={
+                            handoverSummary
+                                ? 'Shift Handover Complete'
+                                : activeShift
+                                    ? `Close Shift & Cash Reconciliation (${activeShift.shiftName || 'Open'})`
+                                    : 'Open New Shift'
+                        }
+                        onClose={() => { setHandoverSummary(null); onClose(); }}
+                    />
+
+                    <ModalBody>
+                        {handoverSummary ? (
+                            /* STEP 3: SHIFT HANDOVER COMPLETE SUMMARY (WITH SAVE PNG) */
+                            <div ref={handoverRef} className="bg-slate-900 border border-slate-700 rounded-2xl p-5 space-y-4 text-slate-200">
+                                <div className="text-center border-b border-slate-800 pb-3">
+                                    <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 flex items-center justify-center mx-auto mb-2">
+                                        <i className="fas fa-check-double text-xl"></i>
+                                    </div>
+                                    <h4 className="text-lg font-black text-white">{handoverSummary.shopName}</h4>
+                                    <p className="text-xs text-slate-400">
+                                        Shift <strong className="text-blue-400">{handoverSummary.shiftName}</strong> • Closed by <strong className="text-white">{handoverSummary.closedBy}</strong>
+                                    </p>
+                                    <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                                        {safeFormatDateTime(handoverSummary.startTime)} &rarr; {safeFormatDateTime(handoverSummary.endTime)}
+                                    </p>
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-2 text-center">
+                                    <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                                        <div className="text-[10px] uppercase font-bold text-slate-400">Net Sale</div>
+                                        <div className="text-sm font-black text-emerald-400 font-mono">៛{khrFormatter.format(handoverSummary.statsNet || 0)}</div>
+                                    </div>
+                                    <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                                        <div className="text-[10px] uppercase font-bold text-slate-400">Transactions</div>
+                                        <div className="text-sm font-black text-blue-400 font-mono">{handoverSummary.transactionCount || 0}</div>
+                                    </div>
+                                    <div className="bg-slate-950/70 p-2.5 rounded-xl border border-slate-800">
+                                        <div className="text-[10px] uppercase font-bold text-slate-400">Sale Margin</div>
+                                        <div className="text-sm font-black text-cyan-400 font-mono">{Number(handoverSummary.statsMargin || 0).toFixed(1)}%</div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-950/60 rounded-xl border border-slate-800 p-3.5 space-y-2 text-xs">
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400">Drawer Float (Counted / Expected):</span>
+                                        <span className="font-mono font-bold text-white">
+                                            ៛{khrFormatter.format(handoverSummary.actualFloat || 0)} / ៛{khrFormatter.format(handoverSummary.expectedFloat || 0)}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400">Physical Cash Drop:</span>
+                                        <span className="font-mono font-bold text-emerald-400">
+                                            ៛{khrFormatter.format(handoverSummary.closeInputCashKHR || 0)} + ${(Number(handoverSummary.closeInputCashUSD) || 0).toFixed(2)}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400">Bank / KHQR Drop:</span>
+                                        <span className="font-mono font-bold text-sky-400">
+                                            ៛{khrFormatter.format(handoverSummary.closeInputBankKHR || 0)} + ${(Number(handoverSummary.closeInputBankUSD) || 0).toFixed(2)}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between pt-2 border-t border-slate-800">
+                                        <span className="font-bold text-slate-300">Total Net Variance:</span>
+                                        {formatVarianceBadge(handoverSummary.difference || 0)}
+                                    </div>
+                                    {handoverSummary.closeNote && (
+                                        <div className="pt-2 border-t border-slate-800 text-slate-300">
+                                            <span className="text-slate-500 font-bold block text-[10px] uppercase">Handover Note</span>
+                                            <span>{handoverSummary.closeNote}</span>
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                            <div>
-                                <label className="block text-xs font-bold text-slate-300 mb-1">Starting Float Cash (KHR)</label>
-                                <input type="number" value={startCash} onChange={e => setStartCash(e.target.value)} className="w-full bg-slate-900 text-white text-xl font-black px-4 py-3 rounded-xl border border-slate-600 text-right font-mono" />
+                        ) : !activeShift ? (
+                            /* STEP 1: OPEN NEW SHIFT */
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Select Shift Session</label>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {[
+                                            { id: 'AM', label: 'AM Shift', sub: 'Morning Session', icon: 'fa-sun text-amber-400' },
+                                            { id: 'PM', label: 'PM Shift', sub: 'Afternoon / Evening', icon: 'fa-moon text-indigo-400' }
+                                        ].map(s => (
+                                            <button
+                                                key={s.id}
+                                                type="button"
+                                                onClick={() => setShiftName(s.id)}
+                                                className={`p-3.5 rounded-2xl border text-left transition flex items-center gap-3 ${
+                                                    shiftName === s.id
+                                                        ? 'bg-blue-600/20 border-blue-500 text-white shadow-lg shadow-blue-900/30'
+                                                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'
+                                                }`}
+                                            >
+                                                <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center shrink-0">
+                                                    <i className={`fas ${s.icon} text-lg`}></i>
+                                                </div>
+                                                <div>
+                                                    <div className="font-black text-sm text-white">{s.label}</div>
+                                                    <div className="text-[11px] text-slate-400">{s.sub}</div>
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        Starting Float Cash in Drawer (KHR)
+                                    </label>
+                                    <div className="relative">
+                                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-emerald-400 font-black text-lg">៛</span>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={formatNumInput(startCash)}
+                                            onChange={e => setStartCash(e.target.value.replace(/,/g, ''))}
+                                            placeholder="0"
+                                            className="w-full bg-slate-900 text-white text-2xl font-black pl-10 pr-4 py-3 rounded-xl border border-slate-600 focus:border-emerald-500 outline-none text-right font-mono"
+                                        />
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                        {[0, 100000, 200000, 400000].map(preset => (
+                                            <button
+                                                key={preset}
+                                                type="button"
+                                                onClick={() => setStartCash(String(preset))}
+                                                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] font-mono font-bold"
+                                            >
+                                                ៛{khrFormatter.format(preset)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">Opening Note (Optional)</label>
+                                    <input
+                                        type="text"
+                                        value={openNote}
+                                        onChange={e => setOpenNote(e.target.value)}
+                                        placeholder="Drawer condition, remarks..."
+                                        className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-xs"
+                                    />
+                                </div>
                             </div>
-                        </div>
-                    ) : (
-                        <div className="space-y-3.5 text-sm">
-                            <div className="bg-slate-900 p-3.5 rounded-xl border border-slate-700 space-y-1.5 text-xs">
-                                <div className="flex justify-between"><span className="text-slate-400">System Cash Sales:</span><strong className="text-emerald-400 font-mono">៛{khrFormatter.format(activeShift.totalCashSales || 0)}</strong></div>
-                                <div className="flex justify-between"><span className="text-slate-400">System Bank / KHQR:</span><strong className="text-sky-400 font-mono">៛{khrFormatter.format(activeShift.totalKHQRSales || 0)}</strong></div>
-                                <div className="flex justify-between border-t border-slate-800 pt-1.5"><span className="text-slate-300 font-bold">Total Sales ({activeShift.transactionCount || 0} Trx):</span><strong className="text-white font-mono">៛{khrFormatter.format(activeShift.totalSales || 0)}</strong></div>
+                        ) : (
+                            /* STEP 2: CLOSE SHIFT & CASH RECONCILIATION */
+                            <div className="space-y-4">
+                                {/* 5-Column Shift KPI Strip */}
+                                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                                    <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-700">
+                                        <div className="text-[10px] font-bold uppercase text-slate-400">Gross Sale</div>
+                                        <div className="text-sm font-black text-white font-mono mt-0.5">៛{khrFormatter.format(shiftStats.grossSale)}</div>
+                                    </div>
+                                    <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-700">
+                                        <div className="text-[10px] font-bold uppercase text-slate-400">Discounts</div>
+                                        <div className="text-sm font-black text-rose-400 font-mono mt-0.5">-៛{khrFormatter.format(shiftStats.discounts)}</div>
+                                    </div>
+                                    <div className="bg-slate-900/90 p-2.5 rounded-xl border border-emerald-500/40">
+                                        <div className="text-[10px] font-bold uppercase text-emerald-400">Net Sale ({shiftStats.activeTxCount})</div>
+                                        <div className="text-sm font-black text-emerald-400 font-mono mt-0.5">៛{khrFormatter.format(shiftStats.netSale)}</div>
+                                    </div>
+                                    <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-700">
+                                        <div className="text-[10px] font-bold uppercase text-cyan-400">Sale Margin</div>
+                                        <div className="text-sm font-black text-cyan-300 font-mono mt-0.5">{shiftStats.saleMarginPct.toFixed(1)}%</div>
+                                    </div>
+                                    <div className="col-span-2 sm:col-span-1 bg-slate-900/90 p-2.5 rounded-xl border border-slate-700">
+                                        <div className="text-[10px] font-bold uppercase text-amber-400">Voided ({shiftStats.voidedCount})</div>
+                                        <div className="text-sm font-black text-amber-300 font-mono mt-0.5">៛{khrFormatter.format(shiftStats.voidedTotal)}</div>
+                                    </div>
+                                </div>
+
+                                {/* Exchange Rate & Drawer Floating Cash Verification */}
+                                <div className="bg-slate-900/70 p-3.5 rounded-2xl border border-slate-700 space-y-3">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div className="text-xs font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                                            <i className="fas fa-cash-register"></i>
+                                            <span>Drawer Floating Cash Verification</span>
+                                        </div>
+                                        <div className="flex items-center gap-2 text-xs">
+                                            <span className="text-slate-400">Rate ($1 =):</span>
+                                            <input
+                                                type="number"
+                                                value={exchangeRate}
+                                                onChange={e => setExchangeRate(parseFloat(e.target.value) || 4000)}
+                                                className="w-20 bg-slate-800 text-amber-400 font-mono font-bold px-2 py-1 rounded-lg border border-slate-600 text-right outline-none"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                                        <div className="flex-1 relative">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">Ending Float ៛</span>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={formatNumInput(actualFloatKHR)}
+                                                onChange={e => setActualFloatKHR(e.target.value.replace(/,/g, ''))}
+                                                placeholder={khrFormatter.format(shiftStats.expectedFloat)}
+                                                className="w-full bg-slate-950 text-white font-mono font-bold pl-28 pr-3 py-2 rounded-xl border border-slate-600 focus:border-amber-400 outline-none text-right text-sm"
+                                            />
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setActualFloatKHR(String(shiftStats.expectedFloat))}
+                                            className="px-3.5 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-xs font-black transition whitespace-nowrap"
+                                        >
+                                            <i className="fas fa-magic mr-1.5"></i>Auto-Match Float (៛{khrFormatter.format(shiftStats.expectedFloat)})
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Physical Cash Drop & Bank / KHQR Drop */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                                    {/* Physical Cash Drop */}
+                                    <div className="bg-slate-900/70 p-3.5 rounded-2xl border border-emerald-500/30 space-y-2.5">
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className="text-xs font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                                                <i className="fas fa-money-bill-wave"></i> Physical Cash Drop
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowBillCounter(true)}
+                                                className="px-2.5 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 text-[11px] font-black transition flex items-center gap-1"
+                                            >
+                                                <i className="fas fa-calculator"></i> Bill Counter
+                                            </button>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <label className="block text-[10px] font-bold text-slate-400 mb-1">Cash Drop KHR (៛)</label>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={formatNumInput(cashDropKHR)}
+                                                    onChange={e => setCashDropKHR(e.target.value.replace(/,/g, ''))}
+                                                    placeholder="0"
+                                                    className="w-full bg-slate-950 text-emerald-300 font-mono font-bold px-3 py-2 rounded-xl border border-slate-600 focus:border-emerald-500 outline-none text-right text-sm"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold text-slate-400 mb-1">Cash Drop USD ($)</label>
+                                                <input
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    value={formatNumInput(cashDropUSD)}
+                                                    onChange={e => setCashDropUSD(e.target.value.replace(/,/g, ''))}
+                                                    placeholder="0.00"
+                                                    className="w-full bg-slate-950 text-emerald-300 font-mono font-bold px-3 py-2 rounded-xl border border-slate-600 focus:border-emerald-500 outline-none text-right text-sm"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Bank / KHQR Drop */}
+                                    <div className="bg-slate-900/70 p-3.5 rounded-2xl border border-sky-500/30 space-y-2.5">
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className="text-xs font-black uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                                                <i className="fas fa-university"></i> Bank / KHQR Drop
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => { setBankDropKHR(String(shiftStats.expectedBankDrop)); setBankDropUSD(''); }}
+                                                className="px-2 py-1 rounded-lg bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/40 text-[10px] font-bold transition"
+                                            >
+                                                Match System
+                                            </button>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <label className="block text-[10px] font-bold text-slate-400 mb-1">Bank KHR (៛)</label>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={formatNumInput(bankDropKHR)}
+                                                    onChange={e => setBankDropKHR(e.target.value.replace(/,/g, ''))}
+                                                    placeholder="0"
+                                                    className="w-full bg-slate-950 text-sky-300 font-mono font-bold px-3 py-2 rounded-xl border border-slate-600 focus:border-sky-500 outline-none text-right text-sm"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold text-slate-400 mb-1">Bank USD ($)</label>
+                                                <input
+                                                    type="text"
+                                                    inputMode="decimal"
+                                                    value={formatNumInput(bankDropUSD)}
+                                                    onChange={e => setBankDropUSD(e.target.value.replace(/,/g, ''))}
+                                                    placeholder="0.00"
+                                                    className="w-full bg-slate-950 text-sky-300 font-mono font-bold px-3 py-2 rounded-xl border border-slate-600 focus:border-sky-500 outline-none text-right text-sm"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Live Reconciliation Ledger */}
+                                <div className="bg-slate-950/80 rounded-2xl border border-slate-700 p-3.5 space-y-2 text-xs">
+                                    <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                                        <span className="font-black uppercase tracking-wider text-slate-300">Live Reconciliation Ledger</span>
+                                        {loadingSales && <span className="text-[10px] text-blue-400">Syncing shift sales...</span>}
+                                    </div>
+                                    <div className="grid grid-cols-4 text-[10px] font-bold uppercase text-slate-500 pb-1">
+                                        <span>Channel</span>
+                                        <span className="text-right">Expected</span>
+                                        <span className="text-right">Actual Count</span>
+                                        <span className="text-right">Variance</span>
+                                    </div>
+                                    <div className="grid grid-cols-4 items-center py-1 border-t border-slate-800/70">
+                                        <span className="font-bold text-amber-300">Drawer Float</span>
+                                        <span className="text-right font-mono text-slate-300">៛{khrFormatter.format(shiftStats.expectedFloat)}</span>
+                                        <span className="text-right font-mono text-white">៛{khrFormatter.format(shiftStats.enteredFloat)}</span>
+                                        <span className="text-right">{formatVarianceBadge(shiftStats.diffFloat)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-4 items-center py-1 border-t border-slate-800/70">
+                                        <span className="font-bold text-emerald-400">
+                                            Cash Drop
+                                            {shiftStats.noRefundVoidCash > 0 && (
+                                                <span className="block text-[9px] text-amber-400 font-normal">+៛{khrFormatter.format(shiftStats.noRefundVoidCash)} No-Refund Void</span>
+                                            )}
+                                        </span>
+                                        <span className="text-right font-mono text-slate-300">៛{khrFormatter.format(shiftStats.expectedCashDrop)}</span>
+                                        <span className="text-right font-mono text-white">៛{khrFormatter.format(Math.round(shiftStats.actualCashDropTotal))}</span>
+                                        <span className="text-right">{formatVarianceBadge(shiftStats.diffCash)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-4 items-center py-1 border-t border-slate-800/70">
+                                        <span className="font-bold text-sky-400">
+                                            Bank / KHQR
+                                            {shiftStats.noRefundVoidBank > 0 && (
+                                                <span className="block text-[9px] text-amber-400 font-normal">+៛{khrFormatter.format(shiftStats.noRefundVoidBank)} No-Refund Void</span>
+                                            )}
+                                        </span>
+                                        <span className="text-right font-mono text-slate-300">៛{khrFormatter.format(shiftStats.expectedBankDrop)}</span>
+                                        <span className="text-right font-mono text-white">៛{khrFormatter.format(Math.round(shiftStats.actualBankDropTotal))}</span>
+                                        <span className="text-right">{formatVarianceBadge(shiftStats.diffBank)}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center pt-2 border-t border-slate-700 text-sm">
+                                        <span className="font-black text-white">Total Net Variance</span>
+                                        {formatVarianceBadge(shiftStats.totalVariance)}
+                                    </div>
+                                </div>
+
+                                {/* Handover Note */}
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-400 mb-1">Handover Note (Optional)</label>
+                                    <textarea
+                                        rows="2"
+                                        value={closeNote}
+                                        onChange={e => setCloseNote(e.target.value)}
+                                        placeholder="Explain any variance, cash drops, or notes for the next cashier..."
+                                        className="w-full bg-slate-900 text-white px-3.5 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-xs resize-none"
+                                    />
+                                </div>
                             </div>
-                            <div>
-                                <label className="block text-xs font-bold text-emerald-400 mb-1">Actual Cash Counted (KHR)</label>
-                                <input type="number" value={actualCashKHR} onChange={e => setActualCashKHR(e.target.value)} placeholder="0" className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 font-mono font-bold text-right" />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-sky-400 mb-1">Actual Bank / KHQR Total (KHR)</label>
-                                <input type="number" value={actualBankKHR} onChange={e => setActualBankKHR(e.target.value)} placeholder="0" className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 font-mono font-bold text-right" />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-slate-400 mb-1">Closing Note (Optional)</label>
-                                <input type="text" value={note} onChange={e => setNote(e.target.value)} placeholder="Handover remarks..." className="w-full bg-slate-900 text-white px-3.5 py-2 rounded-xl border border-slate-600 text-xs" />
-                            </div>
-                        </div>
-                    )}
-                </ModalBody>
-                <ModalFooter>
-                    <button type="button" onClick={onClose} className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-2 px-5 rounded-xl text-sm">Cancel</button>
-                    <button type="button" disabled={saving} onClick={activeShift ? handleCloseShift : handleOpenShift} className="bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2 px-6 rounded-xl text-sm">
-                        {activeShift ? 'Submit & Close Shift' : 'Start Shift'}
-                    </button>
-                </ModalFooter>
-            </Modal>
+                        )}
+                    </ModalBody>
+
+                    <ModalFooter>
+                        {handoverSummary ? (
+                            <>
+                                <button
+                                    type="button"
+                                    disabled={savingPng}
+                                    onClick={handleSaveHandoverPng}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-5 rounded-xl text-sm flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                    {savingPng ? <div className="loader w-4 h-4"></div> : <i className="fas fa-image"></i>}
+                                    <span>Save PNG</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { setHandoverSummary(null); onClose(); }}
+                                    className="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 px-6 rounded-xl text-sm"
+                                >
+                                    Done
+                                </button>
+                            </>
+                        ) : (
+                            <>
+                                <button type="button" onClick={onClose} className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-2 px-5 rounded-xl text-sm">
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={saving}
+                                    onClick={activeShift ? handleCloseShift : handleOpenShift}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2 px-6 rounded-xl text-sm flex items-center gap-2 disabled:opacity-50"
+                                >
+                                    {saving && <div className="loader w-4 h-4"></div>}
+                                    <span>{activeShift ? 'Submit & Close Shift' : 'Start Shift'}</span>
+                                </button>
+                            </>
+                        )}
+                    </ModalFooter>
+                </Modal>
+            </>
         );
     };
 
@@ -4369,7 +5113,71 @@
         const [showHistoryModal, setShowHistoryModal] = useState(false);
         const [showBankAutoSumModal, setShowBankAutoSumModal] = useState(false);
 
-        const activeShop = useMemo(() => shops.find(s => s.id === activeShopId) || shops[0] || null, [shops, activeShopId]);
+        const availableShops = useMemo(() => {
+            if (!shops || shops.length === 0) return [];
+            if (userProfile?.role === 'Admin') return shops;
+            const assigned = userProfile?.assignedShops || [];
+            return assigned.length > 0 ? shops.filter(s => assigned.includes(s.id)) : shops;
+        }, [shops, userProfile]);
+
+        useEffect(() => {
+            if (!activeShopId && availableShops.length > 0) {
+                setActiveShopId(availableShops[0].id);
+            }
+        }, [activeShopId, availableShops]);
+
+        const activeShop = useMemo(
+            () => availableShops.find(s => s.id === activeShopId) || availableShops[0] || null,
+            [availableShops, activeShopId]
+        );
+
+        // Subscribe to Invoice Counter & Recover Active Open Shift (0ms Local Cache + Live Firestore Sync)
+        useEffect(() => {
+            if (!activeShop?.id) {
+                setActiveShift(null);
+                return;
+            }
+
+            const unsubInv = window.SolarisInvoiceEngine?.subscribeShopCounter(activeShop.id) || (() => {});
+
+            // 1. 0ms Local Cache Recovery
+            try {
+                const cachedShift = JSON.parse(localStorage.getItem(`solaris_active_shift_${activeShop.id}`) || 'null');
+                if (cachedShift && cachedShift.id && cachedShift.status === 'open') {
+                    setActiveShift(cachedShift);
+                } else {
+                    setActiveShift(null);
+                }
+            } catch (e) {
+                setActiveShift(null);
+            }
+
+            // 2. Live Firestore Open-Shift Sync
+            const unsubShift = db.collection('shifts')
+                .where('shopId', '==', activeShop.id)
+                .where('status', '==', 'open')
+                .onSnapshot(snap => {
+                    if (!snap.empty) {
+                        const openDocs = snap.docs
+                            .map(d => ({ id: d.id, ...d.data() }))
+                            .sort((a, b) => (safeToDate(b.startTime || b.createdAt)?.getTime() || 0) - (safeToDate(a.startTime || a.createdAt)?.getTime() || 0));
+                        const latestOpen = openDocs[0];
+                        setActiveShift(latestOpen);
+                        try {
+                            localStorage.setItem(`solaris_active_shift_${activeShop.id}`, JSON.stringify({
+                                ...latestOpen,
+                                startTime: safeToDate(latestOpen.startTime)?.toISOString() || latestOpen.startTime,
+                                createdAt: safeToDate(latestOpen.createdAt)?.toISOString() || latestOpen.createdAt
+                            }));
+                        } catch (e) {}
+                    }
+                }, () => {});
+
+            return () => {
+                unsubInv();
+                unsubShift();
+            };
+        }, [activeShop?.id]);
 
         return (
             <div className="h-screen h-[100dvh] w-screen bg-slate-950 flex flex-col overflow-hidden">
