@@ -4516,6 +4516,32 @@
     const khrFormatter = new Intl.NumberFormat('en-US');
     const usdFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
+    // Shared helper to resolve a Shift's Sale Margin (%) from Close Shift modal stats (`statsMargin`),
+    // falling back to `statsNet`/`statsCost` or the local sales ledger for open/legacy shifts.
+    const resolveShiftSaleMargin = (shift) => {
+        if (!shift) return null;
+        if (typeof shift.statsMargin === 'number' && !isNaN(shift.statsMargin)) {
+            return shift.statsMargin;
+        }
+        const net = Number(shift.statsNet ?? shift.totalSales) || 0;
+        if (typeof shift.statsCost === 'number' && !isNaN(shift.statsCost) && net > 0) {
+            return ((net - shift.statsCost) / net) * 100;
+        }
+        if (shift.id && window.SolarisLocalSalesStore) {
+            const shiftSales = window.SolarisLocalSalesStore.getSales().filter(
+                s => s && s.shiftId === shift.id && s.status !== 'void'
+            );
+            if (shiftSales.length > 0) {
+                const localNet = shiftSales.reduce((sum, s) => sum + (Number(s.grandTotal) || 0), 0);
+                const localCost = shiftSales.reduce((sum, s) => sum + (Number(s.totalCost) || 0), 0);
+                if (localNet > 0) {
+                    return ((localNet - localCost) / localNet) * 100;
+                }
+            }
+        }
+        return shift.status === 'closed' ? 0 : null;
+    };
+
     // Resolves the effective selling price for a product at a specific shop.
     // When the shop's custom price is null, blank, or 0, falls back to the base product.price.
     const getEffectiveShopPrice = (product, shopId) => {
@@ -21125,6 +21151,7 @@
             else if (activeTab === 'shifts') {
                 const data = filteredShiftsData.map(s => {
                     const shop = shops.find(sh => sh.id === s.shopId)?.name || 'Unknown';
+                    const saleMarginVal = resolveShiftSaleMargin(s);
                     return {
                         'Shop': shop,
                         'Shift': s.shiftName || '-',
@@ -21134,6 +21161,7 @@
                         'Tx Count': s.transactionCount,
                         'Start Cash': s.startCash,
                         'Total Sales': s.totalSales,
+                        'Sale Margin (%)': saleMarginVal !== null ? Number(saleMarginVal.toFixed(2)) : '',
                         'Actual Cash': s.actualCash,
                         'Variance': s.difference,
                         'Status': s.status
@@ -21147,12 +21175,14 @@
                     const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                     const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
                                         ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                    const saleMarginVal = resolveShiftSaleMargin(s);
                     return {
                         'Date & Time': safeFormatDateTime(s.endTime || s.startTime, ''),
                         'Shop Name': shop,
                         'Shift Name': s.shiftName || '-',
                         'Staff Name': s.closedBy || s.cashierName,
                         'NetSale (Drop)': calcNetSale,
+                        'Sale Margin (%)': saleMarginVal !== null ? Number(saleMarginVal.toFixed(2)) : 0,
                         'Cash (KHR)': s.closeInputCashKHR || 0,
                         'Cash (USD)': s.closeInputCashUSD || 0,
                         'Bank (KHR)': s.closeInputBankKHR || 0,
@@ -23263,6 +23293,7 @@
                                                             <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
                                                             <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase bg-emerald-950/30 text-emerald-400 border-l border-r border-emerald-500/20">NetSale</th>
+                                                            <th className="px-4 py-3 text-right text-xs font-semibold text-cyan-400 uppercase">Sale Margin</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash KHR</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash USD</th>
                                                             <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank KHR</th>
@@ -23276,6 +23307,7 @@
                                                             const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                                                             const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
                                                                                 ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                                                            const saleMarginVal = resolveShiftSaleMargin(s);
                                                             return (
                                                                 <tr key={s.id} className="hover:bg-slate-700/50">
                                                                     <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
@@ -23283,6 +23315,9 @@
                                                                     <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
                                                                     <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-black text-emerald-400 bg-emerald-950/10 border-l border-r border-emerald-500/10 shadow-inner">៛{khrFormatter.format(calcNetSale)}</td>
+                                                                    <td className={`px-4 py-3 text-sm text-right font-mono font-bold whitespace-nowrap ${saleMarginVal !== null && saleMarginVal < 0 ? 'text-rose-400' : 'text-cyan-400'}`}>
+                                                                        {saleMarginVal !== null ? `${saleMarginVal.toFixed(2)}%` : '-'}
+                                                                    </td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
                                                                     <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
@@ -23307,6 +23342,7 @@
                                                         <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shift</th>
                                                         <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Staff</th>
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase bg-emerald-950/30 text-emerald-400 border-l border-r border-emerald-500/20">NetSale</th>
+                                                        <th className="px-4 py-3 text-right text-xs font-semibold text-cyan-400 uppercase">Sale Margin</th>
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (KHR)</th>
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cash (USD)</th>
                                                         <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Bank (KHR)</th>
@@ -23320,6 +23356,7 @@
                                                         const rate = Number(s.closeExchangeRate) || Number(s.exchangeRate) || 4000;
                                                         const calcNetSale = (Number(s.closeInputCashKHR) || 0) + (Number(s.closeInputBankKHR) || 0) + 
                                                                             ((Number(s.closeInputCashUSD) || 0) + (Number(s.closeInputBankUSD) || 0)) * rate;
+                                                        const saleMarginVal = resolveShiftSaleMargin(s);
                                                         return (
                                                             <tr key={s.id} className="hover:bg-slate-700/50">
                                                                 <td className="px-4 py-3 text-sm text-slate-300 font-mono whitespace-nowrap">{safeFormatDateTime(s.endTime || s.startTime, '-')}</td>
@@ -23327,6 +23364,9 @@
                                                                 <td className="px-4 py-3 text-sm text-blue-400 font-bold">{s.shiftName || '-'}</td>
                                                                 <td className="px-4 py-3 text-sm text-slate-300">{s.closedBy || s.cashierName || '-'}</td>
                                                                 <td className="px-4 py-3 text-sm text-right font-mono font-black text-emerald-400 bg-emerald-950/10 border-l border-r border-emerald-500/10 shadow-inner">៛{khrFormatter.format(calcNetSale)}</td>
+                                                                <td className={`px-4 py-3 text-sm text-right font-mono font-bold whitespace-nowrap ${saleMarginVal !== null && saleMarginVal < 0 ? 'text-rose-400' : 'text-cyan-400'}`}>
+                                                                    {saleMarginVal !== null ? `${saleMarginVal.toFixed(2)}%` : '-'}
+                                                                </td>
                                                                 <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">៛{khrFormatter.format(s.closeInputCashKHR || 0)}</td>
                                                                 <td className="px-4 py-3 text-sm text-right font-mono font-bold text-green-400">{usdFormatter.format(s.closeInputCashUSD || 0)}</td>
                                                                 <td className="px-4 py-3 text-sm text-right font-mono font-bold text-sky-400">៛{khrFormatter.format(s.closeInputBankKHR || 0)}</td>
@@ -24180,6 +24220,7 @@
                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Tx Count</th>
                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Start Cash</th>
                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Total Sales</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-cyan-400 uppercase">Sale Margin</th>
                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Expected Cash</th>
                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Actual Cash</th>
                                     <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Variance</th>
@@ -24192,6 +24233,7 @@
                                     const diff = shift.difference || 0;
                                     const diffColor = diff < 0 ? 'text-red-400' : diff > 0 ? 'text-green-400' : 'text-slate-400';
                                     const shopName = shops.find(s => s.id === shift.shopId)?.name || 'Unknown';
+                                    const saleMarginVal = resolveShiftSaleMargin(shift);
                                     
                                     return (
                                     <tr key={shift.id} className="hover:bg-slate-700/50">
@@ -24207,6 +24249,9 @@
                                         <td className="px-4 py-3 text-sm text-slate-400 text-center">{shift.transactionCount || 0}</td>
                                         <td className="px-4 py-3 text-sm text-slate-300 text-right">{new Intl.NumberFormat('en-US').format(shift.startCash)}</td>
                                         <td className="px-4 py-3 text-sm text-emerald-400 text-right font-bold">{new Intl.NumberFormat('en-US').format(shift.totalSales || 0)}</td>
+                                        <td className={`px-4 py-3 text-sm text-right font-mono font-bold whitespace-nowrap ${saleMarginVal !== null && saleMarginVal < 0 ? 'text-rose-400' : 'text-cyan-400'}`}>
+                                            {saleMarginVal !== null ? `${saleMarginVal.toFixed(2)}%` : '-'}
+                                        </td>
                                         <td className="px-4 py-3 text-sm text-slate-400 text-right">{shift.expectedCash ? new Intl.NumberFormat('en-US').format(shift.expectedCash) : '-'}</td>
                                         <td className="px-4 py-3 text-sm text-slate-300 text-right font-bold">{shift.actualCash ? new Intl.NumberFormat('en-US').format(shift.actualCash) : '-'}</td>
                                         <td className={`px-4 py-3 text-sm text-right font-bold ${diffColor}`}>{shift.difference ? new Intl.NumberFormat('en-US').format(shift.difference) : '-'}</td>
