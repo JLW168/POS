@@ -6417,22 +6417,30 @@
                 });
             }
         }, [
-            cart, cartTotal, cartItemCount, activeShop, exchangeRate,
-            selectedCustomerObj, customerLoyaltyStatus.effectivePoints, estimatedPoints,
-            activeLoyaltyRule, showPaymentModal, completedReceipt, thankYouModalData, showKhqrSimulatorModal,
-            systemConfig?.appName, currentDeviceId, currentDevice?.name, userProfile?.name
+            activeShop?.id, activeShop?.brandingName, activeShop?.name, systemConfig?.appName,
+            showPaymentModal, completedReceipt, thankYouModalData, showKhqrSimulatorModal,
+            cart, cartItemCount, cartTotal, exchangeRate,
+            currentDeviceId, currentDevice?.name, userProfile?.name,
+            selectedCustomerObj, customerLoyaltyStatus.effectivePoints, estimatedPoints, activeLoyaltyRule
         ]);
-        // Audited Cart Log (Syncs Delete Item, Clear Cart & Delete Saved Bill to Sale Report -> Cleared Carts Log)
+
+        // Audited Cart Log (Syncs Delete Item, Clear Cart & Delete Recall to Sale Report -> Cleared Carts Log)
         const logCartAuditAction = useCallback((actionType, targetItems = [], extraMeta = {}) => {
             if (!Array.isArray(targetItems) || targetItems.length === 0) return;
             const totalQty = targetItems.reduce((sum, i) => sum + (Number(i.quantity) || 1), 0);
             const totalAmount = targetItems.reduce((sum, i) => sum + ((Number(i.price) || 0) * (Number(i.quantity) || 1)), 0);
             const logRef = db.collection('clearedCarts').doc();
             const nowIso = new Date().toISOString();
+            const statusLabel = actionType === 'delete_item'
+                ? 'Delete Item'
+                : (actionType === 'delete_recall' || actionType === 'delete_saved_bill')
+                    ? 'Delete Recall'
+                    : 'Clear Cart';
 
             const auditPayload = {
                 id: logRef.id,
-                actionType, // 'delete_item' | 'clear_cart' | 'delete_saved_bill'
+                actionType, // 'delete_item' | 'clear_cart' | 'delete_recall'
+                status: statusLabel,
                 shopId: activeShop?.id || '',
                 shopName: activeShop?.name || 'Unknown Shop',
                 cashierId: userProfile?.uid || '',
@@ -6910,7 +6918,7 @@
                         onRestore={handleRestoreTicket}
                         onDiscard={(ticket) => {
                             if (ticket && Array.isArray(ticket.items) && ticket.items.length > 0) {
-                                logCartAuditAction('delete_saved_bill', ticket.items, {
+                                logCartAuditAction('delete_recall', ticket.items, {
                                     referenceNote: ticket.referenceNote || ticket.customerName || 'Saved Bill',
                                     savedBy: ticket.savedBy || ''
                                 });
