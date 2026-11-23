@@ -1,0 +1,2501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>POS Terminal — Fast Standalone Cashier</title>
+
+    <!-- PWA & Full-Screen Kiosk Meta Tags (iOS / iPadOS / Android) -->
+    <meta name="theme-color" content="#0f172a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="POS Terminal">
+    <meta name="application-name" content="POS Terminal">
+    <meta name="format-detection" content="telephone=no">
+
+    <!-- Preconnect to Critical CDNs for Faster Mobile Cold-Start -->
+    <link rel="preconnect" href="https://unpkg.com" crossorigin>
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+    <link rel="preconnect" href="https://cdn.tailwindcss.com" crossorigin>
+
+    <!-- Dynamic PWA Manifest + Always-On Keep-Awake Engine -->
+    <script>
+        window.SolarisPWAManager = {
+            deferredPrompt: null,
+            isInstalled: false,
+            listeners: new Set(),
+            subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
+            notify() { this.listeners.forEach(fn => { try { fn(this.getState()); } catch (e) {} }); },
+            getState() {
+                const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true || document.referrer.includes('android-app://');
+                const ua = window.navigator.userAgent || '';
+                const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                return { canInstallPrompt: !!this.deferredPrompt, isInstalled: isStandalone || this.isInstalled, isIOS };
+            },
+            generateAppIcon(size = 512) {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = size; canvas.height = size;
+                    const ctx = canvas.getContext('2d');
+                    const grad = ctx.createLinearGradient(0, 0, size, size);
+                    grad.addColorStop(0, '#1e3a8a'); grad.addColorStop(0.5, '#1d4ed8'); grad.addColorStop(1, '#0f172a');
+                    ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+                    ctx.fillStyle = '#ffffff'; ctx.font = `900 ${Math.round(size * 0.28)}px Arial, sans-serif`;
+                    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                    ctx.fillText('POS', size / 2, size * 0.43);
+                    const pillW = size * 0.56, pillH = size * 0.14;
+                    ctx.fillStyle = '#10b981';
+                    ctx.beginPath();
+                    ctx.roundRect((size - pillW) / 2, size * 0.64, pillW, pillH, pillH / 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#052e16'; ctx.font = `900 ${Math.round(size * 0.075)}px Arial, sans-serif`;
+                    ctx.fillText('TERMINAL', size / 2, size * 0.64 + pillH / 2 + 2);
+                    return canvas.toDataURL('image/png');
+                } catch (e) { return ''; }
+            },
+            enterKioskFullscreen() {
+                try {
+                    const docEl = document.documentElement;
+                    if (document.fullscreenElement || document.webkitFullscreenElement) return true;
+                    const req = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.msRequestFullscreen;
+                    if (req) { req.call(docEl).catch(() => {}); return true; }
+                } catch (e) {}
+                return false;
+            },
+            exitKioskFullscreen() {
+                try {
+                    if (document.fullscreenElement || document.webkitFullscreenElement) {
+                        const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+                        if (exit) exit.call(document).catch(() => {});
+                    }
+                } catch (e) {}
+            },
+            init(appName = 'POS Terminal') {
+                const icon192 = this.generateAppIcon(192);
+                const icon512 = this.generateAppIcon(512);
+                if (icon192) {
+                    let appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+                    if (!appleIcon) { appleIcon = document.createElement('link'); appleIcon.rel = 'apple-touch-icon'; document.head.appendChild(appleIcon); }
+                    appleIcon.href = icon192;
+                }
+                const manifestObj = {
+                    name: appName, short_name: 'POS Terminal', start_url: window.location.href.split('#')[0],
+                    display: 'standalone', background_color: '#0f172a', theme_color: '#0f172a',
+                    icons: [
+                        { src: icon192, sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+                        { src: icon512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+                    ]
+                };
+                try {
+                    const blob = new Blob([JSON.stringify(manifestObj)], { type: 'application/manifest+json' });
+                    let manifestLink = document.querySelector('link[rel="manifest"]');
+                    if (!manifestLink) { manifestLink = document.createElement('link'); manifestLink.rel = 'manifest'; document.head.appendChild(manifestLink); }
+                    manifestLink.href = URL.createObjectURL(blob);
+                } catch (e) {}
+            }
+        };
+        window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.SolarisPWAManager.deferredPrompt = e; window.SolarisPWAManager.notify(); });
+        window.addEventListener('appinstalled', () => { window.SolarisPWAManager.deferredPrompt = null; window.SolarisPWAManager.isInstalled = true; window.SolarisPWAManager.notify(); });
+        window.addEventListener('DOMContentLoaded', () => window.SolarisPWAManager.init('POS Terminal'));
+
+        // Always-On Keep-Awake Engine (POS Terminal Never Sleeps or Locks While Open)
+        window.SolarisKeepAwakeManager = {
+            wakeLock: null, noSleepVideo: null, noSleepCanvas: null, noSleepDrawTimer: null, watchdogTimer: null,
+            isActive: false, started: false, listeners: new Set(),
+            subscribe(fn) { this.listeners.add(fn); try { fn(this.getState()); } catch (e) {} return () => this.listeners.delete(fn); },
+            notify() { const st = this.getState(); this.listeners.forEach(fn => { try { fn(st); } catch (e) {} }); },
+            getState() {
+                const hasNativeLock = !!(this.wakeLock && !this.wakeLock.released);
+                const hasVideoLock = !!(this.noSleepVideo && !this.noSleepVideo.paused);
+                return { isActive: hasNativeLock || hasVideoLock || this.isActive, mode: hasNativeLock ? 'WakeLock' : (hasVideoLock ? 'NoSleep' : 'Standby') };
+            },
+            async requestNativeWakeLock() {
+                if (typeof navigator === 'undefined' || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return false;
+                if (this.wakeLock && !this.wakeLock.released) { this.isActive = true; return true; }
+                try {
+                    const sentinel = await navigator.wakeLock.request('screen');
+                    this.wakeLock = sentinel; this.isActive = true;
+                    sentinel.addEventListener('release', () => {
+                        this.wakeLock = null; this.notify();
+                        if (document.visibilityState === 'visible') setTimeout(() => this.requestNativeWakeLock(), 500);
+                    });
+                    this.notify(); return true;
+                } catch (e) { this.notify(); return false; }
+            },
+            startNoSleepVideoFallback() {
+                try {
+                    if (this.noSleepVideo && !this.noSleepVideo.paused) { this.isActive = true; this.notify(); return true; }
+                    if (!this.noSleepCanvas) {
+                        const c = document.createElement('canvas'); c.width = 2; c.height = 2;
+                        const ctx = c.getContext('2d'); if (ctx) { ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, 2, 2); }
+                        this.noSleepCanvas = c;
+                    }
+                    if (!this.noSleepDrawTimer && this.noSleepCanvas) {
+                        let toggle = false;
+                        this.noSleepDrawTimer = setInterval(() => {
+                            const ctx = this.noSleepCanvas.getContext('2d');
+                            if (ctx) { toggle = !toggle; ctx.fillStyle = toggle ? '#0f172a' : '#111827'; ctx.fillRect(0, 0, 2, 2); }
+                        }, 10000);
+                    }
+                    if (typeof this.noSleepCanvas.captureStream !== 'function') return false;
+                    if (!this.noSleepVideo) {
+                        const v = document.createElement('video');
+                        v.muted = true; v.loop = true; v.playsInline = true;
+                        v.setAttribute('muted', ''); v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+                        v.style.cssText = 'position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-1;';
+                        v.srcObject = this.noSleepCanvas.captureStream(1);
+                        document.body.appendChild(v); this.noSleepVideo = v;
+                    }
+                    const p = this.noSleepVideo.play();
+                    if (p && typeof p.then === 'function') p.then(() => { this.isActive = true; this.notify(); }).catch(() => {});
+                    return true;
+                } catch (e) { return false; }
+            },
+            async engage(fromGesture = false) {
+                const ok = await this.requestNativeWakeLock();
+                if (!ok || fromGesture) this.startNoSleepVideoFallback();
+                this.notify();
+            },
+            start() {
+                if (this.started) { this.engage(false); return; }
+                this.started = true; this.engage(false);
+                const onGesture = () => this.engage(true);
+                const onVis = () => { if (document.visibilityState === 'visible') this.engage(false); };
+                window.addEventListener('pointerdown', onGesture, { passive: true });
+                window.addEventListener('touchstart', onGesture, { passive: true });
+                window.addEventListener('keydown', onGesture, { passive: true });
+                document.addEventListener('visibilitychange', onVis);
+                window.addEventListener('focus', onVis);
+                window.addEventListener('pageshow', onVis);
+                this.watchdogTimer = setInterval(() => {
+                    if (document.visibilityState === 'visible' && !this.getState().isActive) this.engage(false);
+                }, 30000);
+            }
+        };
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+    <!-- Khmer Unicode Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;700&display=swap" rel="stylesheet">
+
+    <!-- Production React 18 & Babel (Light & Fast on iOS/Android) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+    <!-- Firebase Compat SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+    <!-- Minimal Cashier-Only Libraries (QR Code + Deferred Receipt Image Export) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <style>
+        body {
+            background-color: #0f172a;
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
+            overscroll-behavior-y: none;
+            -webkit-tap-highlight-color: transparent;
+            padding-top: env(safe-area-inset-top);
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .loader {
+            border: 3px solid rgba(255, 255, 255, 0.25);
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 22px;
+            height: 22px;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        @keyframes fade-in-up {
+            from { opacity: 0; transform: translateY(12px) scale(0.985); }
+            to { opacity: 1; transform: none; }
+        }
+        .animate-fade-in-up { animation: fade-in-up 0.2s ease-out forwards; }
+        @keyframes boot-bar {
+            0% { transform: translateX(-100%) scaleX(0.35); }
+            50% { transform: translateX(0%) scaleX(0.65); }
+            100% { transform: translateX(120%) scaleX(0.35); }
+        }
+        .boot-progress-bar { animation: boot-bar 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <!-- 0ms Instant Boot Splash -->
+        <div style="min-height:100dvh;background:radial-gradient(circle at 50% 25%,#1e293b 0%,#0f172a 70%);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem;font-family:system-ui,-apple-system,sans-serif;color:#f8fafc;">
+            <div style="width:72px;height:72px;border-radius:20px;background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 55%,#0f172a 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:0 20px 45px rgba(37,99,235,0.32);border:1px solid rgba(96,165,250,0.35);margin-bottom:1.1rem;">
+                <span style="font-size:21px;font-weight:900;color:#fff;line-height:1;">POS</span>
+                <span style="margin-top:4px;padding:2px 7px;border-radius:999px;background:#10b981;color:#052e16;font-size:8px;font-weight:900;">TERMINAL</span>
+            </div>
+            <h1 id="pos-boot-title" style="font-size:1.3rem;font-weight:800;margin:0 0 0.3rem 0;">POS Terminal</h1>
+            <p style="font-size:0.8rem;color:#94a3b8;margin:0 0 1.2rem 0;">Fast Standalone Cashier • Loading local catalog...</p>
+            <div style="width:200px;height:5px;background:rgba(51,65,85,0.7);border-radius:999px;overflow:hidden;">
+                <div class="boot-progress-bar" style="width:100%;height:100%;background:linear-gradient(90deg,#3b82f6,#10b981);border-radius:999px;"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        try {
+            var n = localStorage.getItem('solaris_cached_app_name');
+            if (n) { document.title = n + ' — POS Terminal'; var el = document.getElementById('pos-boot-title'); if (el) el.textContent = n; }
+        } catch (e) {}
+    </script>
+
+    <script type="text/babel">
+    // ========================================================================
+    // 1. FIREBASE & CORE ENGINES (SHARED WITH BACK-OFFICE & CUSTOMER DISPLAY)
+    // ========================================================================
+    const _k1 = "AIzaSyByG5K";
+    const _k2 = "8qZnNNvEOes5m";
+    const _k3 = "SOHfM6WqhuoZQM4";
+    const firebaseConfig = {
+        apiKey: _k1 + _k2 + _k3,
+        authDomain: "pos-inv-141126.firebaseapp.com",
+        projectId: "pos-inv-141126",
+        storageBucket: "pos-inv-141126.firebasestorage.app",
+        messagingSenderId: "255649906447",
+        appId: "1:255649906447:web:4994fab6b2639ed1ce087a",
+        measurementId: "G-L6JEP3RLQW"
+    };
+
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    try { if (typeof firebase.firestore.setLogLevel === 'function') firebase.firestore.setLogLevel('silent'); } catch (e) {}
+
+    db.settings({ experimentalAutoDetectLongPolling: true, merge: true });
+    db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
+
+    // Persist cashier login locally on dedicated counter devices (can Sign Out anytime)
+    auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
+
+    window.SolarisQuotaGuard = {
+        isTripped: false,
+        _retryTimer: null,
+        trip() {
+            if (window.SolarisPayWayVerifier) window.SolarisPayWayVerifier.isQuotaExceeded = true;
+            if (this.isTripped) return;
+            this.isTripped = true;
+            window.SolarisPayWayVerifier?.stopSharedListeners();
+            if (this._retryTimer) clearTimeout(this._retryTimer);
+            this._retryTimer = setTimeout(() => this.resetAndReconnect(), 60000);
+        },
+        resetAndReconnect() {
+            this.isTripped = false;
+            if (window.SolarisPayWayVerifier) window.SolarisPayWayVerifier.isQuotaExceeded = false;
+            if (db && typeof db.enableNetwork === 'function') db.enableNetwork().catch(() => {});
+        }
+    };
+
+    // Shared Local Sales & Cleared Carts Store (Syncs in 0ms with index.html Sale Report)
+    window.SolarisLocalSalesStore = {
+        SALES_KEY: 'solaris_local_sales_ledger_v1',
+        CLEARED_KEY: 'solaris_local_cleared_carts_v1',
+        notify() {
+            try {
+                if (typeof BroadcastChannel !== 'undefined') {
+                    if (!this._bc) this._bc = new BroadcastChannel('solaris_sales_report_bus');
+                    this._bc.postMessage({ type: 'SALES_UPDATED', ts: Date.now() });
+                }
+            } catch (e) {}
+        },
+        getSales() {
+            try { const r = JSON.parse(localStorage.getItem(this.SALES_KEY) || '[]'); return Array.isArray(r) ? r : []; } catch (e) { return []; }
+        },
+        recordSale(saleObj) {
+            if (!saleObj?.id) return;
+            try {
+                const list = this.getSales().filter(s => s && s.id !== saleObj.id);
+                list.unshift({ ...saleObj, timestamp: saleObj.createdAt || new Date().toISOString(), createdAt: saleObj.createdAt || new Date().toISOString() });
+                localStorage.setItem(this.SALES_KEY, JSON.stringify(list.slice(0, 600)));
+                this.notify();
+            } catch (e) {}
+        },
+        markSaleVoid(saleId, voidMeta = {}) {
+            if (!saleId) return;
+            try {
+                const next = this.getSales().map(s => (s && s.id === saleId) ? { ...s, status: 'void', ...voidMeta } : s);
+                localStorage.setItem(this.SALES_KEY, JSON.stringify(next));
+                this.notify();
+            } catch (e) {}
+        },
+        recordClearedCart(cartLogObj) {
+            if (!cartLogObj?.id) return;
+            try {
+                const raw = JSON.parse(localStorage.getItem(this.CLEARED_KEY) || '[]');
+                const list = (Array.isArray(raw) ? raw : []).filter(c => c && c.id !== cartLogObj.id);
+                list.unshift({ ...cartLogObj, timestamp: cartLogObj.createdAt || new Date().toISOString() });
+                localStorage.setItem(this.CLEARED_KEY, JSON.stringify(list.slice(0, 300)));
+                this.notify();
+            } catch (e) {}
+        }
+    };
+
+    window.safeSignOut = async () => {
+        try {
+            localStorage.removeItem('solaris_pos_standalone_profile_v1');
+            window.SolarisPayWayVerifier?.stopSharedListeners();
+            await auth.signOut();
+        } catch (e) {}
+    };
+
+    const { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, memo } = React;
+
+    // --- Utilities ---
+    const khrFormatter = new Intl.NumberFormat('en-US');
+    const usdFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+
+    const safeToDate = (ts) => {
+        if (!ts) return null;
+        if (ts instanceof Date) return isNaN(ts) ? null : ts;
+        if (typeof ts.toDate === 'function') return ts.toDate();
+        if (typeof ts === 'number') { const d = new Date(ts); return isNaN(d) ? null : d; }
+        if (typeof ts === 'string') { const d = new Date(ts); return isNaN(d) ? null : d; }
+        if (typeof ts.seconds === 'number') return new Date(ts.seconds * 1000);
+        if (typeof ts._seconds === 'number') return new Date(ts._seconds * 1000);
+        if (typeof ts === 'object' && (ts._methodName === 'FieldValue.serverTimestamp' || ts._methodName === 'serverTimestamp')) return new Date();
+        return null;
+    };
+
+    const safeFormatDateTime = (ts, fallback = '-') => {
+        const d = safeToDate(ts);
+        if (!d) return fallback;
+        const pad = (n) => String(n).padStart(2, '0');
+        let h = d.getHours();
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        h = h % 12 || 12;
+        return `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${String(d.getFullYear()).slice(-2)} | ${pad(h)}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${ampm}`;
+    };
+    const safeFormatTime = (ts, fallback = 'Just now') => safeFormatDateTime(ts, fallback);
+
+    const getEffectiveShopPrice = (product, shopId) => {
+        const basePrice = Number(product?.price) || 0;
+        if (!shopId || shopId === 'ALL' || shopId === 'All') return basePrice;
+        const custom = Number(product?.priceByShop?.[shopId]);
+        return custom > 0 ? custom : basePrice;
+    };
+
+    const evaluateCustomerLoyaltyStatus = (customer, loyaltyRule) => {
+        if (!customer) return { rawPoints: 0, effectivePoints: 0, isExpired: false, expiresAtDate: null };
+        const rawPoints = Math.max(0, parseInt(customer.points, 10) || 0);
+        if (!loyaltyRule || !loyaltyRule.expirationPeriod || loyaltyRule.expirationPeriod === 'Never' || rawPoints <= 0) {
+            return { rawPoints, effectivePoints: rawPoints, isExpired: false, expiresAtDate: null };
+        }
+        const refDate = safeToDate(customer.lastVisit || customer.updatedAt || customer.createdAt);
+        if (!refDate) return { rawPoints, effectivePoints: rawPoints, isExpired: false, expiresAtDate: null };
+        const expDate = new Date(refDate.getTime());
+        const p = String(loyaltyRule.expirationPeriod).trim();
+        if (p === '1 Week') expDate.setDate(expDate.getDate() + 7);
+        else if (p === '1 Month') expDate.setMonth(expDate.getMonth() + 1);
+        else if (p === '3 Month') expDate.setMonth(expDate.getMonth() + 3);
+        else if (p === '6 Month') expDate.setMonth(expDate.getMonth() + 6);
+        else if (p === '1 Year') expDate.setFullYear(expDate.getFullYear() + 1);
+        const isExpired = Date.now() > expDate.getTime();
+        return { rawPoints, effectivePoints: isExpired ? 0 : rawPoints, isExpired, expiresAtDate: expDate };
+    };
+
+    const useDebounce = (value, delay) => {
+        const [dv, setDv] = useState(value);
+        useEffect(() => { const h = setTimeout(() => setDv(value), delay); return () => clearTimeout(h); }, [value, delay]);
+        return dv;
+    };
+
+    // ========================================================================
+    // 2. KHQR, RENDER BRIDGE, PAYWAY VERIFIER & INVOICE ENGINE
+    // ========================================================================
+    window.SolarisKHQREngine = {
+        _qrCache: new Map(),
+        _allowedChatIdsSet: new Set(),
+        _bypassDbByShopIdMap: new Map(),
+        _bypassDbByChatIdMap: new Map(),
+
+        normalizeChatId(rawId) { return String(rawId || '').trim().replace(/^-100/, '').replace(/^-/, '').trim(); },
+
+        syncAllowedShops(shopsList = []) {
+            const nextSet = new Set();
+            const nextShopBypass = new Map();
+            const nextChatBypass = new Map();
+            (shopsList || []).forEach(shop => {
+                const cfg = shop?.khqrConfig;
+                const bypassDb = cfg?.bypassFirebaseDb !== undefined ? cfg.bypassFirebaseDb !== false : true;
+                if (shop?.id) nextShopBypass.set(String(shop.id), bypassDb);
+                if (cfg && cfg.paywayVerifyEnabled !== false && cfg.paywayChatId) {
+                    String(cfg.paywayChatId).split(/[\s,|;]+/).map(id => this.normalizeChatId(id)).filter(Boolean).forEach(id => {
+                        nextSet.add(id);
+                        nextChatBypass.set(id, bypassDb);
+                    });
+                }
+            });
+            this._allowedChatIdsSet = nextSet;
+            this._bypassDbByShopIdMap = nextShopBypass;
+            this._bypassDbByChatIdMap = nextChatBypass;
+            return nextSet;
+        },
+
+        shouldBypassFirebaseDb(shopId = '', chatId = '') {
+            if (shopId && this._bypassDbByShopIdMap.has(String(shopId))) return this._bypassDbByShopIdMap.get(String(shopId));
+            const nc = this.normalizeChatId(chatId);
+            if (nc && this._bypassDbByChatIdMap.has(nc)) return this._bypassDbByChatIdMap.get(nc);
+            return true;
+        },
+
+        isChatIdAllowed(chatIdStr, explicitTarget = '') {
+            const incoming = this.normalizeChatId(chatIdStr);
+            if (!incoming) return false;
+            if (explicitTarget) {
+                const list = String(explicitTarget).split(/[\s,|;]+/).map(id => this.normalizeChatId(id)).filter(Boolean);
+                if (list.length > 0) return list.includes(incoming);
+            }
+            return this._allowedChatIdsSet.size > 0 && this._allowedChatIdsSet.has(incoming);
+        },
+
+        crc16(str) {
+            let crc = 0xFFFF;
+            for (let i = 0; i < str.length; i++) {
+                crc ^= (str.charCodeAt(i) & 0xFF) << 8;
+                for (let j = 0; j < 8; j++) crc = ((crc & 0x8000) !== 0) ? (((crc << 1) ^ 0x1021) & 0xFFFF) : ((crc << 1) & 0xFFFF);
+            }
+            return crc.toString(16).toUpperCase().padStart(4, '0');
+        },
+
+        parseTLV(payload) {
+            const res = [];
+            if (!payload || typeof payload !== 'string') return res;
+            let i = 0;
+            while (i + 4 <= payload.length) {
+                const tag = payload.slice(i, i + 2);
+                const len = parseInt(payload.slice(i + 2, i + 4), 10);
+                if (isNaN(len) || len < 0 || i + 4 + len > payload.length) break;
+                res.push({ tag, length: len, value: payload.slice(i + 4, i + 4 + len) });
+                i += 4 + len;
+            }
+            return res;
+        },
+
+        formatTLV(tag, value) { const s = String(value ?? ''); return `${tag}${String(s.length).padStart(2, '0')}${s}`; },
+
+        extractMerchantInfoFromEMV(emvPayload) {
+            if (!emvPayload || typeof emvPayload !== 'string' || !emvPayload.startsWith('000201')) return { merchantName: null, merchantCity: null, mid: null };
+            const parsed = this.parseTLV(emvPayload);
+            const t29 = parsed.find(t => t.tag === '30' || t.tag === '29');
+            let mid = null;
+            if (t29?.value) {
+                const subs = this.parseTLV(t29.value);
+                const raw = subs.find(s => s.tag === '02')?.value || subs.find(s => s.tag === '01')?.value;
+                if (raw) { const d = String(raw).replace(/\D/g, ''); mid = d.length >= 9 ? d : String(raw).trim(); }
+            }
+            return {
+                merchantName: parsed.find(t => t.tag === '59')?.value?.trim() || null,
+                merchantCity: parsed.find(t => t.tag === '60')?.value?.trim() || null,
+                mid
+            };
+        },
+
+        generateDynamicKHQR(basePayload, amountValue, invoiceNo = '', currency = 'KHR', expMins = 15, customTs = null) {
+            if (!basePayload || typeof basePayload !== 'string' || !basePayload.startsWith('000201')) return null;
+            const parsed = this.parseTLV(basePayload);
+            if (parsed.length < 4) return null;
+            const isUsd = String(currency || 'KHR').toUpperCase() === 'USD';
+            const curCode = isUsd ? '840' : '116';
+            const rawNum = Number(amountValue) || 0;
+            const amtStr = isUsd ? (rawNum > 0 ? rawNum.toFixed(2) : '') : (Math.round(rawNum) > 0 ? String(Math.round(rawNum)) : '');
+            const hasAmt = rawNum > 0 && amtStr.length > 0;
+            const cleanInv = String(invoiceNo || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 25);
+            const nowMs = customTs?.createdAtMs > 0 ? Math.floor(Number(customTs.createdAtMs)) : Date.now();
+            const expMs = customTs?.expiresAtMs > nowMs ? Math.floor(Number(customTs.expiresAtMs)) : (nowMs + Math.max(2, Number(expMins) || 15) * 60000);
+            const tag99 = this.formatTLV('00', String(nowMs)) + this.formatTLV('01', String(expMs));
+
+            const filtered = parsed.filter(t => t.tag !== '63' && t.tag !== '99');
+            const out = [];
+            let has01 = false, has53 = false, has54 = false, has62 = false;
+            filtered.forEach(item => {
+                if (item.tag === '01') { has01 = true; out.push({ tag: '01', value: hasAmt ? '12' : item.value }); }
+                else if (item.tag === '53') { has53 = true; out.push({ tag: '53', value: curCode }); }
+                else if (item.tag === '54') { has54 = true; if (hasAmt) out.push({ tag: '54', value: amtStr }); }
+                else if (item.tag === '62') {
+                    has62 = true;
+                    if (cleanInv) {
+                        const subs = this.parseTLV(item.value).filter(st => st.tag !== '01');
+                        subs.unshift({ tag: '01', value: cleanInv });
+                        out.push({ tag: '62', value: subs.map(st => this.formatTLV(st.tag, st.value)).join('') });
+                    } else out.push(item);
+                } else out.push(item);
+            });
+            if (!has01) out.splice(1, 0, { tag: '01', value: hasAmt ? '12' : '11' });
+            if (!has53) { const idx = out.findIndex(t => t.tag === '52'); out.splice(idx !== -1 ? idx + 1 : out.length, 0, { tag: '53', value: curCode }); }
+            if (!has54 && hasAmt) { const idx = out.findIndex(t => t.tag === '53'); out.splice(idx !== -1 ? idx + 1 : out.length, 0, { tag: '54', value: amtStr }); }
+            if (!has62 && cleanInv) out.push({ tag: '62', value: this.formatTLV('01', cleanInv) });
+            if (hasAmt) out.push({ tag: '99', value: tag99 });
+            const body = out.map(t => this.formatTLV(t.tag, t.value)).join('') + '6304';
+            return body + this.crc16(body);
+        },
+
+        renderInstantQRDataURL(payloadText, sizePx = 360, margin = 1, ec = 'H') {
+            const clean = String(payloadText || '').trim();
+            if (!clean) return '';
+            const key = `${clean}__${sizePx}__${margin}__${ec}`;
+            if (this._qrCache.has(key)) return this._qrCache.get(key);
+            try {
+                if (typeof window.qrcode === 'function') {
+                    const qr = window.qrcode(0, ec);
+                    qr.addData(clean); qr.make();
+                    const count = qr.getModuleCount();
+                    const total = count + margin * 2;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = sizePx; canvas.height = sizePx;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, sizePx, sizePx);
+                    const scale = sizePx / total;
+                    ctx.fillStyle = '#000000';
+                    for (let r = 0; r < count; r++) {
+                        for (let c = 0; c < count; c++) {
+                            if (qr.isDark(r, c)) {
+                                const x = Math.floor((c + margin) * scale), y = Math.floor((r + margin) * scale);
+                                ctx.fillRect(x, y, Math.ceil((c + margin + 1) * scale) - x, Math.ceil((r + margin + 1) * scale) - y);
+                            }
+                        }
+                    }
+                    const url = canvas.toDataURL('image/png');
+                    if (this._qrCache.size > 120) this._qrCache.delete(this._qrCache.keys().next().value);
+                    this._qrCache.set(key, url);
+                    return url;
+                }
+            } catch (e) {}
+            return '';
+        },
+
+        parseABAPayWayMessage(rawText) {
+            if (!rawText || typeof rawText !== 'string') return { isValid: false };
+            const cleanText = rawText.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+            const amtMatch = cleanText.match(/(?:(៛|\$|KHR|USD)\s*([0-9,]+(?:\.[0-9]{1,2})?))\s*(?:paid by|received from)/i);
+            const trxMatch = cleanText.match(/Trx\.?\s*ID\s*[:#]?\s*([0-9A-Za-z]+)/i);
+            const apvMatch = cleanText.match(/APV\s*[:#]?\s*([0-9A-Za-z]+)/i);
+            if (!amtMatch || (!trxMatch && !apvMatch)) return { isValid: false };
+            const sym = amtMatch[1].toUpperCase();
+            const currency = (sym === '៛' || sym === 'KHR') ? 'KHR' : 'USD';
+            const amount = parseFloat(amtMatch[2].replace(/,/g, ''));
+            const payerMatch = cleanText.match(/(?:paid by|received from)\s+([^(]+?)(?:\s*\(\s*\*\s*([0-9A-Za-z]+)\s*\)|\s+on\s+|\s+via\s+)/i);
+            const viaMatch = cleanText.match(/\bvia\s+(.+?)\s+at\s+/i);
+            const atMatch = cleanText.match(/\bat\s+(.+?)(?:\.\s*Trx|\s+Trx)/i);
+            const trxId = trxMatch ? trxMatch[1].trim() : `APV-${apvMatch[1].trim()}`;
+            const paymentChannel = viaMatch ? viaMatch[1].trim() : 'ABA PAY';
+            const isOutdoor = /ABA\s*KHQR/i.test(paymentChannel);
+            return {
+                isValid: !isNaN(amount) && amount > 0,
+                currency, amount,
+                payerName: payerMatch ? payerMatch[1].trim() : 'ABA Customer',
+                maskedAccount: payerMatch?.[2] ? `*${payerMatch[2].trim()}` : '*ABA',
+                paymentChannel,
+                paymentCategory: isOutdoor ? 'OUTDOOR_KHQR' : 'INDOOR_ABA',
+                sourceBank: isOutdoor ? paymentChannel : 'ABA Bank',
+                merchantName: atMatch ? atMatch[1].replace(/\.$/, '').trim() : '',
+                trxId,
+                apv: apvMatch ? apvMatch[1].trim().replace(/\.$/, '') : trxId.slice(-6),
+                rawText: cleanText
+            };
+        },
+
+        broadcastDetectedAbaPayment(parsed, chatId = '', sourceLabel = 'Render Live SSE', messageDateMs = null) {
+            if (!parsed?.isValid || !parsed?.trxId) return;
+            const resolvedChatId = String(chatId || parsed.chatId || '').trim();
+            if (!this.isChatIdAllowed(resolvedChatId)) return;
+            const trxId = String(parsed.trxId).trim();
+            if (window.SolarisPayWayVerifier.inMemoryAbaPayments.has(trxId)) {
+                const ex = window.SolarisPayWayVerifier.inMemoryAbaPayments.get(trxId);
+                if (ex && !ex.claimedByOrderId) window.SolarisPayWayVerifier.notifySubscribers(ex);
+                return;
+            }
+            const recMs = Number(messageDateMs) > 0 ? Number(messageDateMs) : Date.now();
+            const entry = {
+                updateId: trxId, messageId: trxId, chatId: resolvedChatId, chatTitle: sourceLabel, date: recMs,
+                parsedAba: { ...parsed, chatId: resolvedChatId, receivedAt: recMs, paidTimestamp: recMs }
+            };
+            window.SolarisPayWayVerifier.inMemoryAbaPayments.set(trxId, entry);
+            window.SolarisPayWayVerifier.notifySubscribers(entry);
+        }
+    };
+
+    window.SolarisRenderBridge = {
+        baseUrl: (() => {
+            const def = 'https://pos-bh4o.onrender.com';
+            try {
+                const saved = String(localStorage.getItem('solaris_render_listener_url') || '').trim().replace(/\/+$/, '');
+                return (saved && /^https?:\/\//i.test(saved)) ? saved : def;
+            } catch (e) { return def; }
+        })(),
+        eventSource: null,
+        isConnected: false,
+        _pollInFlight: false,
+
+        setBaseUrl(url, reconnect = true) {
+            const clean = String(url || 'https://pos-bh4o.onrender.com').trim().replace(/\/+$/, '');
+            if (!clean) return;
+            const changed = clean !== this.baseUrl;
+            this.baseUrl = clean;
+            try { localStorage.setItem('solaris_render_listener_url', clean); } catch (e) {}
+            if (changed && this.eventSource) { try { this.eventSource.close(); } catch (e) {} this.eventSource = null; this.isConnected = false; }
+            if (reconnect && (changed || !this.eventSource)) this.ensureConnected();
+        },
+
+        ingestRenderPayload(rawItem, sourceTag = 'Render Live SSE') {
+            if (!rawItem) return false;
+            const c = rawItem.parsedAba || rawItem.payment || rawItem.data || rawItem;
+            let parsed = null;
+            if (c?.trxId && c?.amount) {
+                parsed = {
+                    isValid: true, currency: c.currency || 'KHR', amount: Number(c.amount),
+                    payerName: c.payerName || 'ABA Customer', maskedAccount: c.maskedAccount || '*ABA',
+                    paymentChannel: c.paymentChannel || 'ABA PAY',
+                    paymentCategory: /ABA\s*KHQR/i.test(c.paymentChannel || '') ? 'OUTDOOR_KHQR' : 'INDOOR_ABA',
+                    sourceBank: c.sourceBank || 'ABA Bank', merchantName: c.merchantName || '',
+                    trxId: String(c.trxId).trim(), apv: String(c.apv || '').trim(),
+                    rawText: c.rawText || '', chatId: String(c.chatId || rawItem.chatId || '').trim()
+                };
+            } else if (typeof rawItem === 'string' || rawItem.rawText || rawItem.text) {
+                parsed = window.SolarisKHQREngine.parseABAPayWayMessage(typeof rawItem === 'string' ? rawItem : (rawItem.rawText || rawItem.text));
+            }
+            if (parsed?.isValid && parsed?.trxId) {
+                const cid = String(rawItem.chatId || parsed.chatId || '').trim();
+                if (!window.SolarisKHQREngine.isChatIdAllowed(cid)) return false;
+                window.SolarisKHQREngine.broadcastDetectedAbaPayment(parsed, cid, sourceTag, Number(rawItem.receivedAt || rawItem.date) || Date.now());
+                return true;
+            }
+            return false;
+        },
+
+        ensureConnected() {
+            if (!this.baseUrl || typeof EventSource === 'undefined' || this.eventSource) return;
+            try {
+                const es = new EventSource(`${this.baseUrl}/events`);
+                this.eventSource = es;
+                es.onopen = () => { this.isConnected = true; this.pollRecentFromRender(false).catch(() => {}); };
+                es.onmessage = (ev) => {
+                    if (!ev.data) return;
+                    try {
+                        const d = JSON.parse(ev.data);
+                        const arr = Array.isArray(d) ? d : (d.payments || d.recentPayments || null);
+                        if (Array.isArray(arr)) arr.forEach(item => this.ingestRenderPayload(item));
+                        else if (d.type !== 'CONNECTED') this.ingestRenderPayload(d);
+                    } catch (e) {}
+                };
+                es.onerror = () => {
+                    this.isConnected = false;
+                    try { es.close(); } catch (e) {}
+                    this.eventSource = null;
+                    setTimeout(() => this.ensureConnected(), 8000);
+                };
+            } catch (e) {}
+        },
+
+        async pollRecentFromRender(forceWake = false) {
+            if (!this.baseUrl || this._pollInFlight) return { count: 0 };
+            this._pollInFlight = true;
+            try {
+                const ctrl = new AbortController();
+                const tid = setTimeout(() => ctrl.abort(), 4000);
+                const r = await fetch(`${this.baseUrl}${forceWake ? '/recent?scan=1&limit=200' : '/recent?limit=150'}`, { signal: ctrl.signal, cache: 'no-store', mode: 'cors' });
+                clearTimeout(tid);
+                if (r.ok) {
+                    this.isConnected = true;
+                    const d = await r.json();
+                    const arr = d.payments || d.recentPayments || (Array.isArray(d) ? d : []);
+                    let count = 0;
+                    arr.forEach(item => { if (this.ingestRenderPayload(item, 'Render (/recent)')) count++; });
+                    return { count };
+                }
+            } catch (e) {} finally { this._pollInFlight = false; }
+            return { count: 0 };
+        }
+    };
+
+    window.SolarisPayWayVerifier = {
+        processedTrxIdsMemory: new Set(),
+        inMemoryAbaPayments: new Map(),
+        subscribers: new Set(),
+        isQuotaExceeded: false,
+        _displayWindows: new Set(),
+        _windowMsgBound: false,
+        _khqrDisplayBus: null,
+        _lastSessionPayloadByShop: {},
+        _lastCloudDisplayStatusByShop: {},
+        _lastCloudPayloadHashByShop: {},
+
+        subscribe(cb) {
+            if (typeof cb !== 'function') return () => {};
+            this.subscribers.add(cb);
+            window.SolarisRenderBridge.ensureConnected();
+            return () => this.subscribers.delete(cb);
+        },
+        notifySubscribers(entry) { this.subscribers.forEach(fn => { try { fn(entry); } catch (e) {} }); },
+        stopSharedListeners() {},
+
+        _ensureDisplayWindowListener() {
+            if (this._windowMsgBound) return;
+            this._windowMsgBound = true;
+            window.addEventListener('message', (ev) => {
+                const msg = ev?.data;
+                if (!msg || msg.type !== 'REQUEST_POS_SYNC' || !ev.source) return;
+                try {
+                    this._displayWindows.add(ev.source);
+                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
+                    if (Array.isArray(cachedShops) && cachedShops.length > 0) ev.source.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    const targetShopId = msg.shopId;
+                    if (targetShopId && this._lastSessionPayloadByShop[targetShopId]) {
+                        ev.source.postMessage({ type: 'POS_DISPLAY_SESSION', shopId: targetShopId, payload: { ...this._lastSessionPayloadByShop[targetShopId], sentAt: Date.now() } }, '*');
+                    }
+                } catch (e) {}
+            });
+        },
+
+        registerCustomerDisplayWindow(win, shopId = '') {
+            this._ensureDisplayWindowListener();
+            if (!win || win.closed) return;
+            this._displayWindows.add(win);
+            const push = () => {
+                if (!win || win.closed) { this._displayWindows.delete(win); return; }
+                try {
+                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
+                    if (cachedShops.length) win.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    if (shopId && this._lastSessionPayloadByShop[shopId]) {
+                        win.postMessage({ type: 'POS_DISPLAY_SESSION', shopId, payload: { ...this._lastSessionPayloadByShop[shopId], sentAt: Date.now() } }, '*');
+                    }
+                } catch (e) {}
+            };
+            push(); setTimeout(push, 350); setTimeout(push, 900);
+        },
+
+        broadcastCustomerDisplaySession(shopId, sessionPayload = null) {
+            if (!shopId || shopId === 'All') return;
+            this._ensureDisplayWindowListener();
+            const nowTs = Date.now();
+            const fullPayload = !sessionPayload
+                ? { status: 'IDLE', shopId, updatedAt: nowTs, sentAt: nowTs }
+                : { ...sessionPayload, shopId, updatedAt: nowTs, sentAt: nowTs };
+            this._lastSessionPayloadByShop[shopId] = fullPayload;
+
+            // 1. 0ms Direct postMessage
+            for (const win of Array.from(this._displayWindows)) {
+                if (!win || win.closed) { this._displayWindows.delete(win); continue; }
+                try { win.postMessage({ type: 'POS_DISPLAY_SESSION', shopId, payload: fullPayload }, '*'); } catch (e) {}
+            }
+            // 2. 0ms Same-Origin BroadcastChannel
+            try {
+                if (typeof BroadcastChannel !== 'undefined') {
+                    if (!this._khqrDisplayBus) {
+                        this._khqrDisplayBus = new BroadcastChannel('solaris_khqr_display_bus');
+                        this._khqrDisplayBus.onmessage = (ev) => {
+                            if (ev?.data?.type === 'REQUEST_POS_SYNC') {
+                                const sid = ev.data.shopId;
+                                if (sid && this._lastSessionPayloadByShop[sid]) {
+                                    this._khqrDisplayBus.postMessage({ type: 'POS_DISPLAY_SESSION', shopId: sid, payload: { ...this._lastSessionPayloadByShop[sid], sentAt: Date.now() } });
+                                }
+                            }
+                        };
+                    }
+                    this._khqrDisplayBus.postMessage({ type: 'POS_DISPLAY_SESSION', shopId, payload: fullPayload });
+                }
+            } catch (e) {}
+            // 3. Deferred localStorage write
+            const persist = () => { try { localStorage.setItem(`solaris_khqr_display_session_${shopId}`, JSON.stringify(fullPayload)); } catch (e) {} };
+            if (typeof queueMicrotask === 'function') queueMicrotask(persist); else setTimeout(persist, 0);
+
+            // 4. Lightweight Cross-Device Firestore sync
+            if (this.isQuotaExceeded) return;
+            const status = fullPayload.status || 'IDLE';
+            const prevStatus = this._lastCloudDisplayStatusByShop[shopId];
+            const cloudPayload = { ...fullPayload };
+            delete cloudPayload.sentAt;
+            if (typeof cloudPayload.staticQrImage === 'string' && cloudPayload.staticQrImage.length > 2048) delete cloudPayload.staticQrImage;
+            const fp = { ...cloudPayload }; delete fp.updatedAt;
+            const hash = JSON.stringify(fp);
+            if (this._lastCloudPayloadHashByShop[shopId] === hash) return;
+            if (status === 'IDLE' && (!prevStatus || prevStatus === 'IDLE')) return;
+            this._lastCloudDisplayStatusByShop[shopId] = status;
+            this._lastCloudPayloadHashByShop[shopId] = hash;
+            db.collection('system_settings').doc(`khqr_display_${shopId}`).set(cloudPayload, { merge: true }).catch(() => {});
+        },
+
+        doesMessageMatchOrder(parsedAba, order, shop) {
+            if (!parsedAba?.isValid || !order) return false;
+            const shopChat = window.SolarisKHQREngine.normalizeChatId(shop?.khqrConfig?.paywayChatId);
+            const msgChat = window.SolarisKHQREngine.normalizeChatId(parsedAba.chatId);
+            if (shopChat && msgChat && !shopChat.includes(',') && shopChat !== msgChat) return false;
+            const now = Date.now();
+            const maxAgeMs = Math.max(1, Number(shop?.khqrConfig?.autoVerifyWindowMinutes) || 5) * 60000;
+            const effMs = Number(parsedAba.receivedAt || parsedAba.paidTimestamp || 0);
+            if (effMs > 0 && (now - effMs) > maxAgeMs) return false;
+            const qrInit = Number(order.khqrInitiatedAt || 0);
+            if (qrInit > 0 && effMs > 0 && effMs < (qrInit - 95000)) return false;
+
+            const expectedKhr = Math.round(Number(order.khqrExpectedKhr || order.totalAmount || 0));
+            const rate = Math.max(100, Number(shop?.khqrConfig?.exchangeRate) || 4000);
+            const expectedUsd = Number(order.khqrExpectedUsd || (expectedKhr / rate));
+            if (parsedAba.currency === 'KHR') return Math.round(Number(parsedAba.amount)) === expectedKhr;
+            if (parsedAba.currency === 'USD') return Math.abs(Number(parsedAba.amount) - expectedUsd) <= 0.03 || Math.abs(Math.round(Number(parsedAba.amount) * rate) - expectedKhr) <= 100;
+            return false;
+        },
+
+        claimAbaPaymentForSale(trxId, saleId, invoiceNo = '') {
+            if (!trxId) return;
+            const clean = String(trxId).trim();
+            this.processedTrxIdsMemory.add(clean);
+            const mem = this.inMemoryAbaPayments.get(clean);
+            if (mem) { mem.claimedByOrderId = String(saleId); mem.claimedByInvoiceNo = String(invoiceNo); }
+            if (window.SolarisRenderBridge.baseUrl) {
+                fetch(`${window.SolarisRenderBridge.baseUrl}/claim?trxId=${encodeURIComponent(clean)}&orderId=${encodeURIComponent(saleId)}&invoiceNo=${encodeURIComponent(invoiceNo)}`, { mode: 'cors', cache: 'no-store' }).catch(() => {});
+            }
+        }
+    };
+
+    window.SolarisInvoiceEngine = {
+        _unsubs: new Map(),
+        _seqCache: new Map(),
+        getShopPrefix(shop) {
+            const clean = String(shop?.name || shop?.mappedShop || 'POS').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+            return clean.length >= 3 ? clean.slice(-3) : clean.padStart(3, 'X');
+        },
+        formatInvoiceNumber(shop, seq) { return `${this.getShopPrefix(shop)}-${String(Math.max(1, parseInt(seq, 10) || 1)).padStart(9, '0')}`; },
+        getLocalSeq(shopId) {
+            const k = String(shopId || 'default');
+            if (this._seqCache.has(k)) return this._seqCache.get(k);
+            const v = parseInt(localStorage.getItem(`solaris_inv_seq_${k}`) || '0', 10) || 0;
+            this._seqCache.set(k, v); return v;
+        },
+        setLocalSeq(shopId, seq) {
+            const k = String(shopId || 'default');
+            const next = Math.max(this.getLocalSeq(k), parseInt(seq, 10) || 0);
+            this._seqCache.set(k, next);
+            try { localStorage.setItem(`solaris_inv_seq_${k}`, String(next)); } catch (e) {}
+        },
+        subscribeShopCounter(shopId) {
+            if (!shopId || shopId === 'All') return () => {};
+            const k = String(shopId);
+            if (this._unsubs.has(k)) return this._unsubs.get(k);
+            const unsub = db.collection('invoice_counters').doc(k).onSnapshot(doc => {
+                if (doc.exists && Number(doc.data()?.lastSeq) > 0) this.setLocalSeq(k, doc.data().lastSeq);
+            }, () => {});
+            const cleanup = () => { unsub(); this._unsubs.delete(k); };
+            this._unsubs.set(k, cleanup);
+            return cleanup;
+        },
+        peekNextInvoiceNumber(shop) { return this.formatInvoiceNumber(shop, this.getLocalSeq(shop?.id) + 1); },
+        allocateInvoiceNumber(shop) {
+            const sid = shop?.id || 'default';
+            const nextSeq = this.getLocalSeq(sid) + 1;
+            this.setLocalSeq(sid, nextSeq);
+            const inv = this.formatInvoiceNumber(shop, nextSeq);
+            if (shop?.id) {
+                db.collection('invoice_counters').doc(String(shop.id)).set({
+                    shopId: String(shop.id), shopName: shop.name || '', prefix: this.getShopPrefix(shop),
+                    lastSeq: firebase.firestore.FieldValue.increment(1), lastInvoiceNo: inv,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                }, { merge: true }).catch(() => {});
+            }
+            return inv;
+        }
+    };
+
+    // ========================================================================
+    // 3. SHARED INDEXEDDB CATALOG VAULT (0ms STARTUP — 0 FIREBASE READS)
+    // ========================================================================
+    window.SolarisCatalogDB = {
+        DB_NAME: 'SolarisCatalogVault_v2',
+        DB_VERSION: 1,
+        _dbPromise: null,
+        open() {
+            if (this._dbPromise) return this._dbPromise;
+            this._dbPromise = new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined') return reject(new Error('No IndexedDB'));
+                const req = indexedDB.open(this.DB_NAME, this.DB_VERSION);
+                req.onupgradeneeded = (e) => {
+                    const idb = e.target.result;
+                    ['products', 'vendors', 'categories', 'meta'].forEach(s => { if (!idb.objectStoreNames.contains(s)) idb.createObjectStore(s, { keyPath: 'id' }); });
+                };
+                req.onsuccess = (e) => resolve(e.target.result);
+                req.onerror = (e) => { this._dbPromise = null; reject(e.target.error); };
+            });
+            return this._dbPromise;
+        },
+        async getAll(storeName) {
+            try {
+                const idb = await this.open();
+                return await new Promise((res, rej) => {
+                    const req = idb.transaction(storeName, 'readonly').objectStore(storeName).getAll();
+                    req.onsuccess = () => res(Array.isArray(req.result) ? req.result : []);
+                    req.onerror = () => rej(req.error);
+                });
+            } catch (e) { return []; }
+        },
+        async putBatch(storeName, items = [], replaceAll = false) {
+            try {
+                const idb = await this.open();
+                await new Promise((res, rej) => {
+                    const tx = idb.transaction(storeName, 'readwrite');
+                    const store = tx.objectStore(storeName);
+                    if (replaceAll) store.clear();
+                    items.forEach(it => { if (it?.id) store.put(it); });
+                    tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+                });
+            } catch (e) {}
+        },
+        async getMeta(key) {
+            try {
+                const idb = await this.open();
+                return await new Promise(res => {
+                    const req = idb.transaction('meta', 'readonly').objectStore('meta').get(key);
+                    req.onsuccess = () => res(req.result ? req.result.value : null);
+                    req.onerror = () => res(null);
+                });
+            } catch (e) { return null; }
+        },
+        async setMeta(key, value) {
+            try {
+                const idb = await this.open();
+                await new Promise(res => {
+                    const tx = idb.transaction('meta', 'readwrite');
+                    tx.objectStore('meta').put({ id: key, value, updatedAt: Date.now() });
+                    tx.oncomplete = () => res(true); tx.onerror = () => res(false);
+                });
+            } catch (e) {}
+        }
+    };
+
+    window.SolarisSmartProductEngine = {
+        productsMap: new Map(),
+        listeners: new Set(),
+        isInitialized: false,
+        unsubDelta: null,
+        subscribeProducts(fn) {
+            this.listeners.add(fn);
+            if (this.productsMap.size > 0) try { fn(Array.from(this.productsMap.values())); } catch (e) {}
+            return () => this.listeners.delete(fn);
+        },
+        notifyProducts() {
+            const arr = Array.from(this.productsMap.values());
+            this.listeners.forEach(fn => { try { fn(arr); } catch (e) {} });
+        },
+        applyLocalStockDelta(productId, shopId, qtyDelta) {
+            const ex = this.productsMap.get(productId);
+            if (!ex || !shopId) return;
+            const nextStock = { ...(ex.stockByShop || {}), [shopId]: (Number(ex.stockByShop?.[shopId]) || 0) + (Number(qtyDelta) || 0) };
+            const merged = { ...ex, stockByShop: nextStock, updatedAt: new Date().toISOString() };
+            this.productsMap.set(productId, merged);
+            window.SolarisCatalogDB.putBatch('products', [merged], false);
+            this.notifyProducts();
+        },
+        async init() {
+            if (this.isInitialized) return;
+            this.isInitialized = true;
+            const idbProducts = await window.SolarisCatalogDB.getAll('products');
+            const lastSyncMs = Number(await window.SolarisCatalogDB.getMeta('products_last_sync_ms')) || 0;
+            if (idbProducts.length > 0) {
+                idbProducts.forEach(p => { if (p?.id) this.productsMap.set(p.id, p); });
+                this.notifyProducts();
+                this.startDeltaListener(lastSyncMs || (Date.now() - 300000));
+            } else {
+                await this.runFullCatalogSync();
+            }
+        },
+        startDeltaListener(sinceMs) {
+            if (this.unsubDelta) try { this.unsubDelta(); } catch (e) {}
+            const safeDate = new Date(Math.max(0, Number(sinceMs) - 120000));
+            this.unsubDelta = db.collection('products').where('updatedAt', '>', safeDate).onSnapshot(snap => {
+                const changed = [];
+                snap.docChanges().forEach(ch => {
+                    if (ch.type === 'removed') { this.productsMap.delete(ch.doc.id); }
+                    else { const d = { id: ch.doc.id, ...ch.doc.data() }; this.productsMap.set(ch.doc.id, d); changed.push(d); }
+                });
+                if (changed.length > 0) {
+                    window.SolarisCatalogDB.putBatch('products', changed, false);
+                    window.SolarisCatalogDB.setMeta('products_last_sync_ms', Date.now());
+                    this.notifyProducts();
+                }
+            }, () => {});
+        },
+        async runFullCatalogSync() {
+            try {
+                const snap = await db.collection('products').get();
+                const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                if (all.length > 0) {
+                    this.productsMap.clear();
+                    all.forEach(p => this.productsMap.set(p.id, p));
+                    await window.SolarisCatalogDB.putBatch('products', all, true);
+                    const now = Date.now();
+                    await window.SolarisCatalogDB.setMeta('products_last_sync_ms', now);
+                    this.notifyProducts();
+                    this.startDeltaListener(now);
+                }
+                return { ok: true, count: all.length };
+            } catch (e) { return { ok: false, count: this.productsMap.size }; }
+        }
+    };
+
+    // ========================================================================
+    // 4. LIGHTWEIGHT POS-ONLY DATA CONTEXT
+    // ========================================================================
+    const useLightCollection = (name) => {
+        const key = `solaris_col_cache_${name}_[]`;
+        const [data, setData] = useState(() => {
+            try { const c = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(c) ? c : []; } catch (e) { return []; }
+        });
+        useEffect(() => {
+            const unsub = db.collection(name).onSnapshot(snap => {
+                const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                setData(list);
+                if (list.length > 0 && list.length <= 500) { try { localStorage.setItem(key, JSON.stringify(list)); } catch (e) {} }
+            }, () => {});
+            return () => unsub();
+        }, [name, key]);
+        return data;
+    };
+
+    const DataContext = createContext(null);
+    const DataProvider = ({ children }) => {
+        const [products, setProducts] = useState([]);
+        const [systemConfig, setSystemConfig] = useState(() => ({ appName: localStorage.getItem('solaris_cached_app_name') || 'POS Terminal' }));
+        const [currentDeviceId, setCurrentDeviceId] = useState(() => localStorage.getItem('pos_deviceId') || '');
+
+        const shops = useLightCollection('shops');
+        const devices = useLightCollection('devices');
+        const customers = useLightCollection('customers');
+        const loyaltyRules = useLightCollection('loyalty_programs');
+
+        const setLocalDevice = (id) => { localStorage.setItem('pos_deviceId', id); setCurrentDeviceId(id); };
+
+        useEffect(() => {
+            const unsub = window.SolarisSmartProductEngine.subscribeProducts(setProducts);
+            window.SolarisSmartProductEngine.init();
+            return unsub;
+        }, []);
+
+        useEffect(() => {
+            const unsub = db.collection('system').doc('config').onSnapshot(doc => {
+                if (doc.exists) {
+                    const d = doc.data() || {};
+                    setSystemConfig(prev => ({ ...prev, ...d }));
+                    if (d.appName) {
+                        document.title = `${d.appName} — POS Terminal`;
+                        try { localStorage.setItem('solaris_cached_app_name', d.appName); } catch (e) {}
+                    }
+                    if (d.renderListenerUrl && window.SolarisRenderBridge) {
+                        window.SolarisRenderBridge.setBaseUrl(d.renderListenerUrl, !!window.SolarisRenderBridge.eventSource);
+                    }
+                }
+            }, () => {});
+            return () => unsub();
+        }, []);
+
+        useEffect(() => {
+            if (!shops.length) return;
+            window.SolarisKHQREngine.syncAllowedShops(shops);
+            try {
+                const light = shops.map(s => ({ id: s.id, name: s.name, brandingName: s.brandingName || '', location: s.location || '', khqrConfig: s.khqrConfig || null }));
+                localStorage.setItem('solaris_cached_shops_list', JSON.stringify(light));
+            } catch (e) {}
+        }, [shops]);
+
+        const forceFullProductSync = useCallback(() => window.SolarisSmartProductEngine.runFullCatalogSync(), []);
+
+        return (
+            <DataContext.Provider value={{ products, shops, devices, customers, loyaltyRules, systemConfig, currentDeviceId, setLocalDevice, forceFullProductSync }}>
+                {children}
+            </DataContext.Provider>
+        );
+    };
+    const useData = () => useContext(DataContext);
+
+    // ========================================================================
+    // 5. REUSABLE MODALS & UI PRIMITIVES
+    // ========================================================================
+    const Modal = ({ children, show, onClose, maxWidth = 'max-w-4xl' }) => {
+        useEffect(() => {
+            if (!show) return;
+            const onKey = (e) => { if (e.key === 'Escape' && onClose) onClose(); };
+            window.addEventListener('keydown', onKey);
+            return () => window.removeEventListener('keydown', onKey);
+        }, [show, onClose]);
+        if (!show) return null;
+        const el = (
+            <div onClick={(e) => { if (e.target === e.currentTarget && onClose) onClose(); }} className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-950/80 backdrop-blur-sm">
+                <div onClick={e => e.stopPropagation()} className={`bg-slate-800 border-slate-700 border-t sm:border rounded-t-2xl sm:rounded-2xl shadow-2xl w-full ${maxWidth} max-h-[92dvh] sm:max-h-[88dvh] flex flex-col overflow-hidden text-slate-200 animate-fade-in-up`}>
+                    <div className="sm:hidden w-full flex justify-center pt-2 pb-1 shrink-0"><div className="w-12 h-1.5 bg-slate-600 rounded-full"></div></div>
+                    {children}
+                </div>
+            </div>
+        );
+        return ReactDOM.createPortal ? ReactDOM.createPortal(el, document.body) : el;
+    };
+    const ModalHeader = memo(({ title, onClose }) => (
+        <div className="px-4 sm:px-6 py-3.5 border-b border-slate-700 flex justify-between items-center shrink-0 bg-slate-800/95">
+            <h3 className="text-base sm:text-lg font-bold text-slate-100 truncate pr-4">{title}</h3>
+            {onClose && <button type="button" onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-700 text-slate-300 hover:text-white"><i className="fas fa-times"></i></button>}
+        </div>
+    ));
+    const ModalBody = memo(({ children }) => <div className="p-4 sm:p-6 flex-1 overflow-y-auto min-h-0 overscroll-contain">{children}</div>);
+    const ModalFooter = memo(({ children }) => <div className="px-4 sm:px-6 py-3.5 bg-slate-900/90 border-t border-slate-700 flex flex-col-reverse sm:flex-row justify-end gap-2.5 shrink-0">{children}</div>);
+
+    const MessageModal = ({ title, message, isError, onClose, show }) => (
+        <Modal show={show} onClose={onClose} maxWidth="max-w-md">
+            <ModalHeader title={title} onClose={onClose} />
+            <ModalBody>
+                <div className="flex items-center gap-4">
+                    <i className={`fas ${isError ? 'fa-exclamation-circle text-red-500' : 'fa-info-circle text-blue-500'} text-3xl shrink-0`}></i>
+                    <p className="text-slate-300 text-sm">{message}</p>
+                </div>
+            </ModalBody>
+            <ModalFooter><button type="button" onClick={onClose} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-6 rounded-xl w-full sm:w-auto">OK</button></ModalFooter>
+        </Modal>
+    );
+
+    const ConfirmationModal = ({ title, message, onConfirm, onCancel, show }) => (
+        <Modal show={show} onClose={onCancel} maxWidth="max-w-md">
+            <ModalHeader title={title} onClose={onCancel} />
+            <ModalBody>
+                <div className="flex items-start gap-4">
+                    <i className="fas fa-question-circle text-amber-400 text-3xl shrink-0 mt-0.5"></i>
+                    <p className="text-slate-300 text-sm">{message}</p>
+                </div>
+            </ModalBody>
+            <ModalFooter>
+                <button type="button" onClick={onCancel} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-5 rounded-xl w-full sm:w-auto">Cancel</button>
+                <button type="button" onClick={onConfirm} className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-5 rounded-xl w-full sm:w-auto">Confirm</button>
+            </ModalFooter>
+        </Modal>
+    );
+
+    const InstallAppModal = ({ show, onClose, appName = 'POS Terminal' }) => {
+        const [pwa, setPwa] = useState(() => window.SolarisPWAManager.getState());
+        useEffect(() => window.SolarisPWAManager.subscribe(setPwa), []);
+        if (!show) return null;
+        return (
+            <Modal show={show} onClose={onClose} maxWidth="max-w-md">
+                <ModalHeader title="Install POS Terminal App" onClose={onClose} />
+                <ModalBody>
+                    <div className="space-y-4">
+                        <div className="flex items-center gap-3.5 bg-slate-900 p-4 rounded-2xl border border-slate-700">
+                            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-slate-900 flex flex-col items-center justify-center border border-blue-400/40 shrink-0">
+                                <span className="text-white font-black text-base leading-none">POS</span>
+                                <span className="mt-1 px-1.5 py-0.5 text-[7px] font-black bg-emerald-400 text-slate-950 rounded-full">APP</span>
+                            </div>
+                            <div>
+                                <h4 className="font-black text-white">{appName}</h4>
+                                <p className="text-xs text-slate-400 mt-0.5">Fast standalone iPad / Android Home Screen app.</p>
+                            </div>
+                        </div>
+                        {pwa.canInstallPrompt && (
+                            <button type="button" onClick={async () => {
+                                window.SolarisPWAManager.deferredPrompt.prompt();
+                                await window.SolarisPWAManager.deferredPrompt.userChoice;
+                                window.SolarisPWAManager.deferredPrompt = null;
+                                window.SolarisPWAManager.notify();
+                                onClose();
+                            }} className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm flex items-center justify-center gap-2">
+                                <i className="fas fa-download"></i> Install Now
+                            </button>
+                        )}
+                        <div className="text-xs text-slate-300 space-y-2 bg-slate-900/70 p-4 rounded-xl border border-slate-700">
+                            <p><i className="fab fa-apple text-blue-400 mr-2"></i><b>iOS / iPad:</b> Tap <b>Share</b> &rarr; <b>Add to Home Screen</b>.</p>
+                            <p><i className="fab fa-android text-emerald-400 mr-2"></i><b>Android:</b> Menu <b>⋮</b> &rarr; <b>Install app</b>.</p>
+                        </div>
+                        <button type="button" onClick={() => { window.SolarisPWAManager.enterKioskFullscreen(); onClose(); }} className="w-full py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-bold text-xs border border-slate-600">
+                            <i className="fas fa-expand mr-1.5"></i> Enter Full-Screen Kiosk Mode
+                        </button>
+                    </div>
+                </ModalBody>
+            </Modal>
+        );
+    };
+
+    // ========================================================================
+    // 6. STANDALONE LOGIN & COMPACT POS HEADER
+    // ========================================================================
+    const LoginPage = () => {
+        const [email, setEmail] = useState('');
+        const [password, setPassword] = useState('');
+        const [showPw, setShowPw] = useState(false);
+        const [error, setError] = useState('');
+        const [loading, setLoading] = useState(false);
+        const appName = localStorage.getItem('solaris_cached_app_name') || 'POS Terminal';
+
+        const handleLogin = async (e) => {
+            e.preventDefault();
+            if (!email || !password) return;
+            setLoading(true); setError('');
+            if (window.innerWidth >= 768) window.SolarisPWAManager.enterKioskFullscreen();
+            try {
+                await auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+                await auth.signInWithEmailAndPassword(email.trim(), password);
+            } catch (err) {
+                setError('Invalid email or password. Please check your POS credentials.');
+                setLoading(false);
+            }
+        };
+
+        return (
+            <div className="min-h-screen bg-[#0a0f1c] flex items-center justify-center p-4">
+                <div className="w-full max-w-md bg-slate-900/90 rounded-[2rem] shadow-2xl p-7 sm:p-9 border border-slate-700/60 space-y-6 animate-fade-in-up">
+                    <div className="text-center">
+                        <div className="w-16 h-16 mx-auto bg-gradient-to-br from-blue-500 to-emerald-600 rounded-2xl flex items-center justify-center shadow-lg mb-4">
+                            <i className="fas fa-cash-register text-3xl text-white"></i>
+                        </div>
+                        <h1 className="text-2xl font-black text-white">{appName}</h1>
+                        <p className="text-xs text-slate-400 mt-1">Standalone Cashier Terminal • Sign In</p>
+                    </div>
+                    <form onSubmit={handleLogin} className="space-y-4">
+                        {error && <div className="bg-red-500/15 border border-red-500/40 rounded-xl p-3 text-red-300 text-xs font-bold">{error}</div>}
+                        <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="Cashier / Staff Email" className="w-full bg-slate-950 text-white px-4 py-3 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-sm" />
+                        <div className="relative">
+                            <input type={showPw ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" className="w-full bg-slate-950 text-white pl-4 pr-11 py-3 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-sm" />
+                            <button type="button" onClick={() => setShowPw(p => !p)} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"><i className={`fas ${showPw ? 'fa-eye-slash' : 'fa-eye'}`}></i></button>
+                        </div>
+                        <button type="submit" disabled={loading} className="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 text-white font-black text-sm shadow-lg flex items-center justify-center gap-2">
+                            {loading ? <div className="loader w-5 h-5"></div> : <><i className="fas fa-sign-in-alt"></i><span>Sign In to POS</span></>}
+                        </button>
+                    </form>
+                    <div className="text-center pt-3 border-t border-slate-800">
+                        <a href="./index.html" className="text-xs font-bold text-slate-400 hover:text-blue-400 transition">
+                            <i className="fas fa-arrow-left mr-1"></i> Open Back-Office Workspace
+                        </a>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const POSHeader = ({ userProfile, onOpenInstallModal }) => {
+        const { systemConfig, forceFullProductSync } = useData();
+        const [isSyncing, setIsSyncing] = useState(false);
+        const [syncMsg, setSyncMsg] = useState('');
+        const [menuOpen, setMenuOpen] = useState(false);
+        const [isFs, setIsFs] = useState(() => !!(document.fullscreenElement || document.webkitFullscreenElement));
+        const [keepAwake, setKeepAwake] = useState(() => window.SolarisKeepAwakeManager.getState());
+        const [pwa, setPwa] = useState(() => window.SolarisPWAManager.getState());
+
+        useEffect(() => window.SolarisKeepAwakeManager.subscribe(setKeepAwake), []);
+        useEffect(() => window.SolarisPWAManager.subscribe(setPwa), []);
+        useEffect(() => {
+            const onFs = () => setIsFs(!!(document.fullscreenElement || document.webkitFullscreenElement));
+            document.addEventListener('fullscreenchange', onFs);
+            document.addEventListener('webkitfullscreenchange', onFs);
+            return () => { document.removeEventListener('fullscreenchange', onFs); document.removeEventListener('webkitfullscreenchange', onFs); };
+        }, []);
+
+        const handleSync = async () => {
+            if (isSyncing) return;
+            setIsSyncing(true);
+            const res = await forceFullProductSync();
+            setIsSyncing(false);
+            setSyncMsg(`Synced ${khrFormatter.format(res.count || 0)} products`);
+            setTimeout(() => setSyncMsg(''), 2500);
+        };
+
+        const hasBackOfficeAccess = userProfile?.role === 'Admin' || (userProfile?.permissions || []).some(p => ['sales-report', 'customer-management', 'inventory', 'settings'].includes(p));
+
+        return (
+            <header className="h-13 sm:h-14 bg-slate-900 border-b border-slate-700/80 px-3 sm:px-4 flex items-center justify-between shrink-0 z-20">
+                {syncMsg && (
+                    <div className="fixed top-16 right-4 z-[120] bg-emerald-600 text-white px-3.5 py-2 rounded-xl shadow-xl text-xs font-bold animate-fade-in-up">
+                        <i className="fas fa-check-circle mr-1.5"></i>{syncMsg}
+                    </div>
+                )}
+                <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-600 to-emerald-600 text-white flex items-center justify-center font-black text-xs shrink-0 shadow">
+                        POS
+                    </div>
+                    <div className="min-w-0">
+                        <h1 className="text-sm sm:text-base font-black text-white truncate leading-tight">{systemConfig?.appName || 'POS Terminal'}</h1>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                    <button type="button" onClick={() => window.SolarisKeepAwakeManager.engage(true)} className={`hidden sm:flex px-2.5 py-1.5 rounded-xl border text-[11px] font-bold items-center gap-1.5 ${keepAwake.isActive ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'}`} title="Screen Always Awake">
+                        <i className={`fas ${keepAwake.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'}`}></i>
+                        <span className="hidden lg:inline">{keepAwake.isActive ? 'Always Awake' : 'Keep Awake'}</span>
+                    </button>
+
+                    <button type="button" onClick={handleSync} disabled={isSyncing} className="h-8 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 flex items-center gap-1.5 text-xs font-bold" title="Sync Product Catalog">
+                        <i className={`fas fa-sync-alt ${isSyncing ? 'fa-spin text-amber-400' : ''}`}></i>
+                        <span className="hidden md:inline">Sync</span>
+                    </button>
+
+                    {hasBackOfficeAccess && (
+                        <a href="./index.html" target="_blank" rel="noopener noreferrer" className="h-8 px-2.5 rounded-xl bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-700 flex items-center gap-1.5 text-xs font-bold transition" title="Open Back-Office (Reports, Inventory, Settings)">
+                            <i className="fas fa-chart-line text-blue-400"></i>
+                            <span className="hidden md:inline">Back-Office</span>
+                        </a>
+                    )}
+
+                    <button type="button" onClick={() => isFs ? window.SolarisPWAManager.exitKioskFullscreen() : window.SolarisPWAManager.enterKioskFullscreen()} className="hidden sm:flex w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 items-center justify-center" title="Toggle Fullscreen">
+                        <i className={`fas ${isFs ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
+                    </button>
+
+                    {!pwa.isInstalled && (
+                        <button type="button" onClick={onOpenInstallModal} className="w-8 h-8 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/40 flex items-center justify-center" title="Install POS App">
+                            <i className="fas fa-download text-xs"></i>
+                        </button>
+                    )}
+
+                    <div className="relative">
+                        <button type="button" onClick={() => setMenuOpen(o => !o)} className="h-8 pl-1.5 pr-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 flex items-center gap-1.5">
+                            <span className="w-6 h-6 rounded-lg bg-blue-600 text-white font-black text-[10px] flex items-center justify-center uppercase">{(userProfile?.name || 'U').slice(0, 2)}</span>
+                            <span className="hidden sm:inline text-xs font-bold text-white max-w-[90px] truncate">{userProfile?.name}</span>
+                        </button>
+                        {menuOpen && (
+                            <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl py-2 z-50">
+                                <div className="px-3.5 py-2 border-b border-slate-800">
+                                    <div className="text-xs font-black text-white truncate">{userProfile?.name}</div>
+                                    <div className="text-[10px] text-slate-400">{userProfile?.role}</div>
+                                </div>
+                                <button type="button" onClick={() => { setMenuOpen(false); window.safeSignOut(); }} className="w-full text-left px-3.5 py-2 text-xs font-bold text-red-400 hover:bg-red-500/15 flex items-center gap-2">
+                                    <i className="fas fa-sign-out-alt"></i> Sign Out
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </header>
+        );
+    };
+
+    // ========================================================================
+    // 7. DEVICE SETUP, CUSTOMER QUICK ADD, KHQR SIMULATOR & BANK AUTOSUM
+    // ========================================================================
+    const DeviceSetup = ({ userProfile }) => {
+        const { devices, shops, setLocalDevice } = useData();
+        const [selectedDevId, setSelectedDevId] = useState('');
+        const availableDevices = useMemo(() => {
+            if (!devices) return [];
+            if (userProfile?.role === 'Admin') return devices;
+            const allowed = userProfile?.assignedShops || [];
+            return devices.filter(d => allowed.includes(d.shopId));
+        }, [devices, userProfile]);
+
+        return (
+            <div className="flex items-center justify-center h-full p-4">
+                <div className="bg-slate-800 p-6 sm:p-8 rounded-2xl border border-slate-700 max-w-md w-full shadow-2xl space-y-5 text-center">
+                    <div className="w-14 h-14 rounded-2xl bg-blue-600/20 border border-blue-500/40 text-blue-400 flex items-center justify-center mx-auto">
+                        <i className="fas fa-desktop text-2xl"></i>
+                    </div>
+                    <div>
+                        <h2 className="text-xl font-black text-white">Initialize POS Terminal</h2>
+                        <p className="text-xs text-slate-400 mt-1">Select which registered counter terminal this device represents.</p>
+                    </div>
+                    <select value={selectedDevId} onChange={e => setSelectedDevId(e.target.value)} className="w-full bg-slate-900 text-white px-4 py-3 rounded-xl border border-slate-600 text-sm font-semibold">
+                        <option value="">-- Select Counter Terminal --</option>
+                        {availableDevices.map(d => <option key={d.id} value={d.id}>{d.name} ({shops.find(s => s.id === d.shopId)?.name || 'Shop'})</option>)}
+                    </select>
+                    <button type="button" disabled={!selectedDevId} onClick={() => setLocalDevice(selectedDevId)} className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white font-black text-sm">
+                        Activate Terminal
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    const AddCustomerModal = ({ onClose, onSave, shops = [], defaultShopId = '', initialSearchTerm = '' }) => {
+        const isPhone = /^[0-9+\-\s]{4,}$/.test(String(initialSearchTerm || '').trim());
+        const [name, setName] = useState(isPhone ? '' : String(initialSearchTerm || '').trim());
+        const [phone, setPhone] = useState(isPhone ? String(initialSearchTerm || '').trim() : '');
+        const [saving, setSaving] = useState(false);
+
+        const handleSubmit = async (e) => {
+            e.preventDefault();
+            if (!name.trim() || !phone.trim()) return;
+            setSaving(true);
+            try {
+                const payload = { name: name.trim(), phone: phone.trim(), registeredShopId: defaultShopId || '', points: 0, visitCount: 0, totalSpent: 0, createdAt: firebase.firestore.FieldValue.serverTimestamp() };
+                const ref = await db.collection('customers').add(payload);
+                onSave({ id: ref.id, ...payload });
+            } catch (err) { setSaving(false); }
+        };
+
+        return (
+            <Modal show={true} onClose={onClose} maxWidth="max-w-sm">
+                <ModalHeader title="Quick Add Customer" onClose={onClose} />
+                <form onSubmit={handleSubmit}>
+                    <ModalBody>
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Name *</label>
+                                <input type="text" required value={name} onChange={e => setName(e.target.value)} className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 text-sm" autoFocus />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-300 mb-1">Phone *</label>
+                                <input type="tel" required value={phone} onChange={e => setPhone(e.target.value)} className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 text-sm font-mono" />
+                            </div>
+                        </div>
+                    </ModalBody>
+                    <ModalFooter>
+                        <button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-4 rounded-xl text-sm">Cancel</button>
+                        <button type="submit" disabled={saving} className="bg-blue-600 text-white font-bold py-2 px-5 rounded-xl text-sm">{saving ? 'Saving...' : 'Save'}</button>
+                    </ModalFooter>
+                </form>
+            </Modal>
+        );
+    };
+
+    const BankAutoSumModal = ({ show, onClose, currentShift, shop }) => {
+        const [payments, setPayments] = useState([]);
+        useEffect(() => {
+            if (!show || !currentShift) return;
+            const shiftStartMs = safeToDate(currentShift.startTime)?.getTime() || Date.now();
+            const targetIds = String(shop?.khqrConfig?.paywayChatId || '').split(/[\s,|;]+/).map(id => window.SolarisKHQREngine.normalizeChatId(id)).filter(Boolean);
+            const collect = () => {
+                const list = [];
+                window.SolarisPayWayVerifier.inMemoryAbaPayments.forEach((entry, trxId) => {
+                    if (!entry?.parsedAba) return;
+                    const recMs = Number(entry.date || entry.parsedAba.receivedAt || 0);
+                    if (recMs < shiftStartMs) return;
+                    const cid = window.SolarisKHQREngine.normalizeChatId(entry.chatId || entry.parsedAba.chatId);
+                    if (targetIds.length > 0 && !targetIds.includes(cid)) return;
+                    list.push({ id: trxId, ...entry.parsedAba, receivedAt: recMs, claimed: !!entry.claimedByOrderId });
+                });
+                setPayments(list.sort((a, b) => b.receivedAt - a.receivedAt));
+            };
+            collect();
+            window.SolarisRenderBridge.pollRecentFromRender(true).then(collect);
+            return window.SolarisPayWayVerifier.subscribe(collect);
+        }, [show, currentShift, shop]);
+
+        if (!show) return null;
+        const totalKHR = payments.filter(p => p.currency === 'KHR').reduce((s, p) => s + Number(p.amount || 0), 0);
+        const totalUSD = payments.filter(p => p.currency === 'USD').reduce((s, p) => s + Number(p.amount || 0), 0);
+
+        return (
+            <Modal show={show} onClose={onClose} maxWidth="max-w-2xl">
+                <ModalHeader title="Bank AutoSum (Live Shift Feed)" onClose={onClose} />
+                <ModalBody>
+                    <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 text-center">
+                                <span className="text-[11px] text-slate-400 uppercase font-bold block">Total KHR</span>
+                                <span className="text-xl font-black text-emerald-400">៛{khrFormatter.format(totalKHR)}</span>
+                            </div>
+                            <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 text-center">
+                                <span className="text-[11px] text-slate-400 uppercase font-bold block">Total USD</span>
+                                <span className="text-xl font-black text-blue-400">{usdFormatter.format(totalUSD)}</span>
+                            </div>
+                        </div>
+                        <div className="border border-slate-700 rounded-xl overflow-x-auto">
+                            <table className="min-w-full divide-y divide-slate-700 text-xs">
+                                <thead className="bg-slate-900 text-slate-400 uppercase">
+                                    <tr><th className="px-3 py-2.5 text-left">Time</th><th className="px-3 py-2.5 text-left">Payer</th><th className="px-3 py-2.5 text-right">Amount</th><th className="px-3 py-2.5 text-left">APV</th></tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-700">
+                                    {payments.length === 0 ? <tr><td colSpan="4" className="p-6 text-center text-slate-500">No bank payments detected in this shift yet.</td></tr> : payments.map(p => (
+                                        <tr key={p.id}>
+                                            <td className="px-3 py-2 font-mono text-slate-300">{safeFormatDateTime(p.receivedAt)}</td>
+                                            <td className="px-3 py-2 text-slate-200 font-semibold">{p.payerName}</td>
+                                            <td className="px-3 py-2 text-right font-bold text-emerald-400">{p.currency === 'KHR' ? `៛${khrFormatter.format(p.amount)}` : `$${Number(p.amount).toFixed(2)}`}</td>
+                                            <td className="px-3 py-2 font-mono text-sky-400">{p.apv || p.trxId}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter><button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-6 rounded-xl">Close</button></ModalFooter>
+            </Modal>
+        );
+    };
+
+    const LiveDynamicKhqrSimulatorModal = ({ show, onClose, shop, systemConfig }) => {
+        const [isUnlocked, setIsUnlocked] = useState(false);
+        const [pinInput, setPinInput] = useState('');
+        const [pinError, setPinError] = useState('');
+        const [simCurrency, setSimCurrency] = useState('KHR');
+        const [simAmountKHR, setSimAmountKHR] = useState(10000);
+        const [simAmountUSD, setSimAmountUSD] = useState('2.50');
+        const [simRef, setSimRef] = useState('');
+        const [pushed, setPushed] = useState(false);
+
+        const cfg = shop?.khqrConfig || {};
+        const rate = Math.max(100, Number(cfg.exchangeRate) || 4000);
+        const requiredPin = useMemo(() => { const p = String(shop?.discountPin || '').replace(/\D/g, ''); return p.length === 6 ? p : ''; }, [shop?.discountPin]);
+
+        useEffect(() => {
+            if (show) { setIsUnlocked(false); setPinInput(''); setPinError(''); setPushed(false); setSimRef(`QR-${Date.now().toString().slice(-6)}`); }
+        }, [show]);
+
+        const verifyPin = (val) => {
+            const d = String(val || '').replace(/\D/g, '').slice(0, 6);
+            setPinInput(d); setPinError('');
+            if (requiredPin && d.length === 6) {
+                if (d === requiredPin) setIsUnlocked(true);
+                else setPinError('Incorrect 6-digit Shop PIN.');
+            }
+        };
+
+        const simKhr = simCurrency === 'USD' ? Math.round((Number(simAmountUSD) || 0) * rate) : Math.round(Number(simAmountKHR) || 0);
+        const simUsd = simCurrency === 'USD' ? (Number(simAmountUSD) || 0).toFixed(2) : ((Number(simAmountKHR) || 0) / rate).toFixed(2);
+        const dynamicPayload = useMemo(() => cfg.baseEmvPayload ? window.SolarisKHQREngine.generateDynamicKHQR(cfg.baseEmvPayload, simCurrency === 'USD' ? Number(simUsd) : simKhr, simRef, simCurrency, 15) : null, [cfg.baseEmvPayload, simCurrency, simUsd, simKhr, simRef]);
+        const merchantName = (cfg.accountName || shop?.brandingName || shop?.name || 'MERCHANT').toUpperCase();
+
+        const handleClose = () => {
+            if (pushed && shop?.id) window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, { status: 'IDLE', shopId: shop.id, shopName: shop.name, exchangeRate: rate });
+            onClose();
+        };
+
+        if (!show) return null;
+        return (
+            <Modal show={show} onClose={handleClose} maxWidth={isUnlocked ? 'max-w-xl' : 'max-w-sm'}>
+                <ModalHeader title={isUnlocked ? 'Live Dynamic KHQR Simulator' : 'PIN Required — KHQR Simulator'} onClose={handleClose} />
+                <ModalBody>
+                    {!isUnlocked ? (
+                        <div className="space-y-4">
+                            {!requiredPin ? (
+                                <div className="p-4 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs text-center">
+                                    Configure a 6-digit Shop PIN in Back-Office &rarr; Settings &rarr; Shop &amp; Location first.
+                                </div>
+                            ) : (
+                                <>
+                                    <input type="password" inputMode="numeric" maxLength={6} value={pinInput} onChange={e => verifyPin(e.target.value)} placeholder="• • • • • •" autoFocus className="w-full bg-slate-900 text-center font-mono text-2xl font-black tracking-[0.45em] py-3 rounded-xl border border-slate-600 text-white outline-none focus:border-rose-500" />
+                                    {pinError && <p className="text-xs text-rose-400 font-bold text-center">{pinError}</p>}
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[1,2,3,4,5,6,7,8,9,'CLR',0,'DEL'].map(k => (
+                                            <button key={k} type="button" onClick={() => k === 'CLR' ? setPinInput('') : k === 'DEL' ? setPinInput(p => p.slice(0,-1)) : verifyPin(pinInput + k)} className="h-11 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-lg border border-slate-700">{k}</button>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+                            <div className="bg-white rounded-2xl p-4 text-center text-slate-900 border-4 border-[#004459]">
+                                <div className="font-black text-xl text-[#004861]">ABA <span className="text-[#26A9C8]">PAY</span></div>
+                                <div className="text-xs font-black my-1">{simCurrency === 'KHR' ? `៛${simKhr.toLocaleString()}` : `$${simUsd} USD`}</div>
+                                {dynamicPayload ? <img src={window.SolarisKHQREngine.renderInstantQRDataURL(dynamicPayload, 360, 1, 'H')} alt="KHQR" className="w-44 h-44 mx-auto object-contain" /> : <div className="w-44 h-44 mx-auto flex items-center justify-center text-xs text-slate-400 border border-dashed rounded-xl">No KHQR configured</div>}
+                                <div className="text-xs font-extrabold mt-2">{merchantName}</div>
+                            </div>
+                            <div className="space-y-3">
+                                <div className="grid grid-cols-2 gap-1.5 bg-slate-900 p-1 rounded-xl">
+                                    <button type="button" onClick={() => setSimCurrency('KHR')} className={`py-2 rounded-lg text-xs font-black ${simCurrency === 'KHR' ? 'bg-[#004459] text-white' : 'text-slate-400'}`}>KHR (៛)</button>
+                                    <button type="button" onClick={() => setSimCurrency('USD')} className={`py-2 rounded-lg text-xs font-black ${simCurrency === 'USD' ? 'bg-[#26A9C8] text-white' : 'text-slate-400'}`}>USD ($)</button>
+                                </div>
+                                {simCurrency === 'KHR'
+                                    ? <input type="number" step="100" value={simAmountKHR} onChange={e => setSimAmountKHR(e.target.value)} className="w-full bg-slate-900 text-emerald-400 text-xl font-black px-3 py-2.5 rounded-xl border border-slate-600 font-mono" />
+                                    : <input type="number" step="0.01" value={simAmountUSD} onChange={e => setSimAmountUSD(e.target.value)} className="w-full bg-slate-900 text-sky-400 text-xl font-black px-3 py-2.5 rounded-xl border border-slate-600 font-mono" />}
+                                <input type="text" value={simRef} onChange={e => setSimRef(e.target.value)} placeholder="Reference / Note" className="w-full bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs font-mono" />
+                                <button type="button" onClick={() => {
+                                    window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, {
+                                        status: 'ACTIVE', shopId: shop.id, shopName: shop.name, accountName: merchantName,
+                                        exchangeRate: rate, baseEmvPayload: cfg.baseEmvPayload || '', items: [],
+                                        amountKhr: simKhr, amountUsd: Number(simUsd), selectedCurrency: simCurrency,
+                                        invoiceNo: simRef, initiatedAt: Date.now(), expiresAt: Date.now() + 900000
+                                    });
+                                    setPushed(true);
+                                }} className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs">
+                                    <i className="fas fa-tv mr-1.5"></i>{pushed ? 'Sent to Customer Display!' : 'Push to Customer Display'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </ModalBody>
+                <ModalFooter><button type="button" onClick={handleClose} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-xl">Close</button></ModalFooter>
+            </Modal>
+        );
+    };
+
+    // ========================================================================
+    // 8. RECEIPT, PAYMENT, SHIFT, HISTORY & DAILY REPORT MODALS
+    // ========================================================================
+    const ReceiptModal = ({ saleData, onClose }) => {
+        const { shops, devices, currentDeviceId, systemConfig } = useData();
+        const receiptRef = useRef(null);
+        const [isBusy, setIsBusy] = useState(false);
+
+        const shopObj = useMemo(() => shops.find(s => s.id === saleData?.shopId) || null, [shops, saleData?.shopId]);
+        const terminalName = saleData?.deviceName || devices.find(d => d.id === (saleData?.deviceId || currentDeviceId))?.name || 'POS-01';
+        const tpl = useMemo(() => {
+            const g = systemConfig?.receiptTemplate || {};
+            const b = (saleData?.shopId && systemConfig?.receiptTemplatesByShop?.[saleData.shopId]) || shopObj?.receiptTemplate || {};
+            const m = { ...g, ...b };
+            return {
+                paperSize: m.paperSize || '80mm',
+                headerName: m.headerName || shopObj?.brandingName || saleData?.shopName || systemConfig?.appName || 'POS TERMINAL',
+                shopAddress: m.shopAddress ?? (shopObj?.location || ''),
+                footerText: m.footerText ?? 'Thank you for your visit!',
+                qrUrl: m.qrUrl || ''
+            };
+        }, [systemConfig, saleData, shopObj]);
+
+        const paperW = tpl.paperSize === '58mm' ? 240 : 300;
+        const qrImg = useMemo(() => tpl.qrUrl ? window.SolarisKHQREngine.renderInstantQRDataURL(tpl.qrUrl, 140, 1, 'M') : '', [tpl.qrUrl]);
+
+        const handlePrint = () => {
+            if (!receiptRef.current || !window.html2canvas) return;
+            setIsBusy(true);
+            window.html2canvas(receiptRef.current, { scale: 3, backgroundColor: '#ffffff' }).then(canvas => {
+                const win = window.open('', '', 'width=400,height=650');
+                win.document.write(`<html><body style="margin:0;display:flex;justify-content:center;"><img src="${canvas.toDataURL('image/png')}" style="width:100%;max-width:${paperW}px;" /></body></html>`);
+                win.document.close(); win.focus();
+                setTimeout(() => { win.print(); win.close(); setIsBusy(false); }, 450);
+            }).catch(() => setIsBusy(false));
+        };
+
+        const handleSavePng = () => {
+            if (!receiptRef.current || !window.html2canvas) return;
+            setIsBusy(true);
+            window.html2canvas(receiptRef.current, { scale: 3, backgroundColor: '#ffffff' }).then(canvas => {
+                const a = document.createElement('a');
+                a.download = `Receipt-${saleData.receiptNo || Date.now()}.png`;
+                a.href = canvas.toDataURL('image/png');
+                a.click();
+            }).finally(() => setIsBusy(false));
+        };
+
+        return (
+            <Modal show={true} onClose={onClose} maxWidth="max-w-sm">
+                <ModalHeader title="Transaction Success" onClose={onClose} />
+                <div className="flex-1 overflow-y-auto p-4 bg-[#f3f2ef] flex justify-center">
+                    <div ref={receiptRef} className="bg-white text-black px-4 py-5 text-[12px] shadow-lg" style={{ width: `${paperW}px`, fontFamily: "'Courier New', 'Noto Sans Khmer', monospace" }}>
+                        <div className="text-center mb-2">
+                            <h2 className="text-lg font-black uppercase">{tpl.headerName}</h2>
+                            {tpl.shopAddress && <div className="text-[10px] text-gray-600">{tpl.shopAddress}</div>}
+                        </div>
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        <div className="flex justify-between text-[11px] font-bold">
+                            <span>Staff: {saleData.cashierName}</span>
+                            <span>{terminalName}</span>
+                        </div>
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        <div className="space-y-1.5">
+                            {(saleData.items || []).map((item, i) => (
+                                <div key={i}>
+                                    <div className="font-bold">{item.name}</div>
+                                    <div className="flex justify-between text-[11px]">
+                                        <span>{khrFormatter.format(item.price)} x {item.quantity}</span>
+                                        <span className="font-bold">{khrFormatter.format((item.price || 0) * (item.quantity || 1))} ៛</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        {Number(saleData.discount) > 0 && (
+                            <div className="flex justify-between text-rose-600 font-bold text-[11px]">
+                                <span>Discount</span><span>-{khrFormatter.format(saleData.discount)} ៛</span>
+                            </div>
+                        )}
+                        <div className="flex justify-between font-black text-base">
+                            <span>TOTAL</span><span>{khrFormatter.format(saleData.grandTotal)} ៛</span>
+                        </div>
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        <div className="text-center font-bold uppercase text-xs">PAID BY: {saleData.paymentMethod === 'Cash' ? 'CASH' : 'BANK (KHQR)'}</div>
+                        {saleData.paymentMethod === 'Cash' && saleData.changeDue > 0 && (
+                            <div className="text-center text-[10px] text-gray-600">Tendered: {khrFormatter.format(saleData.amountTendered)} ៛ • Change: {khrFormatter.format(saleData.changeDue)} ៛</div>
+                        )}
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        <div className="text-[11px] font-bold space-y-0.5">
+                            <div className="flex justify-between"><span>Inv:</span><span>{saleData.receiptNo}</span></div>
+                            <div className="flex justify-between"><span>Cust:</span><span>{saleData.customerName || 'Walk-in'}</span></div>
+                            <div className="flex justify-between"><span>Date:</span><span>{safeFormatDateTime(saleData.createdAt || saleData.timestamp)}</span></div>
+                        </div>
+                        <div className="border-b border-dashed border-gray-400 my-2"></div>
+                        <div className="text-center text-[11px] font-bold pt-1">
+                            <div>{tpl.footerText}</div>
+                            {qrImg && <img src={qrImg} alt="QR" className="w-20 h-20 mx-auto mt-2" />}
+                        </div>
+                    </div>
+                </div>
+                <ModalFooter>
+                    <div className="grid grid-cols-3 gap-2 w-full">
+                        <button type="button" disabled={isBusy} onClick={handlePrint} className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-2.5 rounded-xl text-xs"><i className="fas fa-print mr-1"></i>Print</button>
+                        <button type="button" disabled={isBusy} onClick={handleSavePng} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs"><i className="fas fa-image mr-1"></i>PNG</button>
+                        <button type="button" onClick={onClose} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-xs">Done</button>
+                    </div>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
+    const PaymentModal = ({ total, cart = [], customer, shop, loyaltyRule, systemConfig, onConfirm, onCancel, isProcessing }) => {
+        const cfg = shop?.khqrConfig || {};
+        const [method, setMethod] = useState('Cash');
+        const [exchangeRate, setExchangeRate] = useState(() => Math.max(100, Number(cfg.exchangeRate) || 4000));
+        const [tenderedKHR, setTenderedKHR] = useState(String(total));
+        const [tenderedUSD, setTenderedUSD] = useState('');
+        const [manualDiscount, setManualDiscount] = useState('');
+        const [discountPin, setDiscountPin] = useState('');
+        const [khqrCurrency, setKhqrCurrency] = useState('KHR');
+        const [apvRef, setApvRef] = useState('');
+        const [verifiedAba, setVerifiedAba] = useState(null);
+        const [billRef] = useState(() => window.SolarisInvoiceEngine.peekNextInvoiceNumber(shop));
+        const [initiatedAt] = useState(() => Date.now());
+        const [expiresAt] = useState(() => Date.now() + 120000);
+        const hasAutoRef = useRef(false);
+
+        const reqPin = String(shop?.discountPin || '').replace(/\D/g, '');
+        const pinUnlocked = reqPin.length !== 6 || discountPin === reqPin;
+        const discPct = Math.max(0, Math.min(100, parseFloat(manualDiscount) || 0));
+        const discAmt = Math.min(total, Math.round(total * (discPct / 100)));
+        const netTotal = Math.max(0, total - discAmt);
+        const usdEquiv = (netTotal / exchangeRate).toFixed(2);
+        const totalTendered = (parseFloat(tenderedKHR) || 0) + ((parseFloat(tenderedUSD) || 0) * exchangeRate);
+        const change = Math.max(0, totalTendered - netTotal);
+        const canPay = method === 'KHQR' || totalTendered >= netTotal;
+
+        const dynamicPayload = useMemo(() => {
+            if (!cfg.baseEmvPayload) return '';
+            return window.SolarisKHQREngine.generateDynamicKHQR(cfg.baseEmvPayload, khqrCurrency === 'USD' ? Number(usdEquiv) : netTotal, billRef, khqrCurrency, 15, { createdAtMs: initiatedAt, expiresAtMs: expiresAt }) || '';
+        }, [cfg.baseEmvPayload, khqrCurrency, usdEquiv, netTotal, billRef, initiatedAt, expiresAt]);
+        const qrImg = useMemo(() => dynamicPayload ? window.SolarisKHQREngine.renderInstantQRDataURL(dynamicPayload, 420, 1, 'H') : (cfg.staticQrImage || ''), [dynamicPayload, cfg.staticQrImage]);
+
+        // Broadcast ACTIVE KHQR or CART to Customer Display in 0ms
+        useEffect(() => {
+            if (!shop?.id) return;
+            if (method === 'KHQR') {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, {
+                    status: 'ACTIVE', shopId: shop.id, shopName: shop.brandingName || shop.name,
+                    accountName: cfg.accountName || shop.name, khrAccount: cfg.khrAccount || '', usdAccount: cfg.usdAccount || '',
+                    exchangeRate, baseEmvPayload: cfg.baseEmvPayload || '', items: cart,
+                    subtotalKhr: total, discountKhr: discAmt, amountKhr: netTotal, amountUsd: Number(usdEquiv),
+                    selectedCurrency: khqrCurrency, invoiceNo: billRef, initiatedAt, expiresAt
+                });
+            }
+        }, [method, shop, cfg, exchangeRate, cart, total, discAmt, netTotal, usdEquiv, khqrCurrency, billRef, initiatedAt, expiresAt]);
+
+        // Live ABA PayWay Auto-Verify Listener
+        useEffect(() => {
+            if (method !== 'KHQR' || cfg.paywayVerifyEnabled === false) return;
+            const tryMatch = () => {
+                if (hasAutoRef.current) return;
+                const order = { khqrExpectedKhr: netTotal, khqrExpectedUsd: Number(usdEquiv), khqrInitiatedAt: initiatedAt };
+                for (const [, entry] of window.SolarisPayWayVerifier.inMemoryAbaPayments.entries()) {
+                    if (entry?.claimedByOrderId || !entry?.parsedAba?.isValid) continue;
+                    if (window.SolarisPayWayVerifier.processedTrxIdsMemory.has(String(entry.parsedAba.trxId))) continue;
+                    if (window.SolarisPayWayVerifier.doesMessageMatchOrder(entry.parsedAba, order, shop)) {
+                        hasAutoRef.current = true;
+                        setVerifiedAba(entry.parsedAba);
+                        window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(shop.id, {
+                            status: 'PAID', invoiceNo: billRef, amountKhr: netTotal, amountUsd: Number(usdEquiv),
+                            payerDisplay: `${entry.parsedAba.payerName} (${entry.parsedAba.maskedAccount})`,
+                            amountDisplay: entry.parsedAba.currency === 'KHR' ? `៛${Number(entry.parsedAba.amount).toLocaleString()}` : `$${Number(entry.parsedAba.amount).toFixed(2)}`,
+                            apv: entry.parsedAba.apv, trxId: entry.parsedAba.trxId, verifiedAbaPayload: entry.parsedAba, paidAt: Date.now()
+                        });
+                        onConfirm({
+                            method: 'KHQR', invoiceNo: billRef, tendered: netTotal, tenderedUSD: 0, tenderedKHR: 0, exchangeRate, change: 0,
+                            discount: discAmt, manualDiscount: discAmt, manualDiscountPct: discPct, apvRef: entry.parsedAba.apv, verifiedAba: entry.parsedAba, khqrCurrency
+                        });
+                        return;
+                    }
+                }
+            };
+            tryMatch();
+            const unsub = window.SolarisPayWayVerifier.subscribe(tryMatch);
+            const t = setInterval(() => { window.SolarisRenderBridge.pollRecentFromRender(true).then(tryMatch); }, 1500);
+            return () => { unsub(); clearInterval(t); };
+        }, [method, cfg.paywayVerifyEnabled, netTotal, usdEquiv, initiatedAt, shop, billRef, discAmt, discPct, exchangeRate, khqrCurrency, onConfirm]);
+
+        return (
+            <Modal show={true} onClose={onCancel} maxWidth="max-w-md">
+                <ModalHeader title={`Checkout — ${billRef}`} onClose={onCancel} />
+                <ModalBody>
+                    <div className="space-y-3.5">
+                        <div className="text-center bg-slate-900 p-4 rounded-2xl border border-slate-700">
+                            <div className="text-[11px] uppercase font-bold text-slate-400">Total Amount Due</div>
+                            <div className="text-3xl font-black text-emerald-400 font-mono">៛{khrFormatter.format(netTotal)}</div>
+                            <div className="text-xs text-sky-400 font-mono">≈ ${usdEquiv} USD</div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <button type="button" onClick={() => setMethod('Cash')} className={`py-2.5 rounded-xl font-black text-xs border ${method === 'Cash' ? 'bg-blue-600 text-white border-blue-400' : 'bg-slate-900 text-slate-400 border-slate-700'}`}><i className="fas fa-money-bill-wave mr-1.5"></i>Cash</button>
+                            <button type="button" onClick={() => setMethod('KHQR')} className={`py-2.5 rounded-xl font-black text-xs border ${method === 'KHQR' ? 'bg-[#E1232E] text-white border-red-400' : 'bg-slate-900 text-slate-400 border-slate-700'}`}><i className="fas fa-qrcode mr-1.5"></i>ABA KHQR</button>
+                        </div>
+
+                        {method === 'Cash' ? (
+                            <div className="space-y-3 bg-slate-900/70 p-3.5 rounded-xl border border-slate-700">
+                                <div className="grid grid-cols-2 gap-2.5">
+                                    <div>
+                                        <label className="text-[11px] font-bold text-emerald-400 block mb-1">Received USD ($)</label>
+                                        <input type="number" step="0.01" value={tenderedUSD} onChange={e => { setTenderedUSD(e.target.value); setTenderedKHR(''); }} placeholder="0.00" className="w-full bg-slate-800 text-white text-lg font-bold px-3 py-2 rounded-lg border border-slate-600 text-right font-mono" />
+                                    </div>
+                                    <div>
+                                        <label className="text-[11px] font-bold text-blue-400 block mb-1">Received KHR (៛)</label>
+                                        <input type="number" value={tenderedKHR} onChange={e => { setTenderedKHR(e.target.value); setTenderedUSD(''); }} placeholder="0" className="w-full bg-slate-800 text-white text-lg font-bold px-3 py-2 rounded-lg border border-slate-600 text-right font-mono" />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-5 gap-1.5">
+                                    {[5, 10, 20, 50].map(u => <button key={u} type="button" onClick={() => { setTenderedUSD(String(u)); setTenderedKHR(''); }} className="py-1.5 rounded-lg bg-emerald-900/30 text-emerald-300 border border-emerald-700/50 text-xs font-bold">${u}</button>)}
+                                    <button type="button" onClick={() => { setTenderedKHR(String(netTotal)); setTenderedUSD(''); }} className="py-1.5 rounded-lg bg-slate-700 text-white text-xs font-bold">Exact</button>
+                                </div>
+                                <div className="flex justify-between items-center pt-2 border-t border-slate-800 text-sm">
+                                    <span className="text-slate-400 font-bold">Change Due:</span>
+                                    <span className="text-xl font-black text-sky-400 font-mono">៛{khrFormatter.format(change)}</span>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="bg-white rounded-2xl p-4 text-center text-slate-900 border-4 border-[#004459] space-y-2">
+                                <div className="flex justify-center gap-2">
+                                    <button type="button" onClick={() => setKhqrCurrency('KHR')} className={`px-3 py-1 rounded-lg text-xs font-black ${khqrCurrency === 'KHR' ? 'bg-[#004459] text-white' : 'bg-stone-100 text-stone-600'}`}>KHR (៛)</button>
+                                    <button type="button" onClick={() => setKhqrCurrency('USD')} className={`px-3 py-1 rounded-lg text-xs font-black ${khqrCurrency === 'USD' ? 'bg-[#26A9C8] text-white' : 'bg-stone-100 text-stone-600'}`}>USD ($)</button>
+                                </div>
+                                {qrImg ? <img src={qrImg} alt="ABA KHQR" className="w-48 h-48 mx-auto object-contain" /> : <div className="h-40 flex items-center justify-center text-xs text-stone-400">Configure KHQR in Back-Office Settings</div>}
+                                <div className="text-xs font-bold text-emerald-700 flex items-center justify-center gap-1.5">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                                    <span>{verifiedAba ? `Verified APV: ${verifiedAba.apv}` : 'Listening for ABA PayWay...'}</span>
+                                </div>
+                                <input type="text" value={apvRef} onChange={e => setApvRef(e.target.value)} placeholder="Optional Manual APV Ref #" className="w-full bg-stone-100 px-3 py-1.5 rounded-lg border border-stone-300 text-xs font-mono text-center" />
+                            </div>
+                        )}
+
+                        <div className="flex items-center gap-2 pt-1">
+                            {reqPin.length === 6 && <input type="password" inputMode="numeric" maxLength={6} value={discountPin} onChange={e => setDiscountPin(e.target.value.replace(/\D/g, ''))} placeholder="PIN" className="w-20 bg-slate-900 text-center font-mono text-xs py-2 rounded-lg border border-slate-600 text-white" />}
+                            <input type="number" min="0" max="100" disabled={!pinUnlocked} value={manualDiscount} onChange={e => setManualDiscount(e.target.value)} placeholder="Manual Discount (%)" className="flex-1 bg-slate-900 text-emerald-300 font-bold px-3 py-2 rounded-lg border border-slate-600 text-xs disabled:opacity-40" />
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter>
+                    <button type="button" onClick={onCancel} className="bg-slate-600 text-white font-bold py-2.5 px-5 rounded-xl">Cancel</button>
+                    <button type="button" disabled={!canPay || isProcessing} onClick={() => onConfirm({
+                        method, invoiceNo: billRef, tendered: method === 'Cash' ? totalTendered : netTotal,
+                        tenderedUSD: method === 'Cash' ? (parseFloat(tenderedUSD) || 0) : 0, tenderedKHR: method === 'Cash' ? (parseFloat(tenderedKHR) || 0) : 0,
+                        exchangeRate, change, discount: discAmt, manualDiscount: discAmt, manualDiscountPct: discPct, apvRef, verifiedAba, khqrCurrency
+                    })} className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white font-black py-2.5 px-6 rounded-xl flex items-center justify-center gap-2">
+                        {isProcessing ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check"></i>}
+                        <span>Complete Sale</span>
+                    </button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
+    const ShiftManagementModal = ({ currentShift, shopId, userProfile, onClose, deviceId, todaySales = [], onShiftStateChange }) => {
+        const { shops, devices } = useData();
+        const shopObj = shops.find(s => s.id === shopId);
+        const deviceName = devices.find(d => d.id === deviceId)?.name || 'POS Terminal';
+        const rate = Math.max(100, Number(shopObj?.khqrConfig?.exchangeRate) || 4000);
+        const [startCash, setStartCash] = useState('');
+        const [shiftName, setShiftName] = useState('AM');
+        const [actualCashKHR, setActualCashKHR] = useState('');
+        const [actualCashUSD, setActualCashUSD] = useState('');
+        const [actualBankKHR, setActualBankKHR] = useState('');
+        const [actualBankUSD, setActualBankUSD] = useState('');
+        const [closingFloat, setClosingFloat] = useState('');
+        const [note, setNote] = useState('');
+        const [error, setError] = useState('');
+
+        const shiftSales = useMemo(() => todaySales.filter(s => s.shiftId === currentShift?.id && s.status !== 'void'), [todaySales, currentShift?.id]);
+        const sysCash = shiftSales.filter(s => s.paymentMethod === 'Cash').reduce((a, b) => a + (Number(b.grandTotal) || 0), 0);
+        const sysBank = shiftSales.filter(s => s.paymentMethod !== 'Cash').reduce((a, b) => a + (Number(b.grandTotal) || 0), 0);
+
+        const handleOpen = () => {
+            const ref = db.collection('shifts').doc();
+            const nowIso = new Date().toISOString();
+            const opt = {
+                id: ref.id, shopId, cashierId: userProfile.uid, cashierName: userProfile.name, shiftName, deviceId, deviceName,
+                startTime: nowIso, startCash: Number(startCash) || 0, totalSales: 0, totalCashSales: 0, totalKHQRSales: 0, transactionCount: 0, status: 'open', createdAt: nowIso
+            };
+            onShiftStateChange(opt);
+            ref.set({ ...opt, startTime: firebase.firestore.FieldValue.serverTimestamp(), createdAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {});
+            onClose();
+        };
+
+        const handleClose = () => {
+            if ((Number(closingFloat) || 0) !== (Number(currentShift.startCash) || 0)) {
+                setError(`Closing float must match starting float (៛${khrFormatter.format(currentShift.startCash || 0)}).`);
+                return;
+            }
+            const actCash = (Number(actualCashKHR) || 0) + ((Number(actualCashUSD) || 0) * rate);
+            const actBank = (Number(actualBankKHR) || 0) + ((Number(actualBankUSD) || 0) * rate);
+            const diffCash = actCash - sysCash;
+            const diffBank = actBank - sysBank;
+            const upd = {
+                status: 'closed', endTime: firebase.firestore.FieldValue.serverTimestamp(), closedBy: userProfile.name,
+                closeInputCashKHR: Number(actualCashKHR) || 0, closeInputCashUSD: Number(actualCashUSD) || 0,
+                closeInputBankKHR: Number(actualBankKHR) || 0, closeInputBankUSD: Number(actualBankUSD) || 0,
+                closeExchangeRate: rate, closeFloatingCash: Number(closingFloat) || 0, closeNote: note,
+                actualCash: actCash, expectedCash: sysCash, differenceCash: diffCash,
+                actualKHQR: actBank, expectedKHQR: sysBank, differenceKHQR: diffBank, difference: diffCash + diffBank,
+                totalSales: sysCash + sysBank, totalCashSales: sysCash, totalKHQRSales: sysBank, transactionCount: shiftSales.length
+            };
+            db.collection('shifts').doc(currentShift.id).set(upd, { merge: true }).catch(() => {});
+            onShiftStateChange(null);
+            onClose();
+        };
+
+        if (!currentShift) {
+            return (
+                <Modal show={true} onClose={onClose} maxWidth="max-w-sm">
+                    <ModalHeader title="Open New Shift" onClose={onClose} />
+                    <ModalBody>
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-2">
+                                {['AM', 'PM'].map(s => <button key={s} type="button" onClick={() => setShiftName(s)} className={`py-2.5 rounded-xl font-bold text-sm border ${shiftName === s ? 'bg-blue-600 text-white border-blue-400' : 'bg-slate-900 text-slate-400 border-slate-700'}`}>{s} Shift</button>)}
+                            </div>
+                            <div>
+                                <label className="text-xs font-bold text-slate-300 block mb-1">Starting Float Cash (KHR)</label>
+                                <input type="number" value={startCash} onChange={e => setStartCash(e.target.value)} placeholder="0" autoFocus className="w-full bg-slate-900 text-white text-2xl font-black px-4 py-3 rounded-xl border border-slate-600 text-right font-mono" />
+                            </div>
+                        </div>
+                    </ModalBody>
+                    <ModalFooter>
+                        <button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-xl">Cancel</button>
+                        <button type="button" onClick={handleOpen} className="bg-emerald-600 hover:bg-emerald-500 text-white font-black py-2 px-6 rounded-xl">Start Shift</button>
+                    </ModalFooter>
+                </Modal>
+            );
+        }
+
+        return (
+            <Modal show={true} onClose={onClose} maxWidth="max-w-lg">
+                <ModalHeader title={`Close Shift (${currentShift.shiftName || 'AM'})`} onClose={onClose} />
+                <ModalBody>
+                    <div className="space-y-3.5 text-sm">
+                        {error && <div className="p-2.5 rounded-xl bg-red-500/20 border border-red-500/40 text-red-300 text-xs font-bold">{error}</div>}
+                        <div className="grid grid-cols-2 gap-2.5 bg-slate-900 p-3 rounded-xl border border-slate-700 text-xs">
+                            <div>System Cash: <strong className="text-emerald-400 font-mono">៛{khrFormatter.format(sysCash)}</strong></div>
+                            <div>System Bank: <strong className="text-sky-400 font-mono">៛{khrFormatter.format(sysBank)}</strong></div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <input type="number" value={closingFloat} onChange={e => setClosingFloat(e.target.value)} placeholder={`Float Cash (Match ៛${khrFormatter.format(currentShift.startCash || 0)})`} className="flex-1 bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 font-mono" />
+                            <button type="button" onClick={() => setClosingFloat(String(currentShift.startCash || 0))} className="px-3 py-2 rounded-xl bg-blue-600/20 text-blue-300 border border-blue-500/40 text-xs font-bold">Match</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            <input type="number" value={actualCashKHR} onChange={e => setActualCashKHR(e.target.value)} placeholder="Cash Drop (KHR)" className="bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 font-mono" />
+                            <input type="number" step="0.01" value={actualCashUSD} onChange={e => setActualCashUSD(e.target.value)} placeholder="Cash Drop (USD)" className="bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 font-mono" />
+                            <input type="number" value={actualBankKHR} onChange={e => setActualBankKHR(e.target.value)} placeholder="Bank Drop (KHR)" className="bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 font-mono" />
+                            <input type="number" step="0.01" value={actualBankUSD} onChange={e => setActualBankUSD(e.target.value)} placeholder="Bank Drop (USD)" className="bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 font-mono" />
+                        </div>
+                        <textarea rows="2" value={note} onChange={e => setNote(e.target.value)} placeholder="Handover note (optional)" className="w-full bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs" />
+                    </div>
+                </ModalBody>
+                <ModalFooter>
+                    <button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-5 rounded-xl">Cancel</button>
+                    <button type="button" onClick={handleClose} className="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 px-6 rounded-xl">Submit &amp; Close Shift</button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
+    const SalesHistoryModal = ({ sales = [], onClose, onReprint }) => (
+        <Modal show={true} onClose={onClose} maxWidth="max-w-3xl">
+            <ModalHeader title={`Today's Transactions (${sales.length})`} onClose={onClose} />
+            <ModalBody>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs text-left divide-y divide-slate-700">
+                        <thead className="bg-slate-900 text-slate-400 uppercase">
+                            <tr><th className="px-3 py-2.5">Time</th><th className="px-3 py-2.5">Receipt</th><th className="px-3 py-2.5">Method</th><th className="px-3 py-2.5 text-right">Total</th><th className="px-3 py-2.5 text-center">Print</th></tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-700">
+                            {sales.length === 0 ? <tr><td colSpan="5" className="p-6 text-center text-slate-500">No sales today yet.</td></tr> : sales.map(s => (
+                                <tr key={s.id} className={s.status === 'void' ? 'opacity-40 line-through' : ''}>
+                                    <td className="px-3 py-2.5 font-mono text-slate-300">{safeFormatTime(s.timestamp || s.createdAt)}</td>
+                                    <td className="px-3 py-2.5 font-mono text-slate-200">{s.receiptNo}</td>
+                                    <td className="px-3 py-2.5 text-sky-300 font-bold">{s.paymentMethod}</td>
+                                    <td className="px-3 py-2.5 text-right font-bold text-emerald-400">៛{khrFormatter.format(s.grandTotal)}</td>
+                                    <td className="px-3 py-2.5 text-center"><button type="button" onClick={() => onReprint(s)} className="text-blue-400 hover:text-blue-300"><i className="fas fa-print"></i></button></td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </ModalBody>
+            <ModalFooter><button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-6 rounded-xl">Close</button></ModalFooter>
+        </Modal>
+    );
+
+    const DailyReportModal = ({ sales = [], onClose }) => {
+        const valid = sales.filter(s => s.status !== 'void');
+        const total = valid.reduce((a, b) => a + (Number(b.grandTotal) || 0), 0);
+        const cash = valid.filter(s => s.paymentMethod === 'Cash').reduce((a, b) => a + (Number(b.grandTotal) || 0), 0);
+        const bank = total - cash;
+        return (
+            <Modal show={true} onClose={onClose} maxWidth="max-w-sm">
+                <ModalHeader title="Today's Sales Summary" onClose={onClose} />
+                <ModalBody>
+                    <div className="space-y-3 text-center">
+                        <div className="bg-slate-900 p-4 rounded-xl border border-slate-700">
+                            <div className="text-xs text-slate-400 uppercase font-bold">Net Sales ({valid.length} Trx)</div>
+                            <div className="text-3xl font-black text-emerald-400 font-mono mt-1">៛{khrFormatter.format(total)}</div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="bg-slate-900 p-3 rounded-xl border border-slate-700"><div className="text-[10px] text-slate-400 uppercase font-bold">Cash</div><div className="text-lg font-bold text-green-400 font-mono">៛{khrFormatter.format(cash)}</div></div>
+                            <div className="bg-slate-900 p-3 rounded-xl border border-slate-700"><div className="text-[10px] text-slate-400 uppercase font-bold">KHQR / Bank</div><div className="text-lg font-bold text-sky-400 font-mono">៛{khrFormatter.format(bank)}</div></div>
+                        </div>
+                    </div>
+                </ModalBody>
+                <ModalFooter><button type="button" onClick={onClose} className="bg-slate-600 text-white font-bold py-2 px-6 rounded-xl">Close</button></ModalFooter>
+            </Modal>
+        );
+    };
+
+    // ========================================================================
+    // 9. MAIN STANDALONE POS TERMINAL COMPONENT
+    // ========================================================================
+    const POSTerminal = ({ userProfile }) => {
+        const { products, shops, customers, loyaltyRules, devices, currentDeviceId, systemConfig } = useData();
+        const currentDevice = useMemo(() => devices.find(d => d.id === currentDeviceId) || null, [devices, currentDeviceId]);
+
+        const [selectedShopId, setSelectedShopId] = useState(() => currentDevice?.shopId || shops[0]?.id || '');
+        const [currentShift, setCurrentShift] = useState(null);
+        const [cart, setCart] = useState([]);
+        const [searchTerm, setSearchTerm] = useState('');
+        const [selectedVendor, setSelectedVendor] = useState('All');
+        const [catalogViewMode, setCatalogViewMode] = useState('list'); // Default Line/List View
+        const [activeMobileTab, setActiveMobileTab] = useState('products');
+        const [highlightedIndex, setHighlightedIndex] = useState(0);
+        const [selectedCustomerId, setSelectedCustomerId] = useState('');
+        const [customerSearch, setCustomerSearch] = useState('');
+        const [custFocus, setCustFocus] = useState(false);
+
+        const [isProcessing, setIsProcessing] = useState(false);
+        const [showPayment, setShowPayment] = useState(false);
+        const [showReceipt, setShowReceipt] = useState(false);
+        const [lastSale, setLastSale] = useState(null);
+        const [showHistory, setShowHistory] = useState(false);
+        const [showDaily, setShowDaily] = useState(false);
+        const [showAutoSum, setShowAutoSum] = useState(false);
+        const [showKhqrSim, setShowKhqrSim] = useState(false);
+        const [showShift, setShowShift] = useState(false);
+        const [showAddCust, setShowAddCust] = useState(false);
+        const [showClearConfirm, setShowClearConfirm] = useState(false);
+        const [alertMsg, setAlertMsg] = useState({ show: false, title: '', message: '', isError: false });
+        const [todaySales, setTodaySales] = useState([]);
+        const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+        const searchRef = useRef(null);
+
+        useEffect(() => {
+            if (currentDevice?.shopId) setSelectedShopId(currentDevice.shopId);
+            else if (shops.length > 0 && !selectedShopId) setSelectedShopId(shops[0].id);
+        }, [currentDevice, shops, selectedShopId]);
+
+        useEffect(() => {
+            const onOn = () => setIsOnline(true), onOff = () => setIsOnline(false);
+            window.addEventListener('online', onOn); window.addEventListener('offline', onOff);
+            return () => { window.removeEventListener('online', onOn); window.removeEventListener('offline', onOff); };
+        }, []);
+
+        const currentShopObj = useMemo(() => shops.find(s => s.id === selectedShopId) || null, [shops, selectedShopId]);
+        const localShiftKey = selectedShopId && userProfile?.uid && currentDeviceId ? `solaris_active_shift_${selectedShopId}_${currentDeviceId}_${userProfile.uid}` : null;
+
+        useEffect(() => {
+            if (!selectedShopId) return;
+            return window.SolarisInvoiceEngine.subscribeShopCounter(selectedShopId);
+        }, [selectedShopId]);
+
+        useEffect(() => {
+            if (!selectedShopId || !userProfile?.uid || !currentDeviceId) return;
+            if (localShiftKey) {
+                try { const saved = JSON.parse(localStorage.getItem(localShiftKey) || 'null'); if (saved?.status === 'open') setCurrentShift(saved); } catch (e) {}
+            }
+            const unsub = db.collection('shifts').where('status', '==', 'open').onSnapshot(snap => {
+                const match = snap.docs.map(d => ({ id: d.id, ...d.data() })).find(s => s.shopId === selectedShopId && s.deviceId === currentDeviceId && s.cashierId === userProfile.uid);
+                if (match) {
+                    setCurrentShift(match);
+                    if (localShiftKey) try { localStorage.setItem(localShiftKey, JSON.stringify(match)); } catch (e) {}
+                }
+            }, () => {});
+            return () => unsub();
+        }, [selectedShopId, userProfile?.uid, currentDeviceId, localShiftKey]);
+
+        useEffect(() => {
+            if (!selectedShopId) return;
+            const start = new Date(); start.setHours(0, 0, 0, 0);
+            const unsub = db.collection('sales').where('timestamp', '>=', start).onSnapshot(snap => {
+                setTodaySales(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(s => s.shopId === selectedShopId).sort((a, b) => (safeToDate(b.timestamp || b.createdAt) || 0) - (safeToDate(a.timestamp || a.createdAt) || 0)));
+            }, () => {});
+            return () => unsub();
+        }, [selectedShopId]);
+
+        const vendorsList = useMemo(() => {
+            const set = new Set();
+            products.forEach(p => set.add((p.vendorName || '').trim() || 'Uncategorized'));
+            return ['All', ...Array.from(set).sort()];
+        }, [products]);
+
+        const debouncedSearch = useDebounce(searchTerm, 70);
+        const filteredProducts = useMemo(() => {
+            let list = products;
+            if (selectedVendor !== 'All') list = list.filter(p => ((p.vendorName || '').trim() || 'Uncategorized') === selectedVendor);
+            if (debouncedSearch) {
+                const q = debouncedSearch.toLowerCase();
+                list = list.filter(p => (p.name || '').toLowerCase().includes(q) || (p.code || '').toLowerCase().includes(q) || String(p.barcode || '').toLowerCase().includes(q));
+            }
+            return list;
+        }, [products, selectedVendor, debouncedSearch]);
+
+        const cartQtyMap = useMemo(() => { const m = new Map(); cart.forEach(i => m.set(i.productId, Number(i.quantity) || 0)); return m; }, [cart]);
+        const cartTotal = useMemo(() => cart.reduce((s, i) => s + ((Number(i.price) || 0) * (Number(i.quantity) || 0)), 0), [cart]);
+        const cartItemCount = useMemo(() => cart.reduce((s, i) => s + (Number(i.quantity) || 0), 0), [cart]);
+        const selectedCustomerObj = useMemo(() => customers.find(c => c.id === selectedCustomerId) || null, [customers, selectedCustomerId]);
+        const activeLoyaltyRule = useMemo(() => loyaltyRules.find(r => r.shopId === selectedShopId && r.status !== 'Inactive') || loyaltyRules.find(r => r.shopId === 'All' && r.status !== 'Inactive') || null, [loyaltyRules, selectedShopId]);
+        const loyaltyStatus = useMemo(() => evaluateCustomerLoyaltyStatus(selectedCustomerObj, activeLoyaltyRule), [selectedCustomerObj, activeLoyaltyRule]);
+
+        // 0ms Live Broadcast to Customer Display (POS-KHRQ.html)
+        React.useLayoutEffect(() => {
+            if (!selectedShopId || showPayment || showReceipt) return;
+            const rate = Math.max(100, Number(currentShopObj?.khqrConfig?.exchangeRate) || 4000);
+            if (cart.length > 0) {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                    status: 'CART', shopId: selectedShopId, shopName: currentShopObj?.brandingName || currentShopObj?.name || 'POS Terminal',
+                    items: cart, itemCount: cartItemCount, subtotalKhr: cartTotal, discountKhr: 0,
+                    amountKhr: cartTotal, amountUsd: Number((cartTotal / rate).toFixed(2)), exchangeRate: rate,
+                    customerName: selectedCustomerObj?.name || null, customerPoints: loyaltyStatus.effectivePoints
+                });
+            } else {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                    status: 'IDLE', shopId: selectedShopId, shopName: currentShopObj?.brandingName || currentShopObj?.name || 'POS Terminal',
+                    exchangeRate: rate, items: [], itemCount: 0, subtotalKhr: 0, discountKhr: 0, amountKhr: 0, amountUsd: 0
+                });
+            }
+        }, [cart, cartTotal, cartItemCount, selectedShopId, currentShopObj, selectedCustomerObj, loyaltyStatus.effectivePoints, showPayment, showReceipt]);
+
+        const addToCart = useCallback((prod) => {
+            if (!currentShift) { setShowShift(true); return; }
+            const price = getEffectiveShopPrice(prod, selectedShopId);
+            setCart(prev => {
+                const ex = prev.find(i => i.productId === prod.id);
+                if (ex) return prev.map(i => i.productId === prod.id ? { ...i, quantity: i.quantity + 1 } : i);
+                return [...prev, { productId: prod.id, name: prod.name, code: prod.code, price, originalPrice: price, cost: Number(prod.cost) || 0, quantity: 1 }];
+            });
+        }, [currentShift, selectedShopId]);
+
+        const handleSearchKeyDown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const q = searchTerm.trim().toLowerCase();
+                const exact = products.find(p => String(p.barcode || '').toLowerCase() === q || String(p.code || '').toLowerCase() === q);
+                const target = exact || filteredProducts[highlightedIndex] || filteredProducts[0];
+                if (target) { addToCart(target); setSearchTerm(''); setHighlightedIndex(0); }
+            }
+        };
+
+        const handleProcessSale = async (details) => {
+            if (!selectedShopId || cart.length === 0 || !currentShift) return;
+            setIsProcessing(true);
+            try {
+                const receiptNo = window.SolarisInvoiceEngine.allocateInvoiceNumber(currentShopObj);
+                const batch = db.batch();
+                const saleRef = db.collection('sales').doc();
+                const verifiedAba = details.verifiedAba || null;
+                const isAba = !!(verifiedAba?.isValid && verifiedAba?.trxId);
+
+                const saleData = {
+                    receiptNo, shopId: selectedShopId, shopName: currentShopObj?.name || 'Shop',
+                    cashierId: userProfile.uid, cashierName: userProfile.name, shiftId: currentShift.id,
+                    deviceId: currentDeviceId, deviceName: currentDevice?.name || 'POS',
+                    customerId: selectedCustomerId || null, customerName: selectedCustomerObj?.name || 'Walk-in',
+                    items: cart, subtotal: cartTotal, discount: details.discount || 0,
+                    manualDiscount: details.manualDiscount || 0, manualDiscountPct: details.manualDiscountPct || 0,
+                    grandTotal: Math.max(0, cartTotal - (details.discount || 0)),
+                    totalCost: cart.reduce((s, i) => s + ((Number(i.cost) || 0) * (Number(i.quantity) || 1)), 0),
+                    paymentMethod: details.method, amountTendered: details.tendered,
+                    tenderedUSD: details.tenderedUSD || 0, tenderedKHR: details.tenderedKHR || 0,
+                    exchangeRate: details.exchangeRate || 4000, changeDue: details.change || 0,
+                    abaVerified: isAba, abaTrxId: isAba ? verifiedAba.trxId : null, abaApv: isAba ? verifiedAba.apv : (details.apvRef || null),
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(), createdAt: new Date().toISOString()
+                };
+
+                batch.set(saleRef, saleData);
+                if (isAba) window.SolarisPayWayVerifier.claimAbaPaymentForSale(verifiedAba.trxId, saleRef.id, receiptNo);
+
+                if (currentShopObj?.manageStock !== false) {
+                    cart.forEach(item => {
+                        batch.update(db.collection('products').doc(item.productId), {
+                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                        window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, selectedShopId, -item.quantity);
+                    });
+                }
+
+                const isCash = details.method === 'Cash';
+                batch.set(db.collection('shifts').doc(currentShift.id), {
+                    totalSales: firebase.firestore.FieldValue.increment(saleData.grandTotal),
+                    transactionCount: firebase.firestore.FieldValue.increment(1),
+                    totalCashSales: firebase.firestore.FieldValue.increment(isCash ? saleData.grandTotal : 0),
+                    totalKHQRSales: firebase.firestore.FieldValue.increment(!isCash ? saleData.grandTotal : 0)
+                }, { merge: true });
+
+                const completed = { ...saleData, id: saleRef.id };
+                window.SolarisLocalSalesStore.recordSale(completed);
+                setLastSale(completed);
+                setCart([]); setSelectedCustomerId(''); setShowPayment(false); setShowReceipt(true); setIsProcessing(false);
+                batch.commit().catch(() => {});
+            } catch (err) {
+                setIsProcessing(false);
+                setAlertMsg({ show: true, title: 'Sale Error', message: err.message, isError: true });
+            }
+        };
+
+        if (!currentDeviceId) return <DeviceSetup userProfile={userProfile} />;
+
+        return (
+            <div className="flex flex-col h-[calc(100dvh-56px)] p-2 sm:p-3 select-none">
+                <MessageModal {...alertMsg} onClose={() => setAlertMsg(p => ({ ...p, show: false }))} />
+                <ConfirmationModal show={showClearConfirm} title="Clear Cart?" message="Remove all items from the current ticket?" onConfirm={() => {
+                    window.SolarisLocalSalesStore.recordClearedCart({ id: `clr_${Date.now()}`, actionType: 'clear_cart', shopId: selectedShopId, shopName: currentShopObj?.name, cashierName: userProfile.name, items: cart, totalAmount: cartTotal, totalQty: cartItemCount, createdAt: new Date().toISOString() });
+                    setCart([]); setShowClearConfirm(false);
+                }} onCancel={() => setShowClearConfirm(false)} />
+
+                {showPayment && <PaymentModal total={cartTotal} cart={cart} customer={selectedCustomerObj} shop={currentShopObj} loyaltyRule={activeLoyaltyRule} systemConfig={systemConfig} onConfirm={handleProcessSale} onCancel={() => setShowPayment(false)} isProcessing={isProcessing} />}
+                {showReceipt && lastSale && <ReceiptModal saleData={lastSale} onClose={() => setShowReceipt(false)} />}
+                {showHistory && <SalesHistoryModal sales={todaySales} onClose={() => setShowHistory(false)} onReprint={s => { setLastSale(s); setShowReceipt(true); }} />}
+                {showDaily && <DailyReportModal sales={todaySales} onClose={() => setShowDaily(false)} />}
+                <BankAutoSumModal show={showAutoSum} onClose={() => setShowAutoSum(false)} currentShift={currentShift} shop={currentShopObj} />
+                <LiveDynamicKhqrSimulatorModal show={showKhqrSim} onClose={() => setShowKhqrSim(false)} shop={currentShopObj} systemConfig={systemConfig} />
+                {showShift && <ShiftManagementModal currentShift={currentShift} shopId={selectedShopId} userProfile={userProfile} onClose={() => setShowShift(false)} deviceId={currentDeviceId} todaySales={todaySales} onShiftStateChange={(s) => { setCurrentShift(s); if (localShiftKey) { if (s) localStorage.setItem(localShiftKey, JSON.stringify(s)); else localStorage.removeItem(localShiftKey); } }} />}
+                {showAddCust && <AddCustomerModal onClose={() => setShowAddCust(false)} onSave={c => { setSelectedCustomerId(c.id); setShowAddCust(false); }} shops={shops} defaultShopId={selectedShopId} initialSearchTerm={customerSearch} />}
+
+                <div className="flex-1 flex gap-2.5 overflow-hidden min-h-0">
+                    {/* LEFT: PRODUCT CATALOG */}
+                    <div className={`flex-1 flex flex-col bg-slate-800 rounded-xl border border-slate-700 overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
+                        <div className="p-2.5 bg-slate-900/70 border-b border-slate-700 flex flex-col lg:flex-row gap-2 justify-between">
+                            <div className="flex gap-2 flex-1 min-w-0">
+                                <div className="flex-1 relative">
+                                    <input ref={searchRef} type="text" placeholder="Search or Scan Barcode..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} onKeyDown={handleSearchKeyDown} className="w-full bg-slate-800 text-white pl-9 pr-8 py-2 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm" autoFocus />
+                                    <i className="fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                                    {searchTerm && <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400"><i className="fas fa-times-circle"></i></button>}
+                                </div>
+                                <select value={selectedVendor} onChange={e => setSelectedVendor(e.target.value)} className="bg-slate-800 text-slate-200 px-2.5 py-2 rounded-xl border border-slate-600 text-xs font-bold max-w-[130px] truncate">
+                                    {vendorsList.map(v => <option key={v} value={v}>{v === 'All' ? 'All Vendors' : v}</option>)}
+                                </select>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0">
+                                <button type="button" onClick={() => {
+                                    const url = `./POS-KHRQ.html?shopId=${encodeURIComponent(selectedShopId)}&shopName=${encodeURIComponent(currentShopObj?.name || 'POS')}`;
+                                    const w = window.open(url, 'solaris_customer_display');
+                                    if (w) { try { w.focus(); } catch (e) {} window.SolarisPayWayVerifier.registerCustomerDisplayWindow(w, selectedShopId); }
+                                }} className="w-9 h-9 rounded-xl bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 flex items-center justify-center" title="Open Customer Display (0ms Sync)">
+                                    <i className="fas fa-tv"></i>
+                                </button>
+                                <div className={`w-9 h-9 rounded-xl border flex items-center justify-center ${isOnline ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'}`} title={isOnline ? 'Online' : 'Offline Mode'}>
+                                    <i className={`fas ${isOnline ? 'fa-wifi' : 'fa-wifi-slash'} text-xs`}></i>
+                                </div>
+                                <button type="button" onClick={() => setShowShift(true)} className={`w-9 h-9 rounded-xl flex items-center justify-center ${currentShift ? 'bg-green-600/20 text-green-400 border border-green-500/40' : 'bg-red-600 text-white animate-pulse'}`} title="Shift Management"><i className="fas fa-clock"></i></button>
+                                <button type="button" onClick={() => setShowHistory(true)} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-blue-400 border border-slate-600 flex items-center justify-center" title="Today's History"><i className="fas fa-history"></i></button>
+                                <button type="button" onClick={() => setShowDaily(true)} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-600 flex items-center justify-center" title="Daily Summary"><i className="fas fa-chart-pie"></i></button>
+                                <button type="button" onClick={() => currentShift ? setShowAutoSum(true) : setShowShift(true)} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-600 flex items-center justify-center" title="Bank AutoSum"><i className="fas fa-university"></i></button>
+                                <button type="button" onClick={() => setShowKhqrSim(true)} className="relative w-9 h-9 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/40 flex items-center justify-center" title="Live KHQR Simulator (PIN)">
+                                    <i className="fas fa-qrcode"></i><i className="fas fa-lock text-[7px] absolute bottom-1 right-1 text-amber-300"></i>
+                                </button>
+                                <div className="flex bg-slate-900 p-0.5 rounded-xl border border-slate-700">
+                                    <button type="button" onClick={() => setCatalogViewMode('list')} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold ${catalogViewMode === 'list' ? 'bg-blue-600 text-white' : 'text-slate-400'}`} title="Line View"><i className="fas fa-list"></i></button>
+                                    <button type="button" onClick={() => setCatalogViewMode('grid')} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold ${catalogViewMode === 'grid' ? 'bg-blue-600 text-white' : 'text-slate-400'}`} title="1:1 Photo Grid"><i className="fas fa-th-large"></i></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-2.5 min-h-0">
+                            {filteredProducts.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-500"><i className="fas fa-box-open text-4xl mb-2 opacity-40"></i><p className="text-sm font-bold">No products found</p></div>
+                            ) : catalogViewMode === 'list' ? (
+                                <div className="space-y-1.5">
+                                    {filteredProducts.slice(0, 80).map((prod, idx) => {
+                                        const stock = prod.stockByShop?.[selectedShopId] || 0;
+                                        const manageStock = currentShopObj?.manageStock !== false;
+                                        const inCart = cartQtyMap.get(prod.id) || 0;
+                                        const price = getEffectiveShopPrice(prod, selectedShopId);
+                                        return (
+                                            <div key={prod.id} onClick={() => addToCart(prod)} onMouseEnter={() => setHighlightedIndex(idx)} className={`p-2.5 rounded-xl border flex items-center justify-between gap-3 cursor-pointer transition active:scale-[0.99] ${inCart > 0 ? 'bg-emerald-950/25 border-emerald-500/40' : 'bg-slate-900/60 border-slate-700/80 hover:bg-slate-700/60'}`}>
+                                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                                    {prod.imageUrl ? <img src={prod.imageUrl} alt={prod.name} loading="lazy" className="w-10 h-10 rounded-lg object-cover aspect-square border border-slate-700 shrink-0" /> : <div className="w-10 h-10 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400 font-black text-xs shrink-0 uppercase">{(prod.name || '?').slice(0, 2)}</div>}
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-bold text-sm text-slate-100 truncate">{prod.name}</span>
+                                                            {inCart > 0 && <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-slate-950 font-black text-[10px] shrink-0">{inCart}</span>}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+                                                            <span className="text-blue-300 font-semibold">{prod.code}</span>
+                                                            {prod.barcode && <><span className="text-slate-600">•</span><span className="truncate">{prod.barcode}</span></>}
+                                                            {manageStock && <><span className="text-slate-600">•</span><span className={`font-bold ${stock <= 0 ? 'text-red-400' : (prod.minStock > 0 && stock <= prod.minStock) ? 'text-amber-300' : 'text-slate-200'}`}>{stock}</span></>}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div className="text-sm sm:text-base font-black text-emerald-400 font-mono shrink-0">៛{khrFormatter.format(price)}</div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
+                                    {filteredProducts.slice(0, 80).map(prod => {
+                                        const stock = prod.stockByShop?.[selectedShopId] || 0;
+                                        const inCart = cartQtyMap.get(prod.id) || 0;
+                                        const price = getEffectiveShopPrice(prod, selectedShopId);
+                                        return (
+                                            <div key={prod.id} onClick={() => addToCart(prod)} className={`rounded-2xl border overflow-hidden flex flex-col cursor-pointer transition active:scale-[0.98] ${inCart > 0 ? 'bg-slate-900 border-emerald-500/60' : 'bg-slate-900/80 border-slate-700/80 hover:border-slate-500'}`}>
+                                                <div className="relative w-full aspect-square bg-slate-950 flex items-center justify-center overflow-hidden">
+                                                    {prod.imageUrl ? <img src={prod.imageUrl} alt={prod.name} loading="lazy" className="w-full h-full object-cover" /> : <span className="text-2xl font-black text-slate-500 uppercase">{(prod.name || 'PR').slice(0, 2)}</span>}
+                                                    <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-slate-950/80 text-[9px] font-mono text-slate-200">{prod.code}</span>
+                                                    {inCart > 0 && <span className="absolute top-1.5 right-1.5 min-w-[22px] h-[22px] px-1.5 rounded-full bg-emerald-500 text-slate-950 font-black text-[11px] flex items-center justify-center">{inCart}</span>}
+                                                    <span className={`absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded text-[9px] font-black ${stock <= 0 ? 'bg-red-600 text-white' : 'bg-slate-950/80 text-slate-200'}`}>{stock}</span>
+                                                </div>
+                                                <div className="p-2 flex flex-col justify-between flex-1 gap-1">
+                                                    <div className="text-xs font-bold text-slate-100 line-clamp-2">{prod.name}</div>
+                                                    <div className="text-sm font-black text-emerald-400 font-mono">៛{khrFormatter.format(price)}</div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* RIGHT: POS CART */}
+                    <div className={`w-full md:w-[340px] lg:w-[390px] shrink-0 flex flex-col bg-slate-800 rounded-xl border border-slate-700 overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
+                        <div className="p-2.5 bg-slate-900/70 border-b border-slate-700 space-y-2 shrink-0">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-sm font-black text-white flex items-center gap-2">
+                                    <i className="fas fa-shopping-cart text-blue-400"></i>
+                                    <span>Ticket</span>
+                                    <span className="px-2 py-0.5 rounded-full bg-blue-600/25 text-blue-300 text-xs font-mono">{cartItemCount}</span>
+                                </h3>
+                                <button type="button" disabled={cart.length === 0} onClick={() => setShowClearConfirm(true)} className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-red-600 text-red-400 hover:text-white border border-slate-600 text-xs font-bold disabled:opacity-40"><i className="fas fa-trash-alt"></i></button>
+                            </div>
+
+                            <div className="relative flex items-center gap-1.5">
+                                {selectedCustomerObj ? (
+                                    <div className="flex-1 bg-amber-500/10 border border-amber-500/40 rounded-xl px-3 py-1.5 flex items-center justify-between text-xs">
+                                        <span className="font-bold text-amber-300 truncate">{selectedCustomerObj.name} ({loyaltyStatus.effectivePoints} Pts)</span>
+                                        <button type="button" onClick={() => setSelectedCustomerId('')} className="text-slate-400 hover:text-red-400"><i className="fas fa-times-circle"></i></button>
+                                    </div>
+                                ) : (
+                                    <div className="relative flex-1">
+                                        <input type="text" value={customerSearch} onFocus={() => setCustFocus(true)} onBlur={() => setTimeout(() => setCustFocus(false), 180)} onChange={e => setCustomerSearch(e.target.value)} placeholder="Search customer..." className="w-full bg-slate-800 text-slate-100 pl-8 pr-3 py-1.5 rounded-xl border border-slate-600 text-xs outline-none" />
+                                        <i className="fas fa-user absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                        {custFocus && customers.length > 0 && (
+                                            <div className="absolute z-40 left-0 right-0 mt-1 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl max-h-44 overflow-y-auto divide-y divide-slate-700">
+                                                {customers.filter(c => !customerSearch || (c.name || '').toLowerCase().includes(customerSearch.toLowerCase()) || String(c.phone || '').includes(customerSearch)).slice(0, 10).map(c => (
+                                                    <div key={c.id} onMouseDown={() => { setSelectedCustomerId(c.id); setCustomerSearch(''); }} className="px-3 py-2 hover:bg-slate-700 cursor-pointer flex justify-between text-xs">
+                                                        <span className="font-bold text-white">{c.name}</span><span className="text-amber-400">{c.points || 0} Pts</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                <button type="button" onClick={() => setShowAddCust(true)} className="w-8 h-8 rounded-xl bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 flex items-center justify-center shrink-0"><i className="fas fa-user-plus text-xs"></i></button>
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-2.5 space-y-2 min-h-0">
+                            {cart.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-6">
+                                    <i className="fas fa-shopping-basket text-4xl mb-2 opacity-30"></i>
+                                    <p className="text-sm font-bold text-slate-400">Cart is Empty</p>
+                                </div>
+                            ) : cart.map(item => (
+                                <div key={item.productId} className="bg-slate-900/70 p-2.5 rounded-xl border border-slate-700 flex flex-col gap-2">
+                                    <div className="flex justify-between gap-2">
+                                        <div className="min-w-0">
+                                            <div className="text-xs sm:text-sm font-bold text-slate-100 truncate">{item.name}</div>
+                                            <div className="text-[11px] font-mono text-emerald-400">៛{khrFormatter.format(item.price)}</div>
+                                        </div>
+                                        <button type="button" onClick={() => setCart(prev => prev.filter(i => i.productId !== item.productId))} className="w-7 h-7 rounded-lg bg-red-500/10 hover:bg-red-600 text-red-400 hover:text-white flex items-center justify-center shrink-0"><i className="fas fa-times text-xs"></i></button>
+                                    </div>
+                                    <div className="flex items-center justify-between pt-1 border-t border-slate-800">
+                                        <div className="flex items-center gap-1">
+                                            <button type="button" onClick={() => setCart(prev => prev.map(i => i.productId === item.productId ? { ...i, quantity: Math.max(1, i.quantity - 1) } : i))} className="w-7 h-7 rounded-lg bg-slate-800 text-slate-200 border border-slate-600 text-xs font-bold">-</button>
+                                            <span className="min-w-[32px] text-center font-mono text-xs font-black text-white">{item.quantity}</span>
+                                            <button type="button" onClick={() => setCart(prev => prev.map(i => i.productId === item.productId ? { ...i, quantity: i.quantity + 1 } : i))} className="w-7 h-7 rounded-lg bg-slate-800 text-slate-200 border border-slate-600 text-xs font-bold">+</button>
+                                        </div>
+                                        <div className="font-mono font-black text-sm text-emerald-400">៛{khrFormatter.format(item.price * item.quantity)}</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="p-3 bg-slate-900/90 border-t border-slate-700 space-y-2.5 shrink-0">
+                            <div className="flex items-baseline justify-between">
+                                <span className="text-xs font-bold uppercase text-slate-400">Total</span>
+                                <span className="text-2xl font-black text-emerald-400 font-mono">៛{khrFormatter.format(cartTotal)}</span>
+                            </div>
+                            {!currentShift ? (
+                                <button type="button" onClick={() => setShowShift(true)} className="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm">
+                                    <i className="fas fa-play-circle mr-1.5"></i>Open Shift to Sell
+                                </button>
+                            ) : (
+                                <button type="button" disabled={cart.length === 0 || isProcessing} onClick={() => setShowPayment(true)} className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 text-white font-black text-sm">
+                                    <i className="fas fa-cash-register mr-1.5"></i>Checkout • ៛{khrFormatter.format(cartTotal)}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                {/* MOBILE BOTTOM BAR */}
+                <div className="md:hidden h-13 bg-slate-900 border-t border-slate-700 grid grid-cols-2 items-center px-2 shrink-0 mt-2 rounded-xl gap-2">
+                    <button type="button" onClick={() => setActiveMobileTab('products')} className={`h-9 rounded-lg text-xs font-bold ${activeMobileTab === 'products' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
+                        <i className="fas fa-th-large mr-1.5"></i>Catalog
+                    </button>
+                    <button type="button" onClick={() => setActiveMobileTab('cart')} className={`h-9 rounded-lg text-xs font-bold ${activeMobileTab === 'cart' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
+                        <i className="fas fa-shopping-basket mr-1.5"></i>Ticket ({cartItemCount})
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    // ========================================================================
+    // 10. ROOT STANDALONE POS TERMINAL APP
+    // ========================================================================
+    function StandalonePOSApp() {
+        const [authState, setAuthState] = useState(() => {
+            try {
+                const cached = JSON.parse(localStorage.getItem('solaris_pos_standalone_profile_v1') || 'null');
+                if (cached?.uid) return { loading: false, userProfile: cached };
+            } catch (e) {}
+            return { loading: true, userProfile: null };
+        });
+        const [showInstall, setShowInstall] = useState(false);
+
+        useEffect(() => {
+            window.SolarisKeepAwakeManager.start();
+            return auth.onAuthStateChanged(async (user) => {
+                if (!user) {
+                    localStorage.removeItem('solaris_pos_standalone_profile_v1');
+                    setAuthState({ loading: false, userProfile: null });
+                    return;
+                }
+                try {
+                    const snap = await db.collection('users').where('uid', '==', user.uid).limit(1).get();
+                    const profile = !snap.empty
+                        ? { id: snap.docs[0].id, ...snap.docs[0].data(), uid: user.uid }
+                        : { id: user.uid, uid: user.uid, name: user.displayName || user.email?.split('@')[0] || 'Cashier', email: user.email || '', role: 'Staff', permissions: ['pos-terminal'] };
+                    try { localStorage.setItem('solaris_pos_standalone_profile_v1', JSON.stringify(profile)); } catch (e) {}
+                    setAuthState({ loading: false, userProfile: profile });
+                } catch (e) {
+                    setAuthState(prev => prev.userProfile ? prev : { loading: false, userProfile: { id: user.uid, uid: user.uid, name: user.email?.split('@')[0] || 'Cashier', role: 'Staff', permissions: ['pos-terminal'] } });
+                }
+            });
+        }, []);
+
+        if (authState.loading) {
+            return <div className="h-screen bg-slate-900 flex items-center justify-center"><div className="loader w-10 h-10"></div></div>;
+        }
+        if (!authState.userProfile) return <LoginPage />;
+
+        return (
+            <DataProvider>
+                <div className="h-screen h-[100dvh] bg-slate-900 text-slate-200 flex flex-col overflow-hidden">
+                    <InstallAppModal show={showInstall} onClose={() => setShowInstall(false)} />
+                    <POSHeader userProfile={authState.userProfile} onOpenInstallModal={() => setShowInstall(true)} />
+                    <POSTerminal userProfile={authState.userProfile} />
+                </div>
+            </DataProvider>
+        );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<StandalonePOSApp />);
+    </script>
+</body>
+</html>
