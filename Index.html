@@ -210,10 +210,10 @@
             });
 
             // ====================================================================
-            // SOLARIS ALWAYS-ON KEEP-AWAKE ENGINE (POS TERMINAL NEVER SLEEPS/LOCKS)
+            // SOLARIS ALWAYS-ON KEEP-AWAKE ENGINE (ACTIVE ON POS TERMINAL PAGE ONLY)
             // Layer 1: Native Screen Wake Lock API with auto-reacquire on release/visibility/focus
             // Layer 2: Live canvas.captureStream() silent video loop fallback for iPad/iOS/older tablets
-            // Layer 3: 30-second watchdog heartbeat to keep POS terminal ready 24/7 while open
+            // Layer 3: 30-second watchdog heartbeat while on POS Terminal; fully released on other pages
             // ====================================================================
             window.SolarisKeepAwakeManager = {
                 wakeLock: null,
@@ -223,6 +223,9 @@
                 watchdogTimer: null,
                 isActive: false,
                 started: false,
+                enabled: false,
+                _onGesture: null,
+                _onVisibleOrFocus: null,
                 listeners: new Set(),
 
                 subscribe(fn) {
@@ -235,14 +238,16 @@
                     this.listeners.forEach(fn => { try { fn(state); } catch (e) {} });
                 },
                 getState() {
-                    const hasNativeLock = !!(this.wakeLock && !this.wakeLock.released);
-                    const hasVideoLock = !!(this.noSleepVideo && !this.noSleepVideo.paused);
+                    const hasNativeLock = !!(this.enabled && this.wakeLock && !this.wakeLock.released);
+                    const hasVideoLock = !!(this.enabled && this.noSleepVideo && !this.noSleepVideo.paused);
                     return {
-                        isActive: hasNativeLock || hasVideoLock || this.isActive,
-                        mode: hasNativeLock ? 'WakeLock' : (hasVideoLock ? 'NoSleep' : 'Standby')
+                        enabled: !!this.enabled,
+                        isActive: this.enabled && (hasNativeLock || hasVideoLock || this.isActive),
+                        mode: !this.enabled ? 'Disabled' : (hasNativeLock ? 'WakeLock' : (hasVideoLock ? 'NoSleep' : 'Standby'))
                     };
                 },
                 async requestNativeWakeLock() {
+                    if (!this.enabled) return false;
                     if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return false;
                     if (document.visibilityState !== 'visible') return false;
                     if (this.wakeLock && !this.wakeLock.released) {
@@ -251,12 +256,19 @@
                     }
                     try {
                         const sentinel = await navigator.wakeLock.request('screen');
+                        // Guard against page switch while wakeLock promise was resolving
+                        if (!this.enabled) {
+                            try { await sentinel.release(); } catch (e) {}
+                            return false;
+                        }
                         this.wakeLock = sentinel;
                         this.isActive = true;
                         sentinel.addEventListener('release', () => {
-                            this.wakeLock = null;
+                            if (this.wakeLock === sentinel) {
+                                this.wakeLock = null;
+                            }
                             this.notify();
-                            if (document.visibilityState === 'visible') {
+                            if (this.enabled && document.visibilityState === 'visible') {
                                 setTimeout(() => this.requestNativeWakeLock(), 500);
                             }
                         });
@@ -268,6 +280,7 @@
                     }
                 },
                 startNoSleepVideoFallback() {
+                    if (!this.enabled) return false;
                     try {
                         if (this.noSleepVideo && !this.noSleepVideo.paused) {
                             this.isActive = true;
@@ -288,6 +301,7 @@
                         if (!this.noSleepDrawTimer && this.noSleepCanvas) {
                             let toggle = false;
                             this.noSleepDrawTimer = setInterval(() => {
+                                if (!this.enabled || !this.noSleepCanvas) return;
                                 const ctx = this.noSleepCanvas.getContext('2d');
                                 if (ctx) {
                                     toggle = !toggle;
@@ -309,10 +323,16 @@
                             video.srcObject = this.noSleepCanvas.captureStream(1);
                             document.body.appendChild(video);
                             this.noSleepVideo = video;
+                        } else if (!this.noSleepVideo.srcObject) {
+                            this.noSleepVideo.srcObject = this.noSleepCanvas.captureStream(1);
                         }
                         const playPromise = this.noSleepVideo.play();
                         if (playPromise && typeof playPromise.then === 'function') {
                             playPromise.then(() => {
+                                if (!this.enabled) {
+                                    this.stopNoSleepVideoFallback();
+                                    return;
+                                }
                                 this.isActive = true;
                                 this.notify();
                             }).catch(() => {});
@@ -322,14 +342,38 @@
                         return false;
                     }
                 },
+                stopNoSleepVideoFallback() {
+                    try {
+                        if (this.noSleepDrawTimer) {
+                            clearInterval(this.noSleepDrawTimer);
+                            this.noSleepDrawTimer = null;
+                        }
+                        if (this.noSleepVideo) {
+                            try { this.noSleepVideo.pause(); } catch (e) {}
+                            if (this.noSleepVideo.srcObject && typeof this.noSleepVideo.srcObject.getTracks === 'function') {
+                                this.noSleepVideo.srcObject.getTracks().forEach(track => {
+                                    try { track.stop(); } catch (e) {}
+                                });
+                            }
+                            this.noSleepVideo.srcObject = null;
+                            if (this.noSleepVideo.parentNode) {
+                                this.noSleepVideo.parentNode.removeChild(this.noSleepVideo);
+                            }
+                            this.noSleepVideo = null;
+                        }
+                    } catch (e) {}
+                },
                 async engage(fromUserGesture = false) {
+                    if (!this.enabled) return;
                     const nativeOk = await this.requestNativeWakeLock();
+                    if (!this.enabled) return;
                     if (!nativeOk || fromUserGesture) {
                         this.startNoSleepVideoFallback();
                     }
                     this.notify();
                 },
                 start() {
+                    this.enabled = true;
                     if (this.started) {
                         this.engage(false);
                         return;
@@ -337,28 +381,63 @@
                     this.started = true;
                     this.engage(false);
 
-                    const onGesture = () => this.engage(true);
-                    const onVisibleOrFocus = () => {
-                        if (document.visibilityState === 'visible') {
+                    this._onGesture = () => this.engage(true);
+                    this._onVisibleOrFocus = () => {
+                        if (this.enabled && document.visibilityState === 'visible') {
                             this.engage(false);
                         }
                     };
 
-                    window.addEventListener('pointerdown', onGesture, { passive: true });
-                    window.addEventListener('touchstart', onGesture, { passive: true });
-                    window.addEventListener('keydown', onGesture, { passive: true });
-                    document.addEventListener('visibilitychange', onVisibleOrFocus);
-                    window.addEventListener('focus', onVisibleOrFocus);
-                    window.addEventListener('pageshow', onVisibleOrFocus);
+                    window.addEventListener('pointerdown', this._onGesture, { passive: true });
+                    window.addEventListener('touchstart', this._onGesture, { passive: true });
+                    window.addEventListener('keydown', this._onGesture, { passive: true });
+                    document.addEventListener('visibilitychange', this._onVisibleOrFocus);
+                    window.addEventListener('focus', this._onVisibleOrFocus);
+                    window.addEventListener('pageshow', this._onVisibleOrFocus);
 
                     this.watchdogTimer = setInterval(() => {
-                        if (document.visibilityState === 'visible') {
+                        if (this.enabled && document.visibilityState === 'visible') {
                             const state = this.getState();
                             if (!state.isActive) {
                                 this.engage(false);
                             }
                         }
                     }, 30000);
+                },
+                async stop() {
+                    this.enabled = false;
+                    this.isActive = false;
+
+                    if (this._onGesture) {
+                        window.removeEventListener('pointerdown', this._onGesture);
+                        window.removeEventListener('touchstart', this._onGesture);
+                        window.removeEventListener('keydown', this._onGesture);
+                        this._onGesture = null;
+                    }
+                    if (this._onVisibleOrFocus) {
+                        document.removeEventListener('visibilitychange', this._onVisibleOrFocus);
+                        window.removeEventListener('focus', this._onVisibleOrFocus);
+                        window.removeEventListener('pageshow', this._onVisibleOrFocus);
+                        this._onVisibleOrFocus = null;
+                    }
+                    if (this.watchdogTimer) {
+                        clearInterval(this.watchdogTimer);
+                        this.watchdogTimer = null;
+                    }
+                    this.started = false;
+
+                    if (this.wakeLock) {
+                        const lockToRelease = this.wakeLock;
+                        this.wakeLock = null;
+                        try {
+                            if (!lockToRelease.released) {
+                                await lockToRelease.release();
+                            }
+                        } catch (e) {}
+                    }
+
+                    this.stopNoSleepVideoFallback();
+                    this.notify();
                 }
             };
         </script>
@@ -540,15 +619,101 @@
             </div>
         </div>
         <script>
-            // Hydrate custom app title into 0ms splash screen immediately from localStorage
-            try {
-                var cachedAppName = localStorage.getItem('solaris_cached_app_name');
-                if (cachedAppName) {
-                    document.title = cachedAppName;
-                    var bootTitleEl = document.getElementById('solaris-boot-title');
-                    if (bootTitleEl) bootTitleEl.textContent = cachedAppName;
+            // ====================================================================
+            // PHASE 1.1: ZERO-SETTINGS LOCAL CACHE SECURITY POLICY — BOOT SANITIZER
+            // Automatically purges any legacy Settings keys from localStorage at 0ms
+            // boot before React initializes, and exposes shared policy helpers.
+            // ====================================================================
+            window.SolarisCacheClearEngine = {
+                SETTINGS_COLLECTIONS: [
+                    'shops',
+                    'users',
+                    'devices',
+                    'payway_secrets',
+                    'loyalty_programs',
+                    'crossPromoProducts',
+                    'system',
+                    'system_settings'
+                ],
+                LEGACY_SETTINGS_EXACT_KEYS: [
+                    'solaris_cached_app_name',
+                    'solaris_cached_shops_list',
+                    'solaris_render_listener_url',
+                    'solaris_allowed_payway_chat_ids',
+                    'solaris_bypass_db_chat_map',
+                    'solaris_bypass_db_shop_map',
+                    'solaris_last_active_profile_v1',
+                    'solaris_khqr_last_shop'
+                ],
+                LEGACY_SETTINGS_PREFIXES: [
+                    'solaris_payway_secrets_',
+                    'solaris_user_profile_',
+                    'solaris_khqr_display_session_',
+                    'solaris_col_cache_shops',
+                    'solaris_col_cache_users',
+                    'solaris_col_cache_devices',
+                    'solaris_col_cache_loyalty_programs',
+                    'solaris_col_cache_crossPromoProducts',
+                    'solaris_opt_upserts_shops',
+                    'solaris_opt_deleted_shops',
+                    'solaris_opt_upserts_users',
+                    'solaris_opt_deleted_users',
+                    'solaris_opt_upserts_devices',
+                    'solaris_opt_deleted_devices',
+                    'solaris_opt_upserts_loyalty_programs',
+                    'solaris_opt_deleted_loyalty_programs',
+                    'solaris_opt_upserts_crossPromoProducts',
+                    'solaris_opt_deleted_crossPromoProducts'
+                ],
+                lastPurgeReport: {
+                    removedCount: 0,
+                    removedKeys: [],
+                    timestamp: null
+                },
+
+                // Checks whether a Firestore collection belongs to the RAM-only Settings policy
+                isSettingsCollection(collectionName) {
+                    if (!collectionName) return false;
+                    return this.SETTINGS_COLLECTIONS.includes(String(collectionName).trim());
+                },
+
+                // Checks whether a localStorage key is a forbidden Settings cache key
+                isForbiddenSettingsCacheKey(key) {
+                    if (!key || typeof key !== 'string') return false;
+                    if (this.LEGACY_SETTINGS_EXACT_KEYS.includes(key)) return true;
+                    return this.LEGACY_SETTINGS_PREFIXES.some(prefix => key.startsWith(prefix));
+                },
+
+                // Scans localStorage and immediately deletes any legacy Settings keys
+                purgeLegacySettingsFromLocalCache() {
+                    const removedKeys = [];
+                    try {
+                        const keysToRemove = [];
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const key = localStorage.key(i);
+                            if (this.isForbiddenSettingsCacheKey(key)) {
+                                keysToRemove.push(key);
+                            }
+                        }
+                        keysToRemove.forEach(key => {
+                            try {
+                                localStorage.removeItem(key);
+                                removedKeys.push(key);
+                            } catch (e) {}
+                        });
+                    } catch (e) {}
+
+                    this.lastPurgeReport = {
+                        removedCount: removedKeys.length,
+                        removedKeys,
+                        timestamp: Date.now()
+                    };
+                    return this.lastPurgeReport;
                 }
-            } catch (e) {}
+            };
+
+            // Execute automatic boot sanitizer immediately before application scripts run
+            window.SolarisCacheClearEngine.purgeLegacySettingsFromLocalCache();
         </script>
 
         <script type="text/babel">
@@ -575,11 +740,11 @@
         : {
             apiKey: _k1 + _k2 + _k3,
             authDomain: "pos2027-0101.firebaseapp.com",
-            projectId: "pos2027-0101",
-            storageBucket: "pos2027-0101.firebasestorage.app",
-            messagingSenderId: "11803390205",
-            appId: "1:11803390205:web:40960c7af1ab4574434e94",
-            measurementId: "G-8EMQCKQLEJ"
+            projectId: "pos2027-0101",
+            storageBucket: "pos2027-0101.firebasestorage.app",
+            messagingSenderId: "11803390205",
+            appId: "1:11803390205:web:40960c7af1ab4574434e94",
+            measurementId: "G-8EMQCKQLEJ"
         };
         
     const app = firebase.initializeApp(firebaseConfig);
@@ -810,24 +975,33 @@
         } catch (e) {}
     })();
 
-    // --- SECURITY: SESSION & INACTIVITY TIMEOUT CONFIGURATION ---
-    // Require re-login if the browser is closed or if the app was inactive/closed for > 30 minutes
-    const AUTH_SESSION_ACTIVE_KEY = 'solaris_pos_session_active';
-    const AUTH_LAST_ACTIVE_TS_KEY = 'solaris_pos_last_active_ts';
-    const MAX_INACTIVITY_MS = 30 * 60 * 1000; // 30 minutes
+    // Session Security Constants (Enforces fresh login when browser/tab is closed or inactive > 30 mins)
+    const AUTH_SESSION_ACTIVE_KEY = 'solaris_auth_session_active_v1';
+    const AUTH_LAST_ACTIVE_TS_KEY = 'solaris_auth_last_active_ts_v1';
+    const MAX_INACTIVITY_MS = 30 * 60 * 1000;
 
-    // Force Firebase Auth to use SESSION persistence by default so closing the browser/tab clears the login session
-    auth.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(err => {
-        console.warn("Session persistence warning:", err);
-    });
-    //Safe Sign-Out helper that cleans up active listeners and session markers before signing out
+    //Safe Sign-Out helper that cleans up active listeners, RAM Settings caches, and session markers before signing out
     window.safeSignOut = async () => {
         try {
+            if (window.SolarisKeepAwakeManager) {
+                window.SolarisKeepAwakeManager.stop();
+            }
             sessionStorage.removeItem(AUTH_SESSION_ACTIVE_KEY);
             localStorage.removeItem(AUTH_LAST_ACTIVE_TS_KEY);
-            localStorage.removeItem('solaris_last_active_profile_v1');
+            if (window.SolarisKHQREngine?.clearRamSettings) {
+                window.SolarisKHQREngine.clearRamSettings();
+            }
             if (window.SolarisPayWayVerifier) {
                 window.SolarisPayWayVerifier.stopSharedListeners();
+                if (window.SolarisPayWayVerifier.clearRamSettings) {
+                    window.SolarisPayWayVerifier.clearRamSettings();
+                }
+            }
+            if (window.SolarisCollectionMutator?.clearRamSettingsOverrides) {
+                window.SolarisCollectionMutator.clearRamSettingsOverrides();
+            }
+            if (window.SolarisCacheClearEngine?.purgeLegacySettingsFromLocalCache) {
+                window.SolarisCacheClearEngine.purgeLegacySettingsFromLocalCache();
             }
             if (window.SolarisInvoiceEngine && window.SolarisInvoiceEngine._unsubs) {
                 window.SolarisInvoiceEngine._unsubs.forEach(unsub => {
@@ -1364,7 +1538,15 @@
 
         _secretsCache: new Map(),
 
-        // Reads staff-only Telegram/MTProto credentials from `payway_secrets/{shopId}` (Compat SDK with Quota-Safe Memory + LocalStorage Cache)
+        // Clears all in-memory Settings caches (called on sign-out)
+        clearRamSettings() {
+            this._secretsCache.clear();
+            this._allowedChatIdsSet.clear();
+            this._bypassDbByChatIdMap.clear();
+            this._bypassDbByShopIdMap.clear();
+        },
+
+        // Reads staff-only Telegram/MTProto credentials from `payway_secrets/{shopId}` (RAM-only cache, never saved to localStorage)
         async getStaffPaywaySecrets(shopId, forceRefresh = false) {
             const cacheKey = shopId && shopId !== 'All' ? String(shopId) : '__global__';
             const now = Date.now();
@@ -1378,19 +1560,11 @@
 
             let secrets = null;
             if (shopId && shopId !== 'All') {
-                try {
-                    const localCached = localStorage.getItem(`solaris_payway_secrets_${shopId}`);
-                    if (localCached) secrets = JSON.parse(localCached);
-                } catch (e) {}
-
-                if ((!secrets || forceRefresh) && !window.SolarisPayWayVerifier?.isQuotaExceeded) {
+                if (!window.SolarisPayWayVerifier?.isQuotaExceeded) {
                     try {
                         const snap = await db.collection('payway_secrets').doc(shopId).get();
                         if (snap.exists) {
                             secrets = snap.data();
-                            try {
-                                localStorage.setItem(`solaris_payway_secrets_${shopId}`, JSON.stringify(secrets));
-                            } catch (e) {}
                         }
                     } catch (e) {}
                 }
@@ -1420,7 +1594,7 @@
             return cleaned.length >= 100 && cleaned[0] === '1' && /^[A-Za-z0-9+/=_-]+$/.test(cleaned);
         },
 
-        // Strict Whitelist of Normalized PayWay Chat IDs for Shops with Auto-Verification Enabled
+        // Strict Whitelist of Normalized PayWay Chat IDs for Shops with Auto-Verification Enabled (RAM-only)
         _allowedChatIdsSet: new Set(),
         _bypassDbByChatIdMap: new Map(), // normalizedChatId -> boolean (true = Bypass Firebase DB)
         _bypassDbByShopIdMap: new Map(), // shopId -> boolean (true = Bypass Firebase DB)
@@ -1436,20 +1610,14 @@
 
             (shopsList || []).forEach(shop => {
                 const cfg = shop?.khqrConfig;
-                let secChatId = '';
+                const ramSec = shop?.id ? this._secretsCache.get(String(shop.id))?.data : null;
+                const secChatId = ramSec?.paywayChatId || ramSec?.khqrConfigBackup?.paywayChatId || '';
                 let secBypass = undefined;
-                try {
-                    const localSec = localStorage.getItem(`solaris_payway_secrets_${shop?.id}`);
-                    if (localSec) {
-                        const parsedSec = JSON.parse(localSec);
-                        secChatId = parsedSec?.paywayChatId || parsedSec?.khqrConfigBackup?.paywayChatId || '';
-                        if (parsedSec?.bypassFirebaseDb !== undefined) {
-                            secBypass = parsedSec.bypassFirebaseDb !== false;
-                        } else if (parsedSec?.khqrConfigBackup?.bypassFirebaseDb !== undefined) {
-                            secBypass = parsedSec.khqrConfigBackup.bypassFirebaseDb !== false;
-                        }
-                    }
-                } catch (e) {}
+                if (ramSec?.bypassFirebaseDb !== undefined) {
+                    secBypass = ramSec.bypassFirebaseDb !== false;
+                } else if (ramSec?.khqrConfigBackup?.bypassFirebaseDb !== undefined) {
+                    secBypass = ramSec.khqrConfigBackup.bypassFirebaseDb !== false;
+                }
 
                 // Default to ON (true) unless explicitly set to false
                 const bypassDb = cfg?.bypassFirebaseDb !== undefined
@@ -1480,15 +1648,10 @@
             this._allowedChatIdsSet = nextSet;
             this._bypassDbByChatIdMap = nextBypassChatMap;
             this._bypassDbByShopIdMap = nextBypassShopMap;
-            try {
-                localStorage.setItem('solaris_allowed_payway_chat_ids', JSON.stringify(Array.from(nextSet)));
-                localStorage.setItem('solaris_bypass_db_chat_map', JSON.stringify(Object.fromEntries(nextBypassChatMap)));
-                localStorage.setItem('solaris_bypass_db_shop_map', JSON.stringify(Object.fromEntries(nextBypassShopMap)));
-            } catch (e) {}
             return nextSet;
         },
 
-        // Evaluates whether Bank State (Telegram Feed) should bypass Firebase Database (Default ON = true)
+        // Evaluates whether Bank State (Telegram Feed) should bypass Firebase Database (RAM-only, Default ON = true)
         shouldBypassFirebaseDb(shopId = '', chatId = '') {
             if (shopId && shopId !== 'All' && this._bypassDbByShopIdMap?.has(String(shopId))) {
                 return this._bypassDbByShopIdMap.get(String(shopId));
@@ -1497,16 +1660,6 @@
             if (normChat && this._bypassDbByChatIdMap?.has(normChat)) {
                 return this._bypassDbByChatIdMap.get(normChat);
             }
-            try {
-                if (shopId && shopId !== 'All') {
-                    const shopMap = JSON.parse(localStorage.getItem('solaris_bypass_db_shop_map') || '{}');
-                    if (shopMap[shopId] !== undefined) return shopMap[shopId] !== false;
-                }
-                if (normChat) {
-                    const chatMap = JSON.parse(localStorage.getItem('solaris_bypass_db_chat_map') || '{}');
-                    if (chatMap[normChat] !== undefined) return chatMap[normChat] !== false;
-                }
-            } catch (e) {}
             if (this._bypassDbByShopIdMap && this._bypassDbByShopIdMap.size > 0) {
                 for (const val of this._bypassDbByShopIdMap.values()) {
                     if (val === false) return false;
@@ -1517,15 +1670,6 @@
         },
 
         getAllowedChatIdsSet() {
-            if (this._allowedChatIdsSet && this._allowedChatIdsSet.size > 0) {
-                return this._allowedChatIdsSet;
-            }
-            try {
-                const cached = JSON.parse(localStorage.getItem('solaris_allowed_payway_chat_ids') || '[]');
-                if (Array.isArray(cached) && cached.length > 0) {
-                    this._allowedChatIdsSet = new Set(cached);
-                }
-            } catch (e) {}
             return this._allowedChatIdsSet;
         },
 
@@ -2557,20 +2701,10 @@
         }
     };
 
-    // --- Direct Render.com SSE & HTTP Bridge (Global Config Synced via KHQR Settings UI) ---
+    // --- Direct Render.com SSE & HTTP Bridge (Global Config Synced via KHQR Settings UI, RAM-only) ---
     // Ensures 0ms payment delivery with 0 Firebase Reads/Writes when Bypass Mode is ON!
     window.SolarisRenderBridge = {
-        baseUrl: (() => {
-            const defaultUrl = 'https://pos-bh4o.onrender.com';
-            try {
-                const saved = String(localStorage.getItem('solaris_render_listener_url') || '').trim().replace(/\/+$/, '');
-                if (saved && /^https?:\/\//i.test(saved)) {
-                    return saved;
-                }
-                localStorage.setItem('solaris_render_listener_url', defaultUrl);
-            } catch (e) {}
-            return defaultUrl;
-        })(),
+        baseUrl: 'https://pos-bh4o.onrender.com',
         eventSource: null,
         isConnected: false,
         lastPingAt: 0,
@@ -2583,7 +2717,6 @@
             if (!clean) return;
             const changed = clean !== this.baseUrl;
             this.baseUrl = clean;
-            try { localStorage.setItem('solaris_render_listener_url', clean); } catch (e) {}
             if (changed && this.eventSource) {
                 try { this.eventSource.close(); } catch (e) {}
                 this.eventSource = null;
@@ -2942,6 +3075,18 @@
 
         _displayWindows: new Set(),
         _windowMsgBound: false,
+        _ramShopsList: [],
+
+        setRamShopsList(shopsList = []) {
+            this._ramShopsList = Array.isArray(shopsList) ? shopsList : [];
+        },
+
+        clearRamSettings() {
+            this._ramShopsList = [];
+            this._lastSessionPayloadByShop = {};
+            this._lastCloudDisplayStatusByShop = {};
+            this._lastCloudPayloadHashByShop = {};
+        },
 
         _ensureDisplayWindowListener() {
             if (this._windowMsgBound) return;
@@ -2951,9 +3096,9 @@
                 if (!msg || msg.type !== 'REQUEST_POS_SYNC' || !ev.source) return;
                 try {
                     this._displayWindows.add(ev.source);
-                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
-                    if (Array.isArray(cachedShops) && cachedShops.length > 0) {
-                        ev.source.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    const ramShops = this._ramShopsList || [];
+                    if (ramShops.length > 0) {
+                        ev.source.postMessage({ type: 'POS_SHOPS_SYNC', shops: ramShops }, '*');
                     }
                     const targetShopId = msg.shopId;
                     if (targetShopId && this._lastSessionPayloadByShop?.[targetShopId]) {
@@ -2985,9 +3130,9 @@
                     return;
                 }
                 try {
-                    const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
-                    if (Array.isArray(cachedShops) && cachedShops.length > 0) {
-                        win.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops }, '*');
+                    const ramShops = this._ramShopsList || [];
+                    if (ramShops.length > 0) {
+                        win.postMessage({ type: 'POS_SHOPS_SYNC', shops: ramShops }, '*');
                     }
                     const payload = shopId ? this._lastSessionPayloadByShop?.[shopId] : null;
                     if (payload) {
@@ -3033,7 +3178,7 @@
                     }
                 }
 
-                // 1. 0ms Cross-Tab BroadcastChannel (Memory-to-memory push before localStorage disk write)
+                // 1. 0ms Cross-Tab BroadcastChannel (Memory-to-memory push, zero localStorage persistence)
                 try {
                     if (typeof BroadcastChannel !== 'undefined') {
                         if (!this._khqrDisplayBus) {
@@ -3043,9 +3188,9 @@
                                 const msg = ev?.data;
                                 if (msg && msg.type === 'REQUEST_POS_SYNC') {
                                     try {
-                                        const cachedShops = JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]');
-                                        if (Array.isArray(cachedShops) && cachedShops.length > 0) {
-                                            this._khqrDisplayBus.postMessage({ type: 'POS_SHOPS_SYNC', shops: cachedShops });
+                                        const ramShops = this._ramShopsList || [];
+                                        if (ramShops.length > 0) {
+                                            this._khqrDisplayBus.postMessage({ type: 'POS_SHOPS_SYNC', shops: ramShops });
                                         }
                                     } catch (e) {}
                                     const targetShopId = msg.shopId;
@@ -3074,15 +3219,6 @@
                         });
                     }
                 } catch (e) {}
-
-                // 1B. Defer LocalStorage disk persistence to microtask so it never delays the 0ms display frame
-                const persistLocal = () => {
-                    try {
-                        localStorage.setItem(`solaris_khqr_display_session_${shopId}`, JSON.stringify(fullPayload));
-                    } catch (e) {}
-                };
-                if (typeof queueMicrotask === 'function') queueMicrotask(persistLocal);
-                else setTimeout(persistLocal, 0);
 
                 // 2. CROSS-DEVICE CLOUD SYNC (Lightweight payload: strips heavy base64 QR images so tablets sync ~10x faster)
                 if (this.isQuotaExceeded) return;
@@ -3960,15 +4096,8 @@
         const [backgroundFetchInitiated, setBackgroundFetchInitiated] = useState(false);
         const [productSyncStatus, setProductSyncStatus] = useState(() => window.SolarisSmartProductEngine.syncStatus);
         
-        // --- NEW: System Config State ---
-        const [systemConfig, setSystemConfig] = useState(() => {
-            try {
-                const cachedName = localStorage.getItem('solaris_cached_app_name');
-                return { appName: cachedName || 'PO System' };
-            } catch (e) {
-                return { appName: 'PO System' };
-            }
-        });
+        // --- System Config State (RAM-Only; Zero-Settings Local Cache Policy) ---
+        const [systemConfig, setSystemConfig] = useState({ appName: 'PO System' });
 
         // --- NEW: Device Management State (PHASE 1) ---
         const { data: devices, loading: devicesLoading } = useCollection('devices');
@@ -3982,7 +4111,7 @@
         const { data: vendors, loading: vendorsLoading } = useCollection('vendors');
         const { data: shops, loading: shopsLoading } = useCollection('shops');
 
-        // Cache shops list to localStorage & BroadcastChannel so standalone Customer Display (`khqr-display.html`) discovers branches in 0ms
+        // Keep shops list in RAM & push via BroadcastChannel so standalone Customer Display discovers branches in 0ms (never persisted to localStorage)
         useEffect(() => {
             if (!shops || shops.length === 0) return;
             try {
@@ -4021,7 +4150,9 @@
                         bankStateFeedMode: s.khqrConfig.bankStateFeedMode || 'on-demand'
                     } : null
                 }));
-                localStorage.setItem('solaris_cached_shops_list', JSON.stringify(lightShops));
+                if (window.SolarisPayWayVerifier?.setRamShopsList) {
+                    window.SolarisPayWayVerifier.setRamShopsList(lightShops);
+                }
                 if (typeof BroadcastChannel !== 'undefined') {
                     const bus = new BroadcastChannel('solaris_khqr_display_bus');
                     bus.postMessage({ type: 'POS_SHOPS_SYNC', shops: lightShops });
@@ -4047,15 +4178,12 @@
         const { data: loyaltyRules, loading: loyaltyRulesLoading } = useCollection('loyalty_programs');
         const { data: crossPromoProducts, loading: crossPromoProductsLoading } = useCollection('crossPromoProducts');
 
-        // --- NEW: Fetch System Config (Includes Global Render Bridge URL Sync for All Shops) ---
+        // --- Fetch System Config (RAM-only; Includes Global Render Bridge URL Sync for All Shops) ---
         useEffect(() => {
             const unsubscribe = db.collection('system').doc('config').onSnapshot(doc => {
                 if (doc.exists) {
                     const data = doc.data() || {};
                     setSystemConfig(prev => ({ ...prev, ...data }));
-                    if (data.appName) {
-                        try { localStorage.setItem('solaris_cached_app_name', data.appName); } catch (e) {}
-                    }
                     if (data.renderListenerUrl && window.SolarisRenderBridge) {
                         window.SolarisRenderBridge.setBaseUrl(
                             data.renderListenerUrl,
@@ -4162,8 +4290,14 @@
     // --- 3. CUSTOM HOOKS ---
 
     // Global 0ms Optimistic Collection Mutator (Ensures Add/Edit/Delete on Shops, Devices, Vendors, Customers, etc. NEVER hang during Firestore Quota Backoff)
+    // Enforces Zero-Settings Local Cache Policy: Settings collections are kept strictly in RAM (_ramOverrides) and never persisted to localStorage.
     window.SolarisCollectionMutator = {
         listeners: new Map(), // collectionName -> Set of refresh callbacks
+        _ramOverrides: new Map(), // collectionName -> { upserts: {}, deleted: [] } (RAM-only for Settings collections)
+
+        clearRamSettingsOverrides() {
+            this._ramOverrides.clear();
+        },
 
         subscribe(collectionName, fn) {
             if (!this.listeners.has(collectionName)) {
@@ -4185,6 +4319,9 @@
         },
 
         getOverrides(collectionName) {
+            if (window.SolarisCacheClearEngine?.isSettingsCollection(collectionName)) {
+                return this._ramOverrides.get(collectionName) || { upserts: {}, deleted: [] };
+            }
             try {
                 const rawUpserts = localStorage.getItem(`solaris_opt_upserts_${collectionName}`);
                 const rawDeleted = localStorage.getItem(`solaris_opt_deleted_${collectionName}`);
@@ -4253,21 +4390,29 @@
                 updatedAt: firebase.firestore.FieldValue.serverTimestamp()
             };
             const localSafeData = this.sanitizeForLocalCache(dataWithTimestamp);
+            const isSettingsCol = window.SolarisCacheClearEngine?.isSettingsCollection(collectionName);
 
-            try {
-                const { upserts, deleted } = this.getOverrides(collectionName);
-                upserts[finalId] = { ...(upserts[finalId] || {}), ...localSafeData, id: finalId };
-                const nextDeleted = (Array.isArray(deleted) ? deleted : []).filter(id => id !== finalId);
-                localStorage.setItem(`solaris_opt_upserts_${collectionName}`, JSON.stringify(upserts));
-                localStorage.setItem(`solaris_opt_deleted_${collectionName}`, JSON.stringify(nextDeleted));
+            if (isSettingsCol) {
+                const current = this._ramOverrides.get(collectionName) || { upserts: {}, deleted: [] };
+                const nextUpserts = { ...current.upserts, [finalId]: { ...(current.upserts[finalId] || {}), ...localSafeData, id: finalId } };
+                const nextDeleted = (Array.isArray(current.deleted) ? current.deleted : []).filter(id => id !== finalId);
+                this._ramOverrides.set(collectionName, { upserts: nextUpserts, deleted: nextDeleted });
+            } else {
+                try {
+                    const { upserts, deleted } = this.getOverrides(collectionName);
+                    upserts[finalId] = { ...(upserts[finalId] || {}), ...localSafeData, id: finalId };
+                    const nextDeleted = (Array.isArray(deleted) ? deleted : []).filter(id => id !== finalId);
+                    localStorage.setItem(`solaris_opt_upserts_${collectionName}`, JSON.stringify(upserts));
+                    localStorage.setItem(`solaris_opt_deleted_${collectionName}`, JSON.stringify(nextDeleted));
 
-                // Also update the base collection cache immediately so page reloads preserve the edit
-                const cacheKey = `solaris_col_cache_${collectionName}_[]`;
-                const cachedRaw = localStorage.getItem(cacheKey);
-                const cachedList = cachedRaw ? JSON.parse(cachedRaw) : [];
-                const mergedList = this.applyOverridesToList(collectionName, cachedList);
-                localStorage.setItem(cacheKey, JSON.stringify(mergedList.slice(0, 500)));
-            } catch (e) {}
+                    // Also update the base collection cache immediately so page reloads preserve the edit
+                    const cacheKey = `solaris_col_cache_${collectionName}_[]`;
+                    const cachedRaw = localStorage.getItem(cacheKey);
+                    const cachedList = cachedRaw ? JSON.parse(cachedRaw) : [];
+                    const mergedList = this.applyOverridesToList(collectionName, cachedList);
+                    localStorage.setItem(cacheKey, JSON.stringify(mergedList.slice(0, 500)));
+                } catch (e) {}
+            }
 
             // Sync with IndexedDB Catalog Vault for products, vendors, and categories
             if (collectionName === 'products' && window.SolarisSmartProductEngine) {
@@ -4302,21 +4447,31 @@
 
         deleteDoc(collectionName, docId) {
             if (!docId) return;
-            try {
-                const { upserts, deleted } = this.getOverrides(collectionName);
-                delete upserts[docId];
-                const nextDeleted = Array.from(new Set([...(Array.isArray(deleted) ? deleted : []), docId]));
-                localStorage.setItem(`solaris_opt_upserts_${collectionName}`, JSON.stringify(upserts));
-                localStorage.setItem(`solaris_opt_deleted_${collectionName}`, JSON.stringify(nextDeleted));
+            const isSettingsCol = window.SolarisCacheClearEngine?.isSettingsCollection(collectionName);
 
-                const cacheKey = `solaris_col_cache_${collectionName}_[]`;
-                const cachedRaw = localStorage.getItem(cacheKey);
-                if (cachedRaw) {
-                    const cachedList = JSON.parse(cachedRaw);
-                    const mergedList = this.applyOverridesToList(collectionName, cachedList);
-                    localStorage.setItem(cacheKey, JSON.stringify(mergedList.slice(0, 500)));
-                }
-            } catch (e) {}
+            if (isSettingsCol) {
+                const current = this._ramOverrides.get(collectionName) || { upserts: {}, deleted: [] };
+                const nextUpserts = { ...current.upserts };
+                delete nextUpserts[docId];
+                const nextDeleted = Array.from(new Set([...(Array.isArray(current.deleted) ? current.deleted : []), docId]));
+                this._ramOverrides.set(collectionName, { upserts: nextUpserts, deleted: nextDeleted });
+            } else {
+                try {
+                    const { upserts, deleted } = this.getOverrides(collectionName);
+                    delete upserts[docId];
+                    const nextDeleted = Array.from(new Set([...(Array.isArray(deleted) ? deleted : []), docId]));
+                    localStorage.setItem(`solaris_opt_upserts_${collectionName}`, JSON.stringify(upserts));
+                    localStorage.setItem(`solaris_opt_deleted_${collectionName}`, JSON.stringify(nextDeleted));
+
+                    const cacheKey = `solaris_col_cache_${collectionName}_[]`;
+                    const cachedRaw = localStorage.getItem(cacheKey);
+                    if (cachedRaw) {
+                        const cachedList = JSON.parse(cachedRaw);
+                        const mergedList = this.applyOverridesToList(collectionName, cachedList);
+                        localStorage.setItem(cacheKey, JSON.stringify(mergedList.slice(0, 500)));
+                    }
+                } catch (e) {}
+            }
 
             if (collectionName === 'products' && window.SolarisSmartProductEngine) {
                 window.SolarisSmartProductEngine.applyLocalProductDelete(docId, true);
@@ -4344,10 +4499,13 @@
     };
 
     // Fetches a Firestore collection with real-time updates (supports IndexedDB hydration for vendors & categories + lazy loading)
+    // Enforces Zero-Settings Local Cache Policy: Settings collections stay strictly in RAM and never read/write localStorage.
     const useCollection = (collectionName, options = {}) => {
+        const isSettingsCol = window.SolarisCacheClearEngine?.isSettingsCollection(collectionName) || false;
         const cacheKey = `solaris_col_cache_${collectionName}_${JSON.stringify(options.query || [])}`;
         const isIdbCatalogStore = !options.query && (collectionName === 'vendors' || collectionName === 'categories');
         const [rawCloudData, setRawCloudData] = useState(() => {
+            if (isSettingsCol) return [];
             try {
                 const cached = localStorage.getItem(cacheKey);
                 return cached ? JSON.parse(cached) : [];
@@ -4399,7 +4557,7 @@
                 if (isIdbCatalogStore && window.SolarisCatalogDB) {
                     window.SolarisCatalogDB.putBatch(collectionName, items, true);
                 }
-                if (items.length > 0 && items.length <= 500) {
+                if (!isSettingsCol && items.length > 0 && items.length <= 500) {
                     try {
                         localStorage.setItem(cacheKey, JSON.stringify(items));
                     } catch (e) {}
@@ -4413,7 +4571,7 @@
             });
 
             return () => unsubscribe();
-        }, [collectionName, JSON.stringify(options.query), isEnabled, cacheKey, isIdbCatalogStore]);
+        }, [collectionName, JSON.stringify(options.query), isEnabled, cacheKey, isIdbCatalogStore, isSettingsCol]);
 
         const data = useMemo(() => {
             if (!window.SolarisCollectionMutator) return rawCloudData;
@@ -5524,13 +5682,7 @@
         const [error, setError] = useState('');
         const [loading, setLoading] = useState(false);
         
-        const [appName, setAppName] = useState(() => {
-            try {
-                return localStorage.getItem('solaris_cached_app_name') || 'PO System';
-            } catch (e) {
-                return 'PO System';
-            }
-        });
+        const [appName, setAppName] = useState('PO System');
 
         useEffect(() => {
             db.collection('system').doc('config').get().then(doc => {
@@ -5538,7 +5690,6 @@
                     const fetchedName = doc.data().appName;
                     setAppName(fetchedName);
                     document.title = fetchedName;
-                    try { localStorage.setItem('solaris_cached_app_name', fetchedName); } catch (e) {}
                 }
             }).catch(err => {
                 if (err.code !== 'permission-denied') console.log("Config fetch error", err);
@@ -5883,7 +6034,7 @@
         );
     };
 
-    const Header = ({ pageTitle, userProfile, toggleSidebar, onOpenInstallModal }) => {
+    const Header = ({ pageTitle, activePage, userProfile, toggleSidebar, onOpenInstallModal }) => {
         const { productSyncStatus, forceFullProductSync, systemConfig } = useData();
         const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
         const [isSigningOut, setIsSigningOut] = useState(false);
@@ -5998,20 +6149,22 @@
                 </div>
 
                 <div className="flex items-center space-x-2 sm:space-x-2.5" ref={menuRef}>
-                    {/* Always-On Keep-Awake Status Pill */}
-                    <button
-                        type="button"
-                        onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
-                        className={`hidden sm:flex px-2.5 py-1.5 rounded-xl border text-xs font-bold items-center gap-1.5 transition shadow-sm active:scale-95 ${
-                            keepAwakeState.isActive
-                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
-                        }`}
-                        title={keepAwakeState.isActive ? `Keep-Awake Active (${keepAwakeState.mode}) — Screen will never sleep or lock while open` : 'Tap once to lock POS screen awake'}
-                    >
-                        <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'}`}></i>
-                        <span className="hidden lg:inline">{keepAwakeState.isActive ? 'Always Awake' : 'Keep Awake'}</span>
-                    </button>
+                    {/* Always-On Keep-Awake Status Pill (POS Terminal Page Only) */}
+                    {activePage === 'pos-terminal' && (
+                        <button
+                            type="button"
+                            onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
+                            className={`hidden sm:flex px-2.5 py-1.5 rounded-xl border text-xs font-bold items-center gap-1.5 transition shadow-sm active:scale-95 ${
+                                keepAwakeState.isActive
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                    : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                            }`}
+                            title={keepAwakeState.isActive ? `Keep-Awake Active (${keepAwakeState.mode}) — Screen stays awake on POS Terminal only` : 'Tap once to lock POS screen awake'}
+                        >
+                            <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'}`}></i>
+                            <span className="hidden lg:inline">{keepAwakeState.isActive ? 'Always Awake' : 'Keep Awake'}</span>
+                        </button>
+                    )}
 
                     {/* Master Cloud AppSync Button */}
                     <button
@@ -29552,10 +29705,6 @@
         const isSuper = (currentAdminRecord?.role || 'Admin') === 'Admin';
         const allowedShopIds = currentAdminRecord?.assignedShops || currentAdminRecord?.shopIds || (currentAdminRecord?.shopId ? [currentAdminRecord.shopId] : []);
         const [filterShop, setFilterShop] = useState(() => {
-            try {
-                const savedShop = localStorage.getItem('solaris_khqr_last_shop');
-                if (savedShop && savedShop !== 'All') return savedShop;
-            } catch (e) {}
             if (isSuper || allowedShopIds.includes('All')) {
                 return shops[0]?.id || 'All';
             }
@@ -29572,12 +29721,6 @@
                 }
             }
         }, [shops, filterShop, isSuper]);
-
-        useEffect(() => {
-            if (filterShop && filterShop !== 'All') {
-                try { localStorage.setItem('solaris_khqr_last_shop', filterShop); } catch (e) {}
-            }
-        }, [filterShop]);
 
         const [formData, setFormData] = useState(null);
         const [secretFormData, setSecretFormData] = useState({
@@ -29870,13 +30013,7 @@
                         staticQrImage: cfg.staticQrImage || ''
                     });
 
-                    let resolvedSecrets = secData;
-                    if (!resolvedSecrets) {
-                        try {
-                            const localCached = localStorage.getItem(`solaris_payway_secrets_${filterShop}`);
-                            if (localCached) resolvedSecrets = JSON.parse(localCached);
-                        } catch (e) {}
-                    }
+                    const resolvedSecrets = secData || null;
 
                     if (resolvedSecrets) {
                         const savedSession = resolvedSecrets.tgSessionString || '';
@@ -29908,7 +30045,7 @@
             return () => { isMounted = false; };
         }, [filterShop]);
 
-        // Moves any legacy secrets from public `shops` into staff-only `payway_secrets`
+        // Moves any legacy secrets from public `shops` into staff-only `payway_secrets` (never saved to localStorage)
         const handlePurgeLeakedSecretsFromFirestore = async () => {
             setIsPurgingSecrets(true);
             try {
@@ -29923,9 +30060,6 @@
                             paywayBotToken: String(cfg.paywayBotToken || '').trim(),
                             migratedAt: Date.now()
                         };
-                        try {
-                            localStorage.setItem(`solaris_payway_secrets_${s.id}`, JSON.stringify(secretPayload));
-                        } catch (e) {}
                         try {
                             await db.collection('payway_secrets').doc(s.id).set(secretPayload, { merge: true });
                         } catch (e) {}
@@ -30106,7 +30240,7 @@
                     updatedAt: Date.now()
                 };
 
-                // 2. Save Staff-Only Telegram MTProto & Bot credentials + backup of khqrConfig to `payway_secrets/{shopId}`
+                // 2. Save Staff-Only Telegram MTProto & Bot credentials + backup of khqrConfig to `payway_secrets/{shopId}` (RAM + Firestore only, never localStorage)
                 const secretsPayload = {
                     shopId: filterShop,
                     shopName: shops.find(s => s.id === filterShop)?.name || '',
@@ -30122,10 +30256,6 @@
                     khqrConfigBackup: cleanKhqrConfig,
                     updatedAt: Date.now()
                 };
-
-                try {
-                    localStorage.setItem(`solaris_payway_secrets_${filterShop}`, JSON.stringify(secretsPayload));
-                } catch (e) {}
 
                 await db.collection('payway_secrets').doc(filterShop).set(secretsPayload, { merge: true });
                 if (window.SolarisKHQREngine?._secretsCache) {
@@ -33018,18 +33148,24 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
     };
 
     const Dashboard = ({ userProfile }) => {
-        const [isSidebarOpen, setSidebarOpen] = useState(false);
-        const [showInstallModal, setShowInstallModal] = useState(false);
+        const { backgroundFetchInitiated, backgroundLoadComplete, systemConfig, activateHeavyCollections } = useData();
         const [activePage, setActivePage] = useState(() => resolveDefaultActivePage(userProfile));
         const [pageData, setPageData] = useState(null);
-        const { backgroundFetchInitiated, backgroundLoadComplete, systemConfig, activateHeavyCollections } = useData(); // Get config & lazy-loader
+        const [isSidebarOpen, setSidebarOpen] = useState(false);
+        const [showInstallModal, setShowInstallModal] = useState(false);
 
-        // --- Always-On Screen Keep-Awake Engine (POS Terminal Never Sleeps or Locks) ---
+        // --- Always-On Screen Keep-Awake Engine (Active ONLY on POS Terminal Page; Other Pages Allow Normal Sleep & Lock) ---
         useEffect(() => {
-            if (window.SolarisKeepAwakeManager) {
+            if (!window.SolarisKeepAwakeManager) return;
+            if (activePage === 'pos-terminal') {
                 window.SolarisKeepAwakeManager.start();
+            } else {
+                window.SolarisKeepAwakeManager.stop();
             }
-        }, []);
+            return () => {
+                window.SolarisKeepAwakeManager.stop();
+            };
+        }, [activePage]);
 
         // --- NEW: Update Document Title & Dynamic PWA Manifest on Dashboard Load ---
         useEffect(() => {
@@ -33169,6 +33305,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                 <div className="flex-1 flex flex-col overflow-hidden min-w-0">
                     <Header
                         pageTitle={pageTitles[activePage] || ''}
+                        activePage={activePage}
                         userProfile={userProfile}
                         toggleSidebar={toggleSidebar}
                         onOpenInstallModal={() => setShowInstallModal(true)}
@@ -33187,25 +33324,8 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
     // --- 10. ROOT APP COMPONENT ---
 
     function App() {
-        // 0ms Optimistic Auth Hydration: If an active tab session and recent (<30m) cached profile exist,
-        // mount directly into Dashboard without flashing the "Authenticating..." screen!
-        const [authState, setAuthState] = useState(() => {
-            try {
-                const hasActiveTabSession = sessionStorage.getItem(AUTH_SESSION_ACTIVE_KEY) === '1';
-                const lastActiveTs = parseInt(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0', 10);
-                const isNotExpired = lastActiveTs > 0 && (Date.now() - lastActiveTs <= MAX_INACTIVITY_MS);
-                if (hasActiveTabSession && isNotExpired) {
-                    const cachedLastProfile = localStorage.getItem('solaris_last_active_profile_v1');
-                    if (cachedLastProfile) {
-                        const parsed = JSON.parse(cachedLastProfile);
-                        if (parsed && parsed.uid) {
-                            return { loading: false, userProfile: parsed };
-                        }
-                    }
-                }
-            } catch (e) {}
-            return { loading: true, userProfile: null };
-        });
+        // RAM-Only Auth State (Zero-Settings Local Cache Policy: user profiles, roles & permissions are never stored in localStorage)
+        const [authState, setAuthState] = useState({ loading: true, userProfile: null });
 
         useEffect(() => {
             const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
@@ -33221,19 +33341,6 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                         setAuthState({ loading: false, userProfile: null });
                         return;
                     }
-
-                    const cachedProfileKey = `solaris_user_profile_${firebaseUser.uid}`;
-
-                    // Fast-path: Immediately unlock UI using cached user profile in 0ms while verifying in background
-                    try {
-                        const rawCached = localStorage.getItem(cachedProfileKey);
-                        if (rawCached) {
-                            const cachedObj = JSON.parse(rawCached);
-                            if (cachedObj && cachedObj.uid === firebaseUser.uid) {
-                                setAuthState(prev => (prev.loading ? { loading: false, userProfile: cachedObj } : prev));
-                            }
-                        }
-                    } catch (e) {}
 
                     try {
                         let querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
@@ -33265,10 +33372,6 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             }
 
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                            try {
-                                localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
-                                localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(profileObj));
-                            } catch (e) {}
                             setAuthState({ loading: false, userProfile: profileObj });
                         } else {
                             // Auto-provision Admin profile in the new database if no profile document exists yet
@@ -33288,47 +33391,47 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             }
                             const profileObj = { id: firebaseUser.uid, ...newProfileData };
                             localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                            try {
-                                localStorage.setItem(cachedProfileKey, JSON.stringify(profileObj));
-                                localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(profileObj));
-                            } catch (e) {}
                             setAuthState({ loading: false, userProfile: profileObj });
                         }
                     } catch (error) {
-                        // QUOTA RESILIENCE: If Firestore quota is exhausted during login, fall back to cached user profile or Admin fallback
+                        // QUOTA RESILIENCE: If Firestore quota is exhausted during login, build a RAM-only session fallback without persisting to localStorage
                         console.warn("User profile fetch fallback (Quota/Offline):", error?.code || error?.message);
                         if (error?.code === 'resource-exhausted' && window.SolarisPayWayVerifier) {
                             window.SolarisPayWayVerifier.isQuotaExceeded = true;
                         }
-                        let fallbackProfile = null;
-                        try {
-                            const saved = localStorage.getItem(cachedProfileKey);
-                            if (saved) fallbackProfile = JSON.parse(saved);
-                        } catch (e) {}
-                        if (!fallbackProfile) {
-                            fallbackProfile = {
-                                id: firebaseUser.uid,
-                                uid: firebaseUser.uid,
-                                name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Admin'),
-                                email: firebaseUser.email || '',
-                                role: 'Admin',
-                                permissions: ['pos-terminal', 'sales-report', 'customer-management', 'inventory', 'settings']
-                            };
-                        }
+                        const fallbackProfile = {
+                            id: firebaseUser.uid,
+                            uid: firebaseUser.uid,
+                            name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Admin'),
+                            email: firebaseUser.email || '',
+                            role: 'Admin',
+                            permissions: ['pos-terminal', 'sales-report', 'customer-management', 'inventory', 'settings']
+                        };
                         localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
-                        try { localStorage.setItem('solaris_last_active_profile_v1', JSON.stringify(fallbackProfile)); } catch (e) {}
                         setAuthState({ loading: false, userProfile: fallbackProfile });
                     }
                 } else {
                     sessionStorage.removeItem(AUTH_SESSION_ACTIVE_KEY);
-                    localStorage.removeItem('solaris_last_active_profile_v1');
+                    if (window.SolarisKHQREngine?.clearRamSettings) {
+                        window.SolarisKHQREngine.clearRamSettings();
+                    }
+                    if (window.SolarisPayWayVerifier?.clearRamSettings) {
+                        window.SolarisPayWayVerifier.clearRamSettings();
+                    }
+                    if (window.SolarisCollectionMutator?.clearRamSettingsOverrides) {
+                        window.SolarisCollectionMutator.clearRamSettingsOverrides();
+                    }
+                    if (window.SolarisCacheClearEngine?.purgeLegacySettingsFromLocalCache) {
+                        window.SolarisCacheClearEngine.purgeLegacySettingsFromLocalCache();
+                    }
                     setAuthState({ loading: false, userProfile: null });
                 }
             });
+
             return () => unsubscribe();
         }, []);
 
-        // Keep POS Session Continuously Active While Application Is Open (Never Auto-Lock / Never Auto Sign-Out on Standby)
+        // Keep POS Session Continuously Active on POS Terminal; Normal Activity-Based Tracking on Other Pages
         useEffect(() => {
             if (!authState.userProfile) return;
 
@@ -33342,8 +33445,12 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             const activityEvents = ['mousedown', 'keydown', 'touchstart', 'scroll'];
             activityEvents.forEach(evt => window.addEventListener(evt, keepSessionAlive, { passive: true }));
             document.addEventListener('visibilitychange', keepSessionAlive);
-            // Heartbeat every 30s ensures the open POS Terminal never expires or locks screen during slow standby periods
-            const intervalId = setInterval(keepSessionAlive, 30000);
+            // Heartbeat every 30s only while POS Terminal Keep-Awake mode is active; other pages follow normal sleep/lock
+            const intervalId = setInterval(() => {
+                if (window.SolarisKeepAwakeManager?.enabled) {
+                    keepSessionAlive();
+                }
+            }, 30000);
 
             return () => {
                 activityEvents.forEach(evt => window.removeEventListener(evt, keepSessionAlive));
