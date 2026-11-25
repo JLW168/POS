@@ -27581,6 +27581,8 @@
         const [editId, setEditId] = useState(null);
         const [modal, setModal] = useState({ type: null, data: null });
         const [searchTerm, setSearchTerm] = useState('');
+        const [isImporting, setIsImporting] = useState(false);
+        const vendorImportInputRef = useRef(null);
 
         const filteredVendors = useMemo(() => {
             const priorityOrder = { 'High': 1, 'Medium': 2, 'Low': 3 };
@@ -27643,6 +27645,179 @@
             }
         };
 
+        // Normalize priority text from Excel/CSV imports into 'High' | 'Medium' | 'Low'
+        const normalizePriority = (rawValue) => {
+            const val = String(rawValue || '').trim().toLowerCase();
+            if (val === 'high' || val === 'h' || val === '1') return 'High';
+            if (val === 'medium' || val === 'med' || val === 'm' || val === '2') return 'Medium';
+            return 'Low';
+        };
+
+        // Download sample Excel template for Vendor import
+        const handleDownloadTemplate = () => {
+            if (typeof XLSX === 'undefined') {
+                setModal({ type: 'message', data: { title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true } });
+                return;
+            }
+            const sampleRows = [
+                { Name: 'ABC Beverage Co.', Contact: '012 345 678', Priority: 'High' },
+                { Name: 'Fresh Mart Supply', Contact: '098 765 432', Priority: 'Medium' },
+                { Name: 'Local Packaging Ltd.', Contact: '015 111 222', Priority: 'Low' }
+            ];
+            const ws = XLSX.utils.json_to_sheet(sampleRows, { header: ['Name', 'Contact', 'Priority'] });
+            ws['!cols'] = [{ wch: 28 }, { wch: 22 }, { wch: 14 }];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Vendors');
+            XLSX.writeFile(wb, 'vendor_import_template.xlsx');
+        };
+
+        // Export current (filtered) Vendor list to Excel
+        const handleExportVendors = () => {
+            if (typeof XLSX === 'undefined') {
+                setModal({ type: 'message', data: { title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true } });
+                return;
+            }
+            if (!filteredVendors || filteredVendors.length === 0) {
+                setModal({ type: 'message', data: { title: 'Nothing to Export', message: 'No vendors found to export.', isError: true } });
+                return;
+            }
+            const exportRows = filteredVendors.map(v => ({
+                Name: v.name || '',
+                Contact: v.contact || '',
+                Priority: v.priority || 'Low',
+                Products: productCounts[v.id] || 0
+            }));
+            const ws = XLSX.utils.json_to_sheet(exportRows, { header: ['Name', 'Contact', 'Priority', 'Products'] });
+            ws['!cols'] = [{ wch: 30 }, { wch: 24 }, { wch: 14 }, { wch: 12 }];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Vendors');
+            const todayStr = new Date().toISOString().slice(0, 10);
+            XLSX.writeFile(wb, `vendors_export_${todayStr}.xlsx`);
+        };
+
+        // Import Vendors from Excel (.xlsx / .xls) or CSV (.csv)
+        const handleImportVendors = (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            if (typeof XLSX === 'undefined') {
+                setModal({ type: 'message', data: { title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true } });
+                if (vendorImportInputRef.current) vendorImportInputRef.current.value = '';
+                return;
+            }
+
+            setIsImporting(true);
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+                try {
+                    const workbook = XLSX.read(evt.target.result, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], { defval: '' });
+
+                    if (!rows || rows.length === 0) {
+                        throw new Error('The uploaded file is empty or has no readable rows.');
+                    }
+
+                    // Build a case-insensitive lookup of existing vendors to update duplicates cleanly
+                    const existingVendorByName = new Map();
+                    (vendors || []).forEach(v => {
+                        if (v?.name) {
+                            existingVendorByName.set(String(v.name).trim().toLowerCase(), v);
+                        }
+                    });
+
+                    let created = 0;
+                    let updated = 0;
+                    let skipped = 0;
+
+                    for (const rawRow of rows) {
+                        try {
+                            // Map row keys case-insensitively
+                            const normalizedRow = {};
+                            Object.keys(rawRow).forEach(k => {
+                                normalizedRow[String(k).trim().toLowerCase()] = rawRow[k];
+                            });
+
+                            const rawName = normalizedRow['name'] ?? normalizedRow['vendor name'] ?? normalizedRow['vendor'] ?? '';
+                            const cleanName = String(rawName).trim();
+                            if (!cleanName) {
+                                skipped++;
+                                continue;
+                            }
+
+                            const rawContact = normalizedRow['contact'] ?? normalizedRow['contact info'] ?? normalizedRow['phone'] ?? '';
+                            const cleanContact = String(rawContact).trim();
+                            const rawPriority = normalizedRow['priority'] ?? '';
+                            const cleanPriority = normalizePriority(rawPriority);
+
+                            const lookupKey = cleanName.toLowerCase();
+                            const existingVendor = existingVendorByName.get(lookupKey);
+
+                            if (existingVendor) {
+                                const updatePayload = {
+                                    name: cleanName,
+                                    contact: cleanContact !== '' ? cleanContact : (existingVendor.contact || ''),
+                                    priority: rawPriority !== '' ? cleanPriority : (existingVendor.priority || 'Low')
+                                };
+                                if (window.SolarisCollectionMutator) {
+                                    window.SolarisCollectionMutator.upsertDoc('vendors', existingVendor.id, updatePayload, false);
+                                } else {
+                                    await db.collection('vendors').doc(existingVendor.id).update(updatePayload);
+                                }
+                                existingVendorByName.set(lookupKey, { ...existingVendor, ...updatePayload });
+                                updated++;
+                            } else {
+                                const createPayload = {
+                                    name: cleanName,
+                                    contact: cleanContact,
+                                    priority: cleanPriority
+                                };
+                                let newId = null;
+                                if (window.SolarisCollectionMutator) {
+                                    newId = window.SolarisCollectionMutator.upsertDoc('vendors', null, createPayload, true);
+                                } else {
+                                    const docRef = await db.collection('vendors').add(createPayload);
+                                    newId = docRef.id;
+                                }
+                                existingVendorByName.set(lookupKey, { id: newId, ...createPayload });
+                                created++;
+                            }
+                        } catch (rowErr) {
+                            console.error('Vendor import row error:', rowErr);
+                            skipped++;
+                        }
+                    }
+
+                    setModal({
+                        type: 'message',
+                        data: {
+                            title: 'Vendor Import Complete',
+                            message: `Imported successfully: ${created} created, ${updated} updated${skipped > 0 ? `, ${skipped} skipped` : ''}.`
+                        }
+                    });
+                } catch (error) {
+                    console.error('Vendor import error:', error);
+                    setModal({
+                        type: 'message',
+                        data: {
+                            title: 'Import Error',
+                            message: error.message || 'Failed to read Excel/CSV file. Please use the template format.',
+                            isError: true
+                        }
+                    });
+                } finally {
+                    setIsImporting(false);
+                    if (vendorImportInputRef.current) vendorImportInputRef.current.value = '';
+                }
+            };
+            reader.onerror = () => {
+                setIsImporting(false);
+                if (vendorImportInputRef.current) vendorImportInputRef.current.value = '';
+                setModal({ type: 'message', data: { title: 'Import Error', message: 'Failed to read the selected file.', isError: true } });
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
         const priorityStyles = {
             High: 'bg-red-500/20 text-red-300 border border-red-500/30',
             Medium: 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30',
@@ -27682,9 +27857,9 @@
                     </form>
                 </Card>
 
-                <TableCard title="Vendor Management">
-                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col sm:flex-row justify-between items-center gap-4">
-                        <div className="flex-1 w-full max-w-sm">
+                <TableCard title={`Vendor Management (${filteredVendors.length})`}>
+                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between items-stretch lg:items-end gap-4">
+                        <div className="flex-1 w-full lg:max-w-sm">
                             <label className="block text-sm font-medium text-slate-300 mb-1">
                                 <i className="fas fa-search text-purple-400 mr-2"></i>Search Vendor
                             </label>
@@ -27694,15 +27869,57 @@
                                     placeholder="Search by name or contact..." 
                                     value={searchTerm} 
                                     onChange={(e) => setSearchTerm(e.target.value)} 
-                                    className="w-full bg-slate-700 text-slate-100 px-3 py-2 pl-10 border border-slate-600 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                                    className="w-full bg-slate-700 text-slate-100 px-3 py-2 pl-10 border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none h-[40px]"
                                 />
                                 <i className="fas fa-search absolute left-3 top-3 text-slate-400"></i>
                             </div>
                         </div>
-                        <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-xs font-semibold text-emerald-400 shrink-0" title="Vendors are cached in IndexedDB and live-synced with Firestore">
-                            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                            <span>IDB Live Sync ({vendors?.length || 0} Vendors)</span>
-                        </span>
+
+                        {/* Sync Badge + Template, Import & Export Toolbar */}
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            <span className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-xs font-semibold text-emerald-400 h-[40px]" title="Vendors are cached in IndexedDB and live-synced with Firestore">
+                                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                                <span>IDB Live Sync ({vendors?.length || 0})</span>
+                            </span>
+
+                            <button
+                                type="button"
+                                onClick={handleDownloadTemplate}
+                                title="Download Vendor Import Excel Template"
+                                className="h-[40px] px-3.5 bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/40 rounded-xl flex items-center justify-center gap-2 text-xs font-bold transition active:scale-95"
+                            >
+                                <i className="fas fa-download"></i>
+                                <span>Template</span>
+                            </button>
+
+                            <input
+                                type="file"
+                                ref={vendorImportInputRef}
+                                onChange={handleImportVendors}
+                                accept=".xlsx, .xls, .csv"
+                                className="hidden"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => vendorImportInputRef.current?.click()}
+                                disabled={isImporting}
+                                title="Import Vendors from Excel or CSV"
+                                className="h-[40px] px-3.5 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl flex items-center justify-center gap-2 text-xs font-bold transition active:scale-95 disabled:opacity-50"
+                            >
+                                {isImporting ? <div className="loader w-3.5 h-3.5"></div> : <i className="fas fa-upload"></i>}
+                                <span>{isImporting ? 'Importing...' : 'Import'}</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={handleExportVendors}
+                                title="Export Vendors to Excel"
+                                className="h-[40px] px-3.5 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 rounded-xl flex items-center justify-center gap-2 text-xs font-bold transition active:scale-95"
+                            >
+                                <i className="fas fa-file-excel"></i>
+                                <span>Export</span>
+                            </button>
+                        </div>
                     </div>
                     {filteredVendors.length === 0 ? <p className="text-center p-4 text-slate-400">No vendors found.</p> : (
                         <table className="min-w-full divide-y divide-slate-700">
@@ -27711,17 +27928,23 @@
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Contact</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Priority</th>
+                                    <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Products</th>
                                     <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Actions</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-700">
                                 {filteredVendors.map(vendor => (
                                     <tr key={vendor.id} className="hover:bg-slate-700/50">
-                                        <td className="px-4 py-3 text-sm text-slate-200">{vendor.name}</td>
+                                        <td className="px-4 py-3 text-sm text-slate-200 font-semibold">{vendor.name}</td>
                                         <td className="px-4 py-3 text-sm text-slate-400">{vendor.contact || '-'}</td>
                                         <td className="px-4 py-3 text-sm text-left">
                                             <span className={`px-2 py-1 text-xs font-medium rounded-md ${priorityStyles[vendor.priority || 'Low']}`}>
                                                 {vendor.priority || 'Low'}
+                                            </span>
+                                        </td>
+                                        <td className="px-4 py-3 text-sm text-center">
+                                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                                {productCounts[vendor.id] || 0} items
                                             </span>
                                         </td>
                                         <td className="px-4 py-3 text-center space-x-4">
