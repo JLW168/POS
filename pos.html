@@ -6230,12 +6230,78 @@
 
         const debouncedSearch = useDebounce(searchTerm, 120);
         const searchInputRef = useRef(null);
+        const [isVirtualKeyboardEnabled, setIsVirtualKeyboardEnabled] = useState(false);
 
-        const refocusSearchInput = useCallback(() => {
+        const isAnyModalOpen = Boolean(
+            showPaymentModal ||
+            showAddCustomerModal ||
+            showSaveTicketModal ||
+            showHeldTicketsModal ||
+            showClearConfirm ||
+            pendingRestoreTicket ||
+            editingCartItem ||
+            completedReceipt ||
+            thankYouModalData ||
+            showShiftModal ||
+            showHistoryModal ||
+            showDailyReportModal ||
+            showBankAutoSumModal ||
+            showKhqrSimulatorModal
+        );
+
+        const isAnyModalOpenRef = useRef(isAnyModalOpen);
+        useEffect(() => {
+            isAnyModalOpenRef.current = isAnyModalOpen;
+        }, [isAnyModalOpen]);
+
+        const refocusSearchInput = useCallback((force = false) => {
             setTimeout(() => {
-                if (window.innerWidth >= 768) searchInputRef.current?.focus();
+                if (!searchInputRef.current || isAnyModalOpenRef.current) return;
+                const activeEl = document.activeElement;
+                const isTypingElsewhere = activeEl &&
+                    activeEl !== document.body &&
+                    activeEl !== searchInputRef.current &&
+                    ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
+                if (!isTypingElsewhere || force) {
+                    try {
+                        searchInputRef.current.focus({ preventScroll: true });
+                    } catch (e) {
+                        searchInputRef.current.focus();
+                    }
+                }
             }, 30);
         }, []);
+
+        // Keep barcode scanner cursor continuously active across Desktop & Tablet whenever no modal or other input is focused
+        useEffect(() => {
+            if (!isAnyModalOpen) {
+                refocusSearchInput(true);
+            }
+        }, [isAnyModalOpen, activeMobileTab, selectedCategory, viewMode, refocusSearchInput]);
+
+        useEffect(() => {
+            const handleGlobalReclaimFocus = (e) => {
+                if (isAnyModalOpenRef.current) return;
+                const target = e.target;
+                if (target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]')) {
+                    return;
+                }
+                refocusSearchInput(false);
+            };
+            const handleVisibilityOrFocus = () => {
+                if (!document.hidden && !isAnyModalOpenRef.current) {
+                    refocusSearchInput(false);
+                }
+            };
+            document.addEventListener('pointerup', handleGlobalReclaimFocus, true);
+            window.addEventListener('focus', handleVisibilityOrFocus);
+            document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+            return () => {
+                document.removeEventListener('pointerup', handleGlobalReclaimFocus, true);
+                window.removeEventListener('focus', handleVisibilityOrFocus);
+                document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+            };
+        }, [refocusSearchInput]);
 
         const availableShops = useMemo(() => {
             if (userProfile?.role === 'Admin') return shops;
@@ -7008,18 +7074,71 @@
                                 <input
                                     ref={searchInputRef}
                                     type="text"
+                                    inputMode={isVirtualKeyboardEnabled ? 'text' : 'none'}
+                                    autoComplete="off"
+                                    autoCorrect="off"
+                                    autoCapitalize="off"
+                                    spellCheck={false}
                                     value={searchTerm}
                                     onChange={e => setSearchTerm(e.target.value)}
                                     onKeyDown={handleSearchKeyDown}
-                                    placeholder="Scan barcode or search product..."
-                                    className="w-full h-10 bg-slate-900 text-white pl-9 pr-8 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-sm"
+                                    onBlur={() => {
+                                        if (!isAnyModalOpenRef.current) {
+                                            setTimeout(() => {
+                                                const activeEl = document.activeElement;
+                                                const isOtherInput = activeEl &&
+                                                    activeEl !== document.body &&
+                                                    activeEl !== searchInputRef.current &&
+                                                    ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName);
+                                                if (!isOtherInput) {
+                                                    setIsVirtualKeyboardEnabled(false);
+                                                    refocusSearchInput(false);
+                                                }
+                                            }, 120);
+                                        }
+                                    }}
+                                    placeholder={isVirtualKeyboardEnabled ? "Type product name, code, or barcode..." : "Ready to scan barcode (or tap keyboard icon to type)..."}
+                                    className="w-full h-10 bg-slate-900 text-white pl-9 pr-16 rounded-xl border border-slate-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 outline-none text-sm transition"
                                 />
-                                <i className="fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                                {searchTerm && (
-                                    <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
-                                        <i className="fas fa-times-circle"></i>
+                                <i className="fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-emerald-400"></i>
+                                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                                    {searchTerm && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setSearchTerm('');
+                                                refocusSearchInput(true);
+                                            }}
+                                            className="w-6 h-6 rounded-lg text-slate-400 hover:text-white flex items-center justify-center"
+                                            title="Clear search"
+                                        >
+                                            <i className="fas fa-times-circle text-xs"></i>
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setIsVirtualKeyboardEnabled(prev => {
+                                                const next = !prev;
+                                                setTimeout(() => {
+                                                    if (searchInputRef.current) {
+                                                        searchInputRef.current.blur();
+                                                        searchInputRef.current.focus({ preventScroll: true });
+                                                    }
+                                                }, 10);
+                                                return next;
+                                            });
+                                        }}
+                                        className={`w-7 h-7 rounded-lg flex items-center justify-center border text-xs transition ${
+                                            isVirtualKeyboardEnabled
+                                                ? 'bg-blue-600 text-white border-blue-400 shadow'
+                                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-600'
+                                        }`}
+                                        title={isVirtualKeyboardEnabled ? "Hide On-Screen Keyboard (Scanner Only Mode)" : "Show On-Screen Keyboard to Type"}
+                                    >
+                                        <i className="fas fa-keyboard"></i>
                                     </button>
-                                )}
+                                </div>
                             </div>
                             <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700 shrink-0">
                                 <button type="button" onClick={() => setViewMode('list')} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${viewMode === 'list' ? 'bg-blue-600 text-white' : 'text-slate-400'}`} title="List View">
