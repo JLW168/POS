@@ -709,11 +709,418 @@
                         timestamp: Date.now()
                     };
                     return this.lastPurgeReport;
+                },
+
+                // ================================================================
+                // PHASE 2.1: MASTER CACHE CLEAR, DIAGNOSTICS & REMOTE PUSH ENGINE
+                // ================================================================
+                LAST_PURGE_ID_KEY: 'solaris_last_cache_purge_id_v1',
+                LAST_PURGE_TS_KEY: 'solaris_last_cache_purge_ts_v1',
+                BROADCAST_CHANNEL_NAME: 'solaris_cache_control_bus',
+                _isExecutingClear: false,
+                _bc: null,
+
+                // Live Storage Diagnostics & Settings Cache Shield Inspection
+                async getDiagnostics() {
+                    let lsKeysCount = 0;
+                    let lsBytes = 0;
+                    let forbiddenSettingsKeysFound = [];
+                    let ssKeysCount = 0;
+
+                    try {
+                        lsKeysCount = localStorage.length;
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const k = localStorage.key(i);
+                            const v = localStorage.getItem(k) || '';
+                            lsBytes += (k.length + v.length) * 2;
+                            if (this.isForbiddenSettingsCacheKey(k)) {
+                                forbiddenSettingsKeysFound.push(k);
+                            }
+                        }
+                    } catch (e) {}
+
+                    try {
+                        ssKeysCount = sessionStorage.length;
+                    } catch (e) {}
+
+                    let idbNames = [];
+                    try {
+                        if (typeof indexedDB !== 'undefined' && typeof indexedDB.databases === 'function') {
+                            const dbs = await indexedDB.databases();
+                            idbNames = (dbs || []).map(d => d.name).filter(Boolean);
+                        } else {
+                            idbNames = ['SolarisCatalogVault_v2'];
+                        }
+                    } catch (e) {
+                        idbNames = ['SolarisCatalogVault_v2'];
+                    }
+
+                    let cacheStorageNames = [];
+                    try {
+                        if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+                            cacheStorageNames = await caches.keys();
+                        }
+                    } catch (e) {}
+
+                    let serviceWorkerCount = 0;
+                    try {
+                        if ('serviceWorker' in navigator && typeof navigator.serviceWorker.getRegistrations === 'function') {
+                            const regs = await navigator.serviceWorker.getRegistrations();
+                            serviceWorkerCount = regs.length;
+                        }
+                    } catch (e) {}
+
+                    let storageEstimate = null;
+                    try {
+                        if (navigator.storage && typeof navigator.storage.estimate === 'function') {
+                            storageEstimate = await navigator.storage.estimate();
+                        }
+                    } catch (e) {}
+
+                    return {
+                        localStorageKeys: lsKeysCount,
+                        localStorageKB: Number((lsBytes / 1024).toFixed(2)),
+                        sessionStorageKeys: ssKeysCount,
+                        forbiddenSettingsKeysFound,
+                        settingsShieldViolations: forbiddenSettingsKeysFound.length,
+                        bootSanitizedCount: this.lastPurgeReport?.removedCount || 0,
+                        indexedDBNames: idbNames,
+                        cacheStorageCount: cacheStorageNames.length,
+                        serviceWorkerCount,
+                        quotaUsageMB: storageEstimate?.usage ? Number((storageEstimate.usage / (1024 * 1024)).toFixed(2)) : null,
+                        lastPurgeId: (() => { try { return localStorage.getItem(this.LAST_PURGE_ID_KEY) || ''; } catch (e) { return ''; } })(),
+                        lastPurgeTs: (() => { try { return Number(localStorage.getItem(this.LAST_PURGE_TS_KEY) || '0'); } catch (e) { return 0; } })(),
+                        checkedAt: Date.now()
+                    };
+                },
+
+                // Renders/Updates a full-screen DOM progress overlay that survives React/Firestore teardown
+                renderProgressOverlay({ title = 'Clearing Local Cache...', step = 'Initializing...', percent = 10, mode = 'clean' }) {
+                    try {
+                        let overlay = document.getElementById('solaris-cache-clear-overlay');
+                        if (!overlay) {
+                            overlay = document.createElement('div');
+                            overlay.id = 'solaris-cache-clear-overlay';
+                            overlay.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(2,6,23,0.92);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:1.5rem;font-family:system-ui,-apple-system,sans-serif;color:#f8fafc;';
+                            overlay.innerHTML = `
+                                <div style="width:100%;max-width:420px;background:#0f172a;border:1px solid ${mode === 'hard' ? '#ef4444' : '#3b82f6'};border-radius:1.25rem;padding:1.75rem;box-shadow:0 25px 60px rgba(0,0,0,0.65);text-align:center;">
+                                    <div style="width:56px;height:56px;margin:0 auto 1rem auto;border-radius:1rem;background:${mode === 'hard' ? 'rgba(239,68,68,0.18)' : 'rgba(59,130,246,0.18)'};border:1px solid ${mode === 'hard' ? 'rgba(239,68,68,0.45)' : 'rgba(59,130,246,0.45)'};display:flex;align-items:center;justify-content:center;font-size:24px;color:${mode === 'hard' ? '#f87171' : '#60a5fa'};">
+                                        <i class="fas ${mode === 'hard' ? 'fa-shield-alt' : 'fa-broom'} fa-spin"></i>
+                                    </div>
+                                    <h3 id="solaris-cc-title" style="margin:0 0 0.35rem 0;font-size:1.15rem;font-weight:900;color:#ffffff;"></h3>
+                                    <p id="solaris-cc-step" style="margin:0 0 1.25rem 0;font-size:0.82rem;color:#94a3b8;min-height:1.25rem;"></p>
+                                    <div style="width:100%;height:8px;background:#1e293b;border-radius:999px;overflow:hidden;border:1px solid #334155;">
+                                        <div id="solaris-cc-bar" style="height:100%;width:10%;background:${mode === 'hard' ? 'linear-gradient(90deg,#ef4444,#f97316)' : 'linear-gradient(90deg,#3b82f6,#10b981)'};transition:width 0.25s ease;border-radius:999px;"></div>
+                                    </div>
+                                    <div id="solaris-cc-pct" style="margin-top:0.5rem;font-size:0.75rem;font-weight:800;font-family:monospace;color:${mode === 'hard' ? '#fca5a5' : '#34d399'};">10%</div>
+                                </div>
+                            `;
+                            document.body.appendChild(overlay);
+                        }
+                        const titleEl = document.getElementById('solaris-cc-title');
+                        const stepEl = document.getElementById('solaris-cc-step');
+                        const barEl = document.getElementById('solaris-cc-bar');
+                        const pctEl = document.getElementById('solaris-cc-pct');
+                        if (titleEl) titleEl.textContent = title;
+                        if (stepEl) stepEl.textContent = step;
+                        if (barEl) barEl.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+                        if (pctEl) pctEl.textContent = `${Math.min(100, Math.max(0, percent))}%`;
+                    } catch (e) {}
+                },
+
+                // Executes a complete local browser cache purge with reload-loop protection
+                async executeLocalClearCache({
+                    mode = 'clean', // 'clean' (keeps login + deviceId) | 'hard' (full wipe + force re-login)
+                    reason = 'Manual cache clear',
+                    triggeredBy = 'Admin',
+                    commandId = '',
+                    broadcastToOtherTabs = true
+                } = {}) {
+                    if (this._isExecutingClear) return;
+                    this._isExecutingClear = true;
+
+                    const isHard = mode === 'hard';
+                    const finalCmdId = commandId || `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+                    const overlayTitle = isHard ? 'Hard Security Wipe & Re-Login' : 'Cleaning Browser Cache & Reloading';
+
+                    this.renderProgressOverlay({
+                        title: overlayTitle,
+                        step: `${reason} (by ${triggeredBy})...`,
+                        percent: 12,
+                        mode
+                    });
+
+                    // Notify other open tabs in this same browser immediately
+                    if (broadcastToOtherTabs && typeof BroadcastChannel !== 'undefined') {
+                        try {
+                            const bc = new BroadcastChannel(this.BROADCAST_CHANNEL_NAME);
+                            bc.postMessage({
+                                type: 'EXECUTE_CACHE_PURGE',
+                                commandId: finalCmdId,
+                                mode,
+                                reason,
+                                triggeredBy,
+                                issuedAt: Date.now()
+                            });
+                            bc.close();
+                        } catch (e) {}
+                    }
+
+                    // 1. Clear in-memory caches
+                    this.renderProgressOverlay({ title: overlayTitle, step: 'Clearing in-memory RAM caches...', percent: 25, mode });
+                    try {
+                        if (window.SolarisKHQREngine?.clearRamSettings) window.SolarisKHQREngine.clearRamSettings();
+                        if (window.SolarisPayWayVerifier) {
+                            window.SolarisPayWayVerifier.stopSharedListeners?.();
+                            window.SolarisPayWayVerifier.clearRamSettings?.();
+                            window.SolarisPayWayVerifier.inMemoryAbaPayments?.clear?.();
+                        }
+                        if (window.SolarisCollectionMutator?.clearRamSettingsOverrides) {
+                            window.SolarisCollectionMutator.clearRamSettingsOverrides();
+                        }
+                        if (window.SolarisSmartProductEngine?.productsMap) {
+                            window.SolarisSmartProductEngine.productsMap.clear();
+                        }
+                    } catch (e) {}
+
+                    // 2. Wipe localStorage & sessionStorage (preserving reload-loop guard + active login in Clean mode)
+                    this.renderProgressOverlay({ title: overlayTitle, step: 'Wiping localStorage & session caches...', percent: 42, mode });
+                    try {
+                        const preservedDeviceId = !isHard ? localStorage.getItem('pos_deviceId') : null;
+                        const preservedLastActive = !isHard ? localStorage.getItem('solaris_auth_last_active_ts_v1') : null;
+                        const preservedAuthSession = !isHard ? sessionStorage.getItem('solaris_auth_session_active_v1') : null;
+
+                        // Preserve Firebase Auth persistence keys in Clean mode so user stays signed in
+                        const preservedFirebaseAuth = {};
+                        if (!isHard) {
+                            for (let i = 0; i < sessionStorage.length; i++) {
+                                const k = sessionStorage.key(i);
+                                if (k && k.startsWith('firebase:authUser:')) {
+                                    preservedFirebaseAuth[k] = sessionStorage.getItem(k);
+                                }
+                            }
+                        }
+
+                        localStorage.clear();
+                        sessionStorage.clear();
+
+                        // Always stamp reload-loop protection marker
+                        localStorage.setItem(this.LAST_PURGE_ID_KEY, finalCmdId);
+                        localStorage.setItem(this.LAST_PURGE_TS_KEY, String(Date.now()));
+
+                        if (!isHard) {
+                            if (preservedDeviceId) localStorage.setItem('pos_deviceId', preservedDeviceId);
+                            if (preservedLastActive) localStorage.setItem('solaris_auth_last_active_ts_v1', preservedLastActive);
+                            if (preservedAuthSession) sessionStorage.setItem('solaris_auth_session_active_v1', preservedAuthSession);
+                            Object.entries(preservedFirebaseAuth).forEach(([k, v]) => {
+                                try { sessionStorage.setItem(k, v); } catch (e) {}
+                            });
+                        }
+                    } catch (e) {}
+
+                    // 3. Sign out first if Hard Security Wipe
+                    if (isHard && typeof window.safeSignOut === 'function') {
+                        this.renderProgressOverlay({ title: overlayTitle, step: 'Terminating active authentication session...', percent: 55, mode });
+                        try {
+                            await Promise.race([
+                                window.safeSignOut(),
+                                new Promise(resolve => setTimeout(resolve, 1500))
+                            ]);
+                        } catch (e) {}
+                    }
+
+                    // 4. Wipe IndexedDB (SolarisCatalogVault_v2 + Firestore offline persistence DBs)
+                    this.renderProgressOverlay({ title: overlayTitle, step: 'Purging IndexedDB (Catalog Vault & Firestore offline cache)...', percent: 72, mode });
+                    try {
+                        // Close our Catalog Vault handle if open
+                        if (window.SolarisCatalogDB?._dbPromise) {
+                            try {
+                                const openedIdb = await window.SolarisCatalogDB._dbPromise;
+                                openedIdb?.close?.();
+                                window.SolarisCatalogDB._dbPromise = null;
+                            } catch (e) {}
+                        }
+
+                        // Terminate Firestore client cleanly before deleting its IndexedDB persistence
+                        if (typeof firebase !== 'undefined' && firebase.firestore) {
+                            try {
+                                const fs = firebase.firestore();
+                                if (typeof fs.terminate === 'function') {
+                                    await Promise.race([fs.terminate(), new Promise(r => setTimeout(r, 1200))]);
+                                }
+                                if (typeof fs.clearPersistence === 'function') {
+                                    await Promise.race([fs.clearPersistence(), new Promise(r => setTimeout(r, 1200))]);
+                                }
+                            } catch (e) {}
+                        }
+
+                        const dbNamesToDelete = new Set(['SolarisCatalogVault_v2']);
+                        if (typeof indexedDB !== 'undefined' && typeof indexedDB.databases === 'function') {
+                            try {
+                                const dbs = await indexedDB.databases();
+                                (dbs || []).forEach(d => {
+                                    if (!d?.name) return;
+                                    // In Clean mode keep firebaseLocalStorageDb if present; in Hard mode wipe all DBs
+                                    if (!isHard && d.name === 'firebaseLocalStorageDb') return;
+                                    dbNamesToDelete.add(d.name);
+                                });
+                            } catch (e) {}
+                        }
+
+                        await Promise.all(Array.from(dbNamesToDelete).map(name => new Promise(resolve => {
+                            try {
+                                const req = indexedDB.deleteDatabase(name);
+                                req.onsuccess = () => resolve();
+                                req.onerror = () => resolve();
+                                req.onblocked = () => resolve();
+                                setTimeout(resolve, 900);
+                            } catch (e) {
+                                resolve();
+                            }
+                        })));
+                    } catch (e) {}
+
+                    // 5. Wipe Cache Storage & Service Workers
+                    this.renderProgressOverlay({ title: overlayTitle, step: 'Clearing Cache Storage & Service Workers...', percent: 88, mode });
+                    try {
+                        if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+                            const cacheNames = await caches.keys();
+                            await Promise.all(cacheNames.map(c => caches.delete(c).catch(() => {})));
+                        }
+                    } catch (e) {}
+
+                    try {
+                        if ('serviceWorker' in navigator && typeof navigator.serviceWorker.getRegistrations === 'function') {
+                            const regs = await navigator.serviceWorker.getRegistrations();
+                            await Promise.all(regs.map(r => r.unregister().catch(() => {})));
+                        }
+                    } catch (e) {}
+
+                    // 6. Finalize & Reload
+                    this.renderProgressOverlay({
+                        title: overlayTitle,
+                        step: 'Cache cleared! Reloading fresh application...',
+                        percent: 100,
+                        mode
+                    });
+
+                    setTimeout(() => {
+                        try {
+                            window.location.reload();
+                        } catch (e) {
+                            window.location.href = window.location.href;
+                        }
+                    }, 450);
+                },
+
+                // Broadcasts a remote purge command via Firestore `system/config` + BroadcastChannel
+                async broadcastRemotePush({
+                    targetScope = 'ALL', // 'ALL' or specific shopId
+                    targetShopName = 'ALL Connected Terminals & Browsers',
+                    mode = 'clean',
+                    triggeredBy = 'Admin',
+                    reason = 'Remote Master Cache Clear',
+                    alsoClearSelf = true
+                } = {}) {
+                    const cmdId = `remote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                    const payload = {
+                        id: cmdId,
+                        issuedAt: Date.now(),
+                        mode,
+                        targetScope,
+                        targetShopName,
+                        triggeredBy,
+                        reason
+                    };
+
+                    // Stamp our own LAST_PURGE_ID_KEY first if we do NOT want to double-trigger from our own snapshot echo
+                    if (!alsoClearSelf) {
+                        try {
+                            localStorage.setItem(this.LAST_PURGE_ID_KEY, cmdId);
+                            localStorage.setItem(this.LAST_PURGE_TS_KEY, String(Date.now()));
+                        } catch (e) {}
+                    }
+
+                    if (typeof firebase !== 'undefined' && firebase.firestore) {
+                        await firebase.firestore().collection('system').doc('config').set({
+                            cachePurgeCommand: payload
+                        }, { merge: true });
+                    }
+
+                    if (alsoClearSelf) {
+                        await this.executeLocalClearCache({
+                            mode,
+                            reason: `${reason} (${targetShopName})`,
+                            triggeredBy,
+                            commandId: cmdId,
+                            broadcastToOtherTabs: true
+                        });
+                    }
+
+                    return payload;
+                },
+
+                // Evaluates an incoming Firestore `system/config.cachePurgeCommand` with reload-loop & scope protection
+                handleIncomingRemoteCommand(cmd, currentShopId = '') {
+                    if (!cmd || !cmd.id || !cmd.issuedAt || this._isExecutingClear) return;
+
+                    // 1. Reload-loop protection: skip if this exact commandId was already executed on this browser
+                    let lastHandledId = '';
+                    let lastPurgeTs = 0;
+                    try {
+                        lastHandledId = localStorage.getItem(this.LAST_PURGE_ID_KEY) || '';
+                        lastPurgeTs = Number(localStorage.getItem(this.LAST_PURGE_TS_KEY) || '0');
+                    } catch (e) {}
+
+                    if (lastHandledId === cmd.id) return;
+
+                    // 2. Ignore stale commands older than 5 minutes OR older than our last local purge
+                    const ageMs = Date.now() - Number(cmd.issuedAt);
+                    if (ageMs > 5 * 60 * 1000 || (lastPurgeTs > 0 && Number(cmd.issuedAt) <= lastPurgeTs)) {
+                        return;
+                    }
+
+                    // 3. Check Target Scope ('ALL' vs specific shopId)
+                    const scope = String(cmd.targetScope || 'ALL').trim();
+                    if (scope !== 'ALL' && scope !== String(currentShopId || '').trim()) {
+                        return;
+                    }
+
+                    this.executeLocalClearCache({
+                        mode: cmd.mode === 'hard' ? 'hard' : 'clean',
+                        reason: cmd.reason || 'Remote Admin Cache Clear',
+                        triggeredBy: cmd.triggeredBy || 'Admin',
+                        commandId: cmd.id,
+                        broadcastToOtherTabs: false
+                    });
+                },
+
+                // Starts listening on BroadcastChannel for cross-tab cache purge commands
+                initBroadcastListener() {
+                    if (this._bc || typeof BroadcastChannel === 'undefined') return;
+                    try {
+                        this._bc = new BroadcastChannel(this.BROADCAST_CHANNEL_NAME);
+                        this._bc.onmessage = (ev) => {
+                            const msg = ev?.data;
+                            if (!msg || msg.type !== 'EXECUTE_CACHE_PURGE' || this._isExecutingClear) return;
+                            let lastId = '';
+                            try { lastId = localStorage.getItem(this.LAST_PURGE_ID_KEY) || ''; } catch (e) {}
+                            if (msg.commandId && lastId === msg.commandId) return;
+                            this.executeLocalClearCache({
+                                mode: msg.mode === 'hard' ? 'hard' : 'clean',
+                                reason: msg.reason || 'Cross-Tab Cache Clear',
+                                triggeredBy: msg.triggeredBy || 'Admin',
+                                commandId: msg.commandId || '',
+                                broadcastToOtherTabs: false
+                            });
+                        };
+                    } catch (e) {}
                 }
             };
 
-            // Execute automatic boot sanitizer immediately before application scripts run
+            // Execute automatic boot sanitizer & cross-tab cache bus immediately before application scripts run
             window.SolarisCacheClearEngine.purgeLegacySettingsFromLocalCache();
+            window.SolarisCacheClearEngine.initBroadcastListener();
         </script>
 
         <script type="text/babel">
@@ -4168,17 +4575,21 @@
             setEnableHeavyCollections(prev => (prev ? prev : true));
         }, []);
 
+        const { data: categories, loading: categoriesLoading } = useCollection('categories');
         const { data: allPOs, loading: posLoading } = useCollection('purchaseOrders', { enabled: enableHeavyCollections });
         const { data: allTransfers, loading: transfersLoading } = useCollection('internalTransfers', { enabled: enableHeavyCollections });
         const { data: users, loading: usersLoading } = useCollection('users', { enabled: enableHeavyCollections });
-        // --- NEW: Fetch Product Categories ---
-        const { data: categories, loading: categoriesLoading } = useCollection('categories');
-        // --- PHASE 1 ADDITION: Fetch Customers ---
         const { data: customers, loading: customersLoading } = useCollection('customers');
         const { data: loyaltyRules, loading: loyaltyRulesLoading } = useCollection('loyalty_programs');
         const { data: crossPromoProducts, loading: crossPromoProductsLoading } = useCollection('crossPromoProducts');
 
-        // --- Fetch System Config (RAM-only; Includes Global Render Bridge URL Sync for All Shops) ---
+        // --- Fetch System Config (RAM-only; Includes Global Render Bridge URL & Remote Cache Purge Listener) ---
+        const activeShopIdRef = useRef('');
+        useEffect(() => {
+            const devObj = (devices || []).find(d => d.id === currentDeviceId);
+            activeShopIdRef.current = devObj?.shopId || shops?.[0]?.id || '';
+        }, [devices, currentDeviceId, shops]);
+
         useEffect(() => {
             const unsubscribe = db.collection('system').doc('config').onSnapshot(doc => {
                 if (doc.exists) {
@@ -4188,6 +4599,12 @@
                         window.SolarisRenderBridge.setBaseUrl(
                             data.renderListenerUrl,
                             !!window.SolarisRenderBridge.eventSource
+                        );
+                    }
+                    if (data.cachePurgeCommand && window.SolarisCacheClearEngine?.handleIncomingRemoteCommand) {
+                        window.SolarisCacheClearEngine.handleIncomingRemoteCommand(
+                            data.cachePurgeCommand,
+                            activeShopIdRef.current
                         );
                     }
                 }
@@ -6034,12 +6451,327 @@
         );
     };
 
+    // --- PHASE 2.2: ADMIN MASTER CLEAR CACHE & REMOTE PUSH MODAL ---
+    const MasterClearCacheModal = ({ show, onClose, userProfile, shops = [], onRemotePushed }) => {
+        const [targetMode, setTargetMode] = useState('THIS_BROWSER'); // 'THIS_BROWSER' | 'ALL' | 'SHOP'
+        const [selectedShopId, setSelectedShopId] = useState(() => shops?.[0]?.id || '');
+        const [purgeMode, setPurgeMode] = useState('clean'); // 'clean' | 'hard'
+        const [alsoClearSelf, setAlsoClearSelf] = useState(true);
+        const [diag, setDiag] = useState(null);
+        const [loadingDiag, setLoadingDiag] = useState(false);
+        const [isExecuting, setIsExecuting] = useState(false);
+        const [statusMsg, setStatusMsg] = useState('');
+
+        useEffect(() => {
+            if (!selectedShopId && shops && shops.length > 0) {
+                setSelectedShopId(shops[0].id);
+            }
+        }, [shops, selectedShopId]);
+
+        const refreshDiagnostics = useCallback(async () => {
+            if (!window.SolarisCacheClearEngine?.getDiagnostics) return;
+            setLoadingDiag(true);
+            try {
+                const res = await window.SolarisCacheClearEngine.getDiagnostics();
+                setDiag(res);
+            } catch (e) {}
+            setLoadingDiag(false);
+        }, []);
+
+        useEffect(() => {
+            if (show) {
+                setStatusMsg('');
+                refreshDiagnostics();
+            }
+        }, [show, refreshDiagnostics]);
+
+        if (!show) return null;
+
+        const handleExecute = async () => {
+            if (isExecuting || !window.SolarisCacheClearEngine) return;
+            setIsExecuting(true);
+            setStatusMsg('');
+            const actorName = userProfile?.name || userProfile?.email || 'Admin';
+
+            try {
+                if (targetMode === 'THIS_BROWSER') {
+                    await window.SolarisCacheClearEngine.executeLocalClearCache({
+                        mode: purgeMode,
+                        reason: purgeMode === 'hard' ? 'Header Hard Security Wipe' : 'Header Clean & Reload',
+                        triggeredBy: actorName,
+                        broadcastToOtherTabs: true
+                    });
+                } else {
+                    const isAll = targetMode === 'ALL';
+                    const targetShop = !isAll ? (shops || []).find(s => s.id === selectedShopId) : null;
+                    const scopeValue = isAll ? 'ALL' : (targetShop?.id || '');
+                    const scopeLabel = isAll ? 'ALL Connected Terminals & Browsers' : (targetShop?.name || 'Selected Shop');
+
+                    if (!isAll && !scopeValue) {
+                        setStatusMsg('Please select a target shop first.');
+                        setIsExecuting(false);
+                        return;
+                    }
+
+                    await window.SolarisCacheClearEngine.broadcastRemotePush({
+                        targetScope: scopeValue,
+                        targetShopName: scopeLabel,
+                        mode: purgeMode,
+                        triggeredBy: actorName,
+                        reason: purgeMode === 'hard' ? 'Master Remote Hard Security Wipe' : 'Master Remote Cache Clear',
+                        alsoClearSelf
+                    });
+
+                    if (!alsoClearSelf) {
+                        setIsExecuting(false);
+                        if (typeof onRemotePushed === 'function') {
+                            onRemotePushed(`Remote cache purge pushed to ${scopeLabel}!`);
+                        }
+                        onClose();
+                    }
+                }
+            } catch (err) {
+                setStatusMsg(err?.message || 'Failed to execute cache clear.');
+                setIsExecuting(false);
+            }
+        };
+
+        const shieldViolations = diag?.settingsShieldViolations ?? 0;
+
+        return (
+            <Modal show={show} onClose={isExecuting ? null : onClose} maxWidth="max-w-lg">
+                <ModalHeader title="Master Clear Cache & Remote Push" onClose={isExecuting ? null : onClose} />
+                <ModalBody>
+                    <div className="space-y-4">
+                        {/* Live Storage Diagnostics & Settings Cache Shield Strip */}
+                        <div className="bg-slate-900/90 p-3.5 rounded-2xl border border-slate-700 space-y-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                                    <i className="fas fa-shield-alt text-emerald-400"></i>
+                                    <span>Settings Cache Shield</span>
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                        shieldViolations === 0
+                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                            : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                                    }`}>
+                                        {shieldViolations === 0 ? '0 Settings Keys Cached' : `${shieldViolations} Legacy Key(s)`}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={refreshDiagnostics}
+                                        disabled={loadingDiag}
+                                        className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center border border-slate-700"
+                                        title="Refresh Live Diagnostics"
+                                    >
+                                        <i className={`fas fa-sync-alt text-[10px] ${loadingDiag ? 'fa-spin' : ''}`}></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2 text-center">
+                                <div className="bg-slate-800/80 p-2 rounded-xl border border-slate-700/70">
+                                    <div className="text-[10px] text-slate-400 font-bold uppercase">LocalStorage</div>
+                                    <div className="text-xs font-black text-white font-mono mt-0.5">
+                                        {diag ? `${diag.localStorageKeys} (${diag.localStorageKB} KB)` : '...'}
+                                    </div>
+                                </div>
+                                <div className="bg-slate-800/80 p-2 rounded-xl border border-slate-700/70">
+                                    <div className="text-[10px] text-slate-400 font-bold uppercase">IndexedDB</div>
+                                    <div className="text-xs font-black text-cyan-400 font-mono mt-0.5">
+                                        {diag ? `${diag.indexedDBNames.length} DB(s)` : '...'}
+                                    </div>
+                                </div>
+                                <div className="bg-slate-800/80 p-2 rounded-xl border border-slate-700/70">
+                                    <div className="text-[10px] text-slate-400 font-bold uppercase">SW / Caches</div>
+                                    <div className="text-xs font-black text-amber-400 font-mono mt-0.5">
+                                        {diag ? `${diag.serviceWorkerCount} SW / ${diag.cacheStorageCount} CS` : '...'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Step 1: Target Scope */}
+                        <div className="space-y-2">
+                            <label className="block text-[11px] font-black uppercase tracking-wider text-slate-400">
+                                1. Target Scope
+                            </label>
+                            <div className="grid grid-cols-1 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setTargetMode('THIS_BROWSER')}
+                                    className={`p-3 rounded-xl border text-left transition flex items-center justify-between ${
+                                        targetMode === 'THIS_BROWSER'
+                                            ? 'bg-blue-600/20 border-blue-500 text-white'
+                                            : 'bg-slate-900/50 border-slate-700 text-slate-300 hover:border-slate-500'
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-2.5">
+                                        <i className="fas fa-laptop text-blue-400 w-5 text-center"></i>
+                                        <div>
+                                            <div className="text-xs font-black">1-Click Clear This Browser</div>
+                                            <div className="text-[10px] text-slate-400">Wipes caches &amp; reloads open tabs on this device only</div>
+                                        </div>
+                                    </div>
+                                    {targetMode === 'THIS_BROWSER' && <i className="fas fa-check-circle text-blue-400"></i>}
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setTargetMode('ALL')}
+                                    className={`p-3 rounded-xl border text-left transition flex items-center justify-between ${
+                                        targetMode === 'ALL'
+                                            ? 'bg-rose-600/20 border-rose-500 text-white'
+                                            : 'bg-slate-900/50 border-slate-700 text-slate-300 hover:border-slate-500'
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-2.5">
+                                        <i className="fas fa-broadcast-tower text-rose-400 w-5 text-center"></i>
+                                        <div>
+                                            <div className="text-xs font-black">Master Push: ALL Connected Terminals &amp; Browsers</div>
+                                            <div className="text-[10px] text-slate-400">Broadcasts live purge command to every active shop terminal</div>
+                                        </div>
+                                    </div>
+                                    {targetMode === 'ALL' && <i className="fas fa-check-circle text-rose-400"></i>}
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setTargetMode('SHOP')}
+                                    className={`p-3 rounded-xl border text-left transition flex items-center justify-between ${
+                                        targetMode === 'SHOP'
+                                            ? 'bg-amber-600/20 border-amber-500 text-white'
+                                            : 'bg-slate-900/50 border-slate-700 text-slate-300 hover:border-slate-500'
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-2.5">
+                                        <i className="fas fa-store text-amber-400 w-5 text-center"></i>
+                                        <div>
+                                            <div className="text-xs font-black">Per-Shop Remote Push</div>
+                                            <div className="text-[10px] text-slate-400">Target all terminals belonging to a specific branch</div>
+                                        </div>
+                                    </div>
+                                    {targetMode === 'SHOP' && <i className="fas fa-check-circle text-amber-400"></i>}
+                                </button>
+                            </div>
+
+                            {targetMode === 'SHOP' && (
+                                <select
+                                    value={selectedShopId}
+                                    onChange={(e) => setSelectedShopId(e.target.value)}
+                                    className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-amber-500/50 text-xs font-bold outline-none"
+                                >
+                                    {(shops || []).map(s => (
+                                        <option key={s.id} value={s.id}>🏪 {s.name}</option>
+                                    ))}
+                                </select>
+                            )}
+
+                            {targetMode !== 'THIS_BROWSER' && (
+                                <label className="flex items-center gap-2 text-xs text-slate-300 bg-slate-900/60 px-3 py-2 rounded-xl border border-slate-700 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={alsoClearSelf}
+                                        onChange={(e) => setAlsoClearSelf(e.target.checked)}
+                                        className="rounded accent-rose-500"
+                                    />
+                                    <span>Also clear &amp; reload this Admin browser immediately</span>
+                                </label>
+                            )}
+                        </div>
+
+                        {/* Step 2: Purge Mode */}
+                        <div className="space-y-2">
+                            <label className="block text-[11px] font-black uppercase tracking-wider text-slate-400">
+                                2. Purge Mode
+                            </label>
+                            <div className="grid grid-cols-2 gap-2.5">
+                                <button
+                                    type="button"
+                                    onClick={() => setPurgeMode('clean')}
+                                    className={`p-3 rounded-xl border text-left transition ${
+                                        purgeMode === 'clean'
+                                            ? 'bg-emerald-600/20 border-emerald-500 text-white'
+                                            : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:text-slate-200'
+                                    }`}
+                                >
+                                    <div className="text-xs font-black flex items-center gap-1.5 text-emerald-300">
+                                        <i className="fas fa-broom"></i>
+                                        <span>Clean &amp; Reload</span>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                                        Keeps active login &amp; terminal ID. Wipes IndexedDB, Cache Storage &amp; RAM.
+                                    </p>
+                                </button>
+
+                                <button
+                                    type="button"
+                                    onClick={() => setPurgeMode('hard')}
+                                    className={`p-3 rounded-xl border text-left transition ${
+                                        purgeMode === 'hard'
+                                            ? 'bg-red-600/25 border-red-500 text-white'
+                                            : 'bg-slate-900/50 border-slate-700 text-slate-400 hover:text-slate-200'
+                                    }`}
+                                >
+                                    <div className="text-xs font-black flex items-center gap-1.5 text-red-400">
+                                        <i className="fas fa-user-lock"></i>
+                                        <span>Hard Security Wipe</span>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                                        Full nuclear storage wipe + signs out &amp; forces fresh re-login.
+                                    </p>
+                                </button>
+                            </div>
+                        </div>
+
+                        {statusMsg && (
+                            <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs font-bold">
+                                <i className="fas fa-exclamation-triangle mr-1.5"></i>{statusMsg}
+                            </div>
+                        )}
+                    </div>
+                </ModalBody>
+                <ModalFooter>
+                    <button
+                        type="button"
+                        disabled={isExecuting}
+                        onClick={onClose}
+                        className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-5 rounded-xl text-xs transition disabled:opacity-50"
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        disabled={isExecuting}
+                        onClick={handleExecute}
+                        className={`font-black py-2.5 px-6 rounded-xl text-xs text-white shadow-lg flex items-center justify-center gap-2 transition active:scale-95 disabled:opacity-50 ${
+                            purgeMode === 'hard'
+                                ? 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 shadow-red-900/30'
+                                : 'bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 shadow-blue-900/30'
+                        }`}
+                    >
+                        <i className={`fas ${isExecuting ? 'fa-spinner fa-spin' : (purgeMode === 'hard' ? 'fa-shield-alt' : 'fa-broom')}`}></i>
+                        <span>
+                            {isExecuting
+                                ? 'Executing...'
+                                : targetMode === 'THIS_BROWSER'
+                                    ? (purgeMode === 'hard' ? 'Hard Wipe This Browser' : 'Clear & Reload Now')
+                                    : 'Broadcast Remote Cache Purge'}
+                        </span>
+                    </button>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
     const Header = ({ pageTitle, activePage, userProfile, toggleSidebar, onOpenInstallModal }) => {
-        const { productSyncStatus, forceFullProductSync, systemConfig } = useData();
+        const { productSyncStatus, forceFullProductSync, systemConfig, shops } = useData();
         const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
         const [isSigningOut, setIsSigningOut] = useState(false);
         const [isMasterSyncing, setIsMasterSyncing] = useState(false);
         const [syncToast, setSyncToast] = useState(null);
+        const [showClearCacheModal, setShowClearCacheModal] = useState(false);
         const [isFullscreen, setIsFullscreen] = useState(() => !!(document.fullscreenElement || document.webkitFullscreenElement));
         const [pwaState, setPwaState] = useState(() => window.SolarisPWAManager ? window.SolarisPWAManager.getState() : { canInstallPrompt: false, isInstalled: false });
         const [keepAwakeState, setKeepAwakeState] = useState(() => window.SolarisKeepAwakeManager ? window.SolarisKeepAwakeManager.getState() : { isActive: false, mode: 'Standby' });
@@ -6127,6 +6859,18 @@
 
         return (
             <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-700/80 px-3 sm:px-5 flex items-center justify-between shrink-0 z-20 relative">
+                {userProfile?.role === 'Admin' && (
+                    <MasterClearCacheModal
+                        show={showClearCacheModal}
+                        onClose={() => setShowClearCacheModal(false)}
+                        userProfile={userProfile}
+                        shops={shops}
+                        onRemotePushed={(msg) => {
+                            setSyncToast(msg);
+                            setTimeout(() => setSyncToast(null), 4000);
+                        }}
+                    />
+                )}
                 {syncToast && (
                     <div className="fixed top-16 right-4 z-[120] bg-emerald-600 text-white px-4 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
                         <i className="fas fa-check-circle"></i>
@@ -6177,6 +6921,19 @@
                         <i className={`fas fa-sync-alt ${isSyncingNow ? 'fa-spin text-amber-400' : ''}`}></i>
                         <span className="hidden md:inline">{isSyncingNow ? 'Syncing...' : 'AppSync'}</span>
                     </button>
+
+                    {/* Admin-Only Master Clear Cache & Remote Push Button */}
+                    {userProfile?.role === 'Admin' && (
+                        <button
+                            type="button"
+                            onClick={() => setShowClearCacheModal(true)}
+                            className="w-9 h-9 sm:w-auto sm:px-3 sm:h-9 rounded-xl bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 flex items-center justify-center gap-1.5 text-xs font-bold transition shadow-sm active:scale-95"
+                            title="Master Clear Local Cache & Remote Push (Admin Only)"
+                        >
+                            <i className="fas fa-broom"></i>
+                            <span className="hidden md:inline">Clear Cache</span>
+                        </button>
+                    )}
 
                     {/* Fullscreen Kiosk Toggle */}
                     <button
@@ -28239,7 +28996,7 @@
                 {/* Full-Width Content Area */}
                 <div className="w-full min-w-0 animate-fade-in-up">
                     {activeTab === 'general' && <GeneralSettings userProfile={userProfile} />}
-                    {activeTab === 'sys-config' && <SystemConfiguration />}
+                    {activeTab === 'sys-config' && <SystemConfiguration userProfile={userProfile} />}
                     {activeTab === 'shops' && <ShopManagement />}
                     {activeTab === 'users' && <UserManagement />}
                     {activeTab === 'devices' && <DeviceManagement />}
@@ -32143,103 +32900,270 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                     onClick={() => setShowDisconnectConfirm(true)}
                                     className="text-xs bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded border border-slate-600 hover:bg-red-600 hover:border-red-500 transition shadow-sm self-start sm:self-auto"
                                 >
-                                    Disconnect
+                                    <i className="fas fa-unlink mr-1.5"></i> Disconnect Terminal
                                 </button>
                             </div>
                         ) : (
-                            <div className="space-y-3">
-                                <select 
-                                    value={currentDeviceId} 
-                                    onChange={(e) => setLocalDevice(e.target.value)} 
-                                    className="w-full bg-slate-800 text-white px-4 py-3 rounded-lg border border-slate-600 focus:ring-2 focus:ring-cyan-500 outline-none transition cursor-pointer"
-                                >
-                                    <option value="">-- Select Identity --</option>
-                                    {devices.map(d => {
-                                        const shopName = shops.find(s => s.id === d.shopId)?.name || 'Unknown Shop';
-                                        return <option key={d.id} value={d.id}>{d.name} ({shopName})</option>;
-                                    })}
-                                </select>
-                                <p className="text-xs text-slate-500 italic flex items-center gap-1">
-                                    <i className="fas fa-info-circle"></i> Select from available devices below.
-                                </p>
+                            <div className="bg-amber-900/20 border border-amber-500/30 rounded-lg p-4 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                                <div>
+                                    <h4 className="text-amber-400 font-bold flex items-center gap-2 text-sm sm:text-base">
+                                        <i className="fas fa-exclamation-triangle"></i> Terminal Not Linked
+                                    </h4>
+                                    <p className="text-xs text-slate-400 mt-1">
+                                        Select a registered terminal below to bind this browser/device.
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2 w-full sm:w-auto">
+                                    <select
+                                        value=""
+                                        onChange={(e) => { if (e.target.value) setLocalDevice(e.target.value); }}
+                                        className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 text-xs sm:text-sm font-semibold outline-none focus:border-blue-500 flex-1 sm:flex-none"
+                                    >
+                                        <option value="">-- Bind to Terminal --</option>
+                                        {devices.map(d => {
+                                            const sName = shops.find(s => s.id === d.shopId)?.name || 'Unknown Shop';
+                                            return <option key={d.id} value={d.id}>{d.name} ({sName})</option>;
+                                        })}
+                                    </select>
+                                </div>
                             </div>
                         )}
                     </div>
                 </Card>
 
-                {/* Device Form Modal */}
+                {/* Add / Edit Device Modal */}
                 {showDeviceModal && (
-                    <Modal show={true} onClose={resetForm} maxWidth="max-w-md">
-                        <ModalHeader title={editId ? "Edit Device" : "Add New POS Device"} onClose={resetForm} />
+                    <Modal show={true} onClose={resetForm} maxWidth="max-w-lg">
+                        <ModalHeader title={editId ? 'Edit Terminal / Device' : 'Add New Terminal / Device'} onClose={resetForm} />
                         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
                             <ModalBody>
                                 <div className="space-y-4 p-1">
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-desktop text-cyan-400 mr-2"></i>Device Name
+                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
+                                            <i className="fas fa-desktop text-cyan-400 mr-2"></i>Terminal Name <span className="text-red-400">*</span>
                                         </label>
-                                        <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full bg-slate-700 text-white px-3 py-2 rounded-md border border-slate-600 focus:border-blue-500 outline-none" placeholder="e.g. Counter 1" required />
+                                        <input
+                                            type="text"
+                                            value={formData.name}
+                                            onChange={e => setFormData({ ...formData, name: e.target.value })}
+                                            placeholder="e.g. Counter 1, iPad POS"
+                                            className="w-full bg-slate-700 text-slate-100 px-3.5 py-2.5 text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                            required
+                                            autoFocus
+                                        />
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-store-alt text-orange-400 mr-2"></i>Assigned Shop
+                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
+                                            <i className="fas fa-store text-orange-400 mr-2"></i>Assigned Shop <span className="text-red-400">*</span>
                                         </label>
-                                        <select value={formData.shopId} onChange={e => setFormData({...formData, shopId: e.target.value})} className="w-full bg-slate-700 text-white px-3 py-2 rounded-md border border-slate-600 focus:border-blue-500 outline-none" required>
-                                            <option value="">Select Shop</option>
+                                        <select
+                                            value={formData.shopId}
+                                            onChange={e => setFormData({ ...formData, shopId: e.target.value })}
+                                            className="w-full bg-slate-700 text-slate-100 px-3.5 py-2.5 text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                            required
+                                        >
+                                            <option value="">-- Select Shop --</option>
                                             {shops.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                                         </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
+                                            <i className="fas fa-barcode text-purple-400 mr-2"></i>Device Code (Optional)
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={formData.code}
+                                            onChange={e => setFormData({ ...formData, code: e.target.value })}
+                                            placeholder="e.g. POS-01"
+                                            className="w-full bg-slate-700 text-slate-100 px-3.5 py-2.5 text-sm font-mono border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                                        />
                                     </div>
                                 </div>
                             </ModalBody>
                             <ModalFooter>
-                                <button type="button" onClick={resetForm} className="bg-slate-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-slate-500 transition">Cancel</button>
-                                <button type="submit" className="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition shadow-lg shadow-blue-500/20">{editId ? 'Update' : 'Add Device'}</button>
+                                <button type="button" onClick={resetForm} className="w-full sm:w-auto bg-slate-600 text-white font-bold py-2.5 px-5 rounded-xl hover:bg-slate-500 transition text-sm">
+                                    Cancel
+                                </button>
+                                <button type="submit" className={`w-full sm:w-auto ${editId ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'} text-white font-bold py-2.5 px-6 rounded-xl transition shadow-lg text-sm flex items-center justify-center gap-2`}>
+                                    <i className={`fas ${editId ? 'fa-check' : 'fa-plus-circle'}`}></i>
+                                    <span>{editId ? 'Update Device' : 'Add Device'}</span>
+                                </button>
                             </ModalFooter>
                         </form>
                     </Modal>
                 )}
 
-                <TableCard title="Registered Devices">
-                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                        <p className="text-sm text-slate-400">Manage POS terminals and link them to shops.</p>
-                        <button onClick={handleAddNew} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition flex items-center gap-2 shrink-0">
+                {/* Registered Devices Table */}
+                <TableCard title={`Registered Devices & Terminals (${devices.length})`}>
+                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3">
+                        <p className="text-xs sm:text-sm text-slate-400">
+                            Register POS counter terminals and assign each terminal to a specific shop branch.
+                        </p>
+                        <button
+                            type="button"
+                            onClick={handleAddNew}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shrink-0 shadow-lg shadow-blue-900/20 text-sm"
+                        >
                             <i className="fas fa-plus"></i> Add New Device
                         </button>
                     </div>
-                    
-                    <table className="min-w-full divide-y divide-slate-700">
-                        <thead className="bg-slate-900/50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Device Name</th>
-                                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Shop</th>
-                                <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-700">
-                            {devices && devices.map(dev => (
-                                <tr key={dev.id} className="hover:bg-slate-700/50">
-                                    <td className="px-4 py-3 text-sm text-slate-200 font-bold">{dev.name}</td>
-                                    <td className="px-4 py-3 text-sm text-slate-400">{shops.find(s => s.id === dev.shopId)?.name || 'Unknown'}</td>
-                                    <td className="px-4 py-3 text-center space-x-4">
-                                        <button onClick={() => handleEdit(dev)} className="text-blue-400 hover:text-blue-300"><i className="fas fa-edit"></i></button>
-                                        <button onClick={() => setModal({ type: 'confirmDelete', data: dev.id })} className="text-red-500 hover:text-red-400"><i className="fas fa-trash"></i></button>
-                                    </td>
-                                </tr>
-                            ))}
-                            {(!devices || devices.length === 0) && (
-                                <tr>
-                                    <td colSpan="3" className="px-4 py-8 text-center text-slate-500">No devices found. Add one to get started.</td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
+                    {devices.length === 0 ? (
+                        <p className="text-center p-6 text-slate-400">No devices registered yet.</p>
+                    ) : (
+                        <div className="overflow-x-auto -mx-2 sm:mx-0">
+                            <table className="min-w-full divide-y divide-slate-700 whitespace-nowrap">
+                                <thead className="bg-slate-900/50">
+                                    <tr>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Terminal Name</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Code</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Assigned Shop</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">This Browser</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-700">
+                                    {devices.map(dev => {
+                                        const sName = shops.find(s => s.id === dev.shopId)?.name || 'Unknown Shop';
+                                        const isCurrent = currentDeviceId === dev.id;
+                                        return (
+                                            <tr key={dev.id} className="hover:bg-slate-700/50 transition-colors">
+                                                <td className="px-4 py-3 text-sm font-bold text-slate-200">{dev.name}</td>
+                                                <td className="px-4 py-3 text-sm font-mono text-slate-400">{dev.code || '-'}</td>
+                                                <td className="px-4 py-3 text-sm text-slate-300">{sName}</td>
+                                                <td className="px-4 py-3 text-center">
+                                                    {isCurrent ? (
+                                                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                                            <i className="fas fa-check-circle mr-1"></i> Active
+                                                        </span>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setLocalDevice(dev.id)}
+                                                            className="px-2.5 py-1 rounded-lg bg-slate-700 hover:bg-blue-600 text-slate-300 hover:text-white text-xs font-bold border border-slate-600 transition"
+                                                        >
+                                                            Use Here
+                                                        </button>
+                                                    )}
+                                                </td>
+                                                <td className="px-4 py-3 text-center space-x-3">
+                                                    <button type="button" onClick={() => handleEdit(dev)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="Edit Device">
+                                                        <i className="fas fa-edit"></i>
+                                                    </button>
+                                                    <button type="button" onClick={() => setModal({ type: 'confirmDelete', data: dev.id })} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete Device">
+                                                        <i className="fas fa-trash"></i>
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                 </TableCard>
             </div>
         );
     };
 
-    // --- NEW: System Configuration Component ---
-    const SystemConfiguration = () => {
+    // --- NEW: System Configuration Component (Includes Master Browser Cache Control & Remote Push) ---
+    const SystemConfiguration = ({ userProfile }) => {
+        const { shops, systemConfig, devices } = useData();
+        const isAdmin = userProfile?.role === 'Admin';
+
+        // Master Cache Control & Live Storage Diagnostics State
+        const [cacheDiag, setCacheDiag] = useState(null);
+        const [loadingDiag, setLoadingDiag] = useState(false);
+        const [purgeMode, setPurgeMode] = useState('clean'); // 'clean' | 'hard'
+        const [targetShopId, setTargetShopId] = useState(() => shops?.[0]?.id || '');
+        const [alsoClearSelf, setAlsoClearSelf] = useState(true);
+        const [isExecutingCacheAction, setIsExecutingCacheAction] = useState(false);
+        const [confirmAction, setConfirmAction] = useState(null); // { scope, label, mode }
+        const [feedbackModal, setFeedbackModal] = useState({ show: false, title: '', message: '', isError: false });
+
+        useEffect(() => {
+            if (!targetShopId && shops && shops.length > 0) {
+                setTargetShopId(shops[0].id);
+            }
+        }, [shops, targetShopId]);
+
+        const refreshDiagnostics = useCallback(async () => {
+            if (!window.SolarisCacheClearEngine?.getDiagnostics) return;
+            setLoadingDiag(true);
+            try {
+                const res = await window.SolarisCacheClearEngine.getDiagnostics();
+                setCacheDiag(res);
+            } catch (e) {}
+            setLoadingDiag(false);
+        }, []);
+
+        useEffect(() => {
+            refreshDiagnostics();
+        }, [refreshDiagnostics]);
+
+        const handleRunSettingsSanitizer = () => {
+            if (!window.SolarisCacheClearEngine?.purgeLegacySettingsFromLocalCache) return;
+            const report = window.SolarisCacheClearEngine.purgeLegacySettingsFromLocalCache();
+            refreshDiagnostics();
+            setFeedbackModal({
+                show: true,
+                title: 'Settings Cache Shield Verified',
+                message: report.removedCount > 0
+                    ? `Sanitizer purged ${report.removedCount} legacy Settings key(s) from localStorage.`
+                    : 'Zero Settings keys found in localStorage. All sensitive Settings remain strictly in RAM.',
+                isError: false
+            });
+        };
+
+        const executeConfirmedCacheAction = async () => {
+            if (!confirmAction || isExecutingCacheAction || !window.SolarisCacheClearEngine) return;
+            const action = confirmAction;
+            setConfirmAction(null);
+            setIsExecutingCacheAction(true);
+            const actorName = userProfile?.name || userProfile?.email || 'Admin';
+
+            try {
+                if (action.scope === 'THIS_BROWSER') {
+                    await window.SolarisCacheClearEngine.executeLocalClearCache({
+                        mode: action.mode,
+                        reason: action.mode === 'hard' ? 'System Health Hard Security Wipe' : 'System Health Clean & Reload',
+                        triggeredBy: actorName,
+                        broadcastToOtherTabs: true
+                    });
+                } else {
+                    await window.SolarisCacheClearEngine.broadcastRemotePush({
+                        targetScope: action.scope,
+                        targetShopName: action.label,
+                        mode: action.mode,
+                        triggeredBy: actorName,
+                        reason: action.mode === 'hard' ? 'System Health Remote Hard Wipe' : 'System Health Remote Cache Clear',
+                        alsoClearSelf
+                    });
+
+                    if (!alsoClearSelf) {
+                        setIsExecutingCacheAction(false);
+                        refreshDiagnostics();
+                        setFeedbackModal({
+                            show: true,
+                            title: 'Remote Cache Push Broadcasted',
+                            message: `Live purge command (${action.mode === 'hard' ? 'Hard Security Wipe + Force Re-Login' : 'Clean & Reload'}) has been pushed to ${action.label}.`,
+                            isError: false
+                        });
+                    }
+                }
+            } catch (err) {
+                setIsExecutingCacheAction(false);
+                setFeedbackModal({
+                    show: true,
+                    title: 'Cache Purge Error',
+                    message: err?.message || 'Failed to execute cache clear command.',
+                    isError: true
+                });
+            }
+        };
+
+        const lastRemoteCmd = systemConfig?.cachePurgeCommand || null;
+        const shieldViolations = cacheDiag?.settingsShieldViolations ?? 0;
+
         const [checks, setChecks] = useState([
             { 
                 id: 1, 
@@ -32326,6 +33250,297 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
 
         return (
             <div className="space-y-6">
+                <MessageModal
+                    show={feedbackModal.show}
+                    title={feedbackModal.title}
+                    message={feedbackModal.message}
+                    isError={feedbackModal.isError}
+                    onClose={() => setFeedbackModal({ show: false, title: '', message: '', isError: false })}
+                />
+
+                <ConfirmationModal
+                    show={!!confirmAction}
+                    title={confirmAction?.mode === 'hard' ? 'Confirm Hard Security Wipe' : 'Confirm Master Cache Clear'}
+                    message={
+                        confirmAction
+                            ? `Proceed with ${confirmAction.mode === 'hard' ? 'Hard Security Wipe + Force Re-Login' : 'Clean & Reload (keeps login)'} for "${confirmAction.label}"? This clears localStorage, IndexedDB (SolarisCatalogVault_v2 + Firestore offline cache), Cache Storage, Service Workers, and RAM caches.`
+                            : ''
+                    }
+                    onConfirm={executeConfirmedCacheAction}
+                    onCancel={() => setConfirmAction(null)}
+                />
+
+                {/* PHASE 2.3: Master Browser Cache Control & 1-Click Remote Push Panel */}
+                <Card className="border-rose-500/30">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 mb-5 border-b border-slate-700">
+                        <div>
+                            <h3 className="text-xl font-black text-slate-100 flex items-center gap-2.5">
+                                <span className="w-9 h-9 rounded-xl bg-rose-600/20 border border-rose-500/40 text-rose-400 flex items-center justify-center shrink-0">
+                                    <i className="fas fa-broom"></i>
+                                </span>
+                                <span>Master Browser Cache Control &amp; 1-Click Remote Push</span>
+                            </h3>
+                            <p className="text-slate-400 text-xs sm:text-sm mt-1">
+                                Inspect live browser storage, verify the Zero-Settings Local Cache Shield, or broadcast instant cache purges across connected terminals.
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                type="button"
+                                onClick={handleRunSettingsSanitizer}
+                                className="px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition"
+                                title="Scan localStorage and purge any legacy Settings keys immediately"
+                            >
+                                <i className="fas fa-shield-alt"></i>
+                                <span>Sanitize Now</span>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={refreshDiagnostics}
+                                disabled={loadingDiag}
+                                className="px-3.5 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600 text-xs font-bold flex items-center gap-1.5 transition disabled:opacity-50"
+                            >
+                                <i className={`fas fa-sync-alt ${loadingDiag ? 'fa-spin text-cyan-400' : 'text-cyan-400'}`}></i>
+                                <span>Refresh</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Live Storage Diagnostics & Settings Cache Shield Grid */}
+                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-5">
+                        {/* Settings Cache Shield Counter */}
+                        <div className={`col-span-2 lg:col-span-1 p-3.5 rounded-xl border ${
+                            shieldViolations === 0
+                                ? 'bg-emerald-950/30 border-emerald-500/40'
+                                : 'bg-rose-950/30 border-rose-500/50'
+                        }`}>
+                            <div className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                                <i className={`fas fa-shield-alt ${shieldViolations === 0 ? 'text-emerald-400' : 'text-rose-400'}`}></i>
+                                <span>Settings Shield</span>
+                            </div>
+                            <div className={`text-xl font-black font-mono mt-1 ${shieldViolations === 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {cacheDiag ? `${shieldViolations} Keys` : '...'}
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                                {shieldViolations === 0
+                                    ? `RAM-Only Active (Boot purged: ${cacheDiag?.bootSanitizedCount ?? 0})`
+                                    : 'Click Sanitize Now to purge'}
+                            </div>
+                        </div>
+
+                        {/* LocalStorage */}
+                        <div className="bg-slate-900/70 p-3.5 rounded-xl border border-slate-700">
+                            <div className="text-[10px] font-black uppercase tracking-wider text-slate-400">LocalStorage</div>
+                            <div className="text-xl font-black text-white font-mono mt-1">
+                                {cacheDiag ? `${cacheDiag.localStorageKeys}` : '...'}
+                                <span className="text-xs font-bold text-slate-400 ml-1">keys</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                                {cacheDiag ? `${cacheDiag.localStorageKB} KB used` : 'Scanning...'}
+                            </div>
+                        </div>
+
+                        {/* IndexedDB */}
+                        <div className="bg-slate-900/70 p-3.5 rounded-xl border border-slate-700">
+                            <div className="text-[10px] font-black uppercase tracking-wider text-slate-400">IndexedDB Vaults</div>
+                            <div className="text-xl font-black text-cyan-400 font-mono mt-1">
+                                {cacheDiag ? `${cacheDiag.indexedDBNames.length}` : '...'}
+                                <span className="text-xs font-bold text-slate-400 ml-1">DB(s)</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate mt-0.5" title={(cacheDiag?.indexedDBNames || []).join(', ')}>
+                                {cacheDiag?.indexedDBNames?.length ? cacheDiag.indexedDBNames.join(', ') : 'None'}
+                            </div>
+                        </div>
+
+                        {/* Cache Storage & SW */}
+                        <div className="bg-slate-900/70 p-3.5 rounded-xl border border-slate-700">
+                            <div className="text-[10px] font-black uppercase tracking-wider text-slate-400">Caches &amp; SW</div>
+                            <div className="text-xl font-black text-amber-400 font-mono mt-1">
+                                {cacheDiag ? `${cacheDiag.cacheStorageCount} / ${cacheDiag.serviceWorkerCount}` : '...'}
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                                {cacheDiag?.quotaUsageMB != null ? `Est. Usage: ${cacheDiag.quotaUsageMB} MB` : 'Cache Storage / Workers'}
+                            </div>
+                        </div>
+
+                        {/* Connected Fleet Overview */}
+                        <div className="bg-slate-900/70 p-3.5 rounded-xl border border-slate-700">
+                            <div className="text-[10px] font-black uppercase tracking-wider text-slate-400">Fleet Scope</div>
+                            <div className="text-xl font-black text-indigo-400 font-mono mt-1">
+                                {(shops || []).length}
+                                <span className="text-xs font-bold text-slate-400 ml-1">Shops</span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                                {(devices || []).length} registered terminal(s)
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Purge Mode Selector */}
+                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-700/80 mb-5 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <span className="text-xs font-black uppercase tracking-wider text-slate-300">
+                                Select Cache Purge Mode
+                            </span>
+                            {isAdmin && (
+                                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={alsoClearSelf}
+                                        onChange={(e) => setAlsoClearSelf(e.target.checked)}
+                                        className="rounded accent-rose-500"
+                                    />
+                                    <span>Also clear &amp; reload this Admin browser on Remote Push</span>
+                                </label>
+                            )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setPurgeMode('clean')}
+                                className={`p-3.5 rounded-xl border text-left transition flex items-start justify-between gap-3 ${
+                                    purgeMode === 'clean'
+                                        ? 'bg-emerald-600/20 border-emerald-500 text-white shadow-md shadow-emerald-950/30'
+                                        : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-200'
+                                }`}
+                            >
+                                <div>
+                                    <div className="text-xs sm:text-sm font-black text-emerald-300 flex items-center gap-2">
+                                        <i className="fas fa-broom"></i>
+                                        <span>Clean &amp; Reload (Keeps Login)</span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-1">
+                                        Wipes localStorage caches, IndexedDB Catalog Vault, Firestore offline persistence, Cache Storage, Service Workers &amp; RAM while keeping the active user signed in.
+                                    </p>
+                                </div>
+                                {purgeMode === 'clean' && <i className="fas fa-check-circle text-emerald-400 mt-0.5 shrink-0"></i>}
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setPurgeMode('hard')}
+                                className={`p-3.5 rounded-xl border text-left transition flex items-start justify-between gap-3 ${
+                                    purgeMode === 'hard'
+                                        ? 'bg-red-600/25 border-red-500 text-white shadow-md shadow-red-950/30'
+                                        : 'bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-200'
+                                }`}
+                            >
+                                <div>
+                                    <div className="text-xs sm:text-sm font-black text-red-400 flex items-center gap-2">
+                                        <i className="fas fa-user-lock"></i>
+                                        <span>Hard Security Wipe + Force Re-Login</span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mt-1">
+                                        Nuclear security wipe: clears all browser storage, IndexedDB, Service Workers &amp; RAM, signs out the session, and forces fresh authentication.
+                                    </p>
+                                </div>
+                                {purgeMode === 'hard' && <i className="fas fa-check-circle text-red-400 mt-0.5 shrink-0"></i>}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 3 Action Columns: This Browser | ALL Connected Terminals | Per-Shop Remote Push */}
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                        {/* 1. Local Browser */}
+                        <div className="bg-slate-900/70 p-4 rounded-2xl border border-slate-700 flex flex-col justify-between gap-3">
+                            <div>
+                                <div className="text-sm font-black text-white flex items-center gap-2">
+                                    <i className="fas fa-laptop text-blue-400"></i>
+                                    <span>1-Click Clear This Browser</span>
+                                </div>
+                                <p className="text-xs text-slate-400 mt-1">
+                                    Immediately purges local caches on this device and syncs across other open tabs via BroadcastChannel.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={isExecutingCacheAction}
+                                onClick={() => setConfirmAction({ scope: 'THIS_BROWSER', label: 'This Browser', mode: purgeMode })}
+                                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs shadow-lg shadow-blue-900/30 flex items-center justify-center gap-2 transition active:scale-95 disabled:opacity-50"
+                            >
+                                <i className="fas fa-broom"></i>
+                                <span>{purgeMode === 'hard' ? 'Hard Wipe This Browser' : 'Clear This Browser Now'}</span>
+                            </button>
+                        </div>
+
+                        {/* 2. Master Push ALL */}
+                        <div className="bg-slate-900/70 p-4 rounded-2xl border border-rose-500/30 flex flex-col justify-between gap-3">
+                            <div>
+                                <div className="text-sm font-black text-white flex items-center gap-2">
+                                    <i className="fas fa-broadcast-tower text-rose-400"></i>
+                                    <span>Master Push: ALL Terminals</span>
+                                </div>
+                                <p className="text-xs text-slate-400 mt-1">
+                                    Broadcasts a live Firestore <code className="font-mono text-rose-300">system/config</code> purge command to every connected shop terminal &amp; browser.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={!isAdmin || isExecutingCacheAction}
+                                onClick={() => setConfirmAction({ scope: 'ALL', label: 'ALL Connected Terminals & Browsers', mode: purgeMode })}
+                                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-black text-xs shadow-lg shadow-rose-900/30 flex items-center justify-center gap-2 transition active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={isAdmin ? 'Broadcast live cache clear to ALL connected terminals' : 'Admin role required'}
+                            >
+                                <i className="fas fa-satellite-dish"></i>
+                                <span>{isAdmin ? 'Push Purge to ALL Terminals' : 'Admin Only'}</span>
+                            </button>
+                        </div>
+
+                        {/* 3. Per-Shop Remote Push */}
+                        <div className="bg-slate-900/70 p-4 rounded-2xl border border-amber-500/30 flex flex-col justify-between gap-3">
+                            <div className="space-y-2">
+                                <div className="text-sm font-black text-white flex items-center gap-2">
+                                    <i className="fas fa-store text-amber-400"></i>
+                                    <span>Per-Shop Remote Push</span>
+                                </div>
+                                <select
+                                    value={targetShopId}
+                                    onChange={(e) => setTargetShopId(e.target.value)}
+                                    disabled={!isAdmin}
+                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs font-bold outline-none focus:border-amber-400 disabled:opacity-50"
+                                >
+                                    {(shops || []).map(s => (
+                                        <option key={s.id} value={s.id}>🏪 {s.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={!isAdmin || !targetShopId || isExecutingCacheAction}
+                                onClick={() => {
+                                    const sObj = (shops || []).find(s => s.id === targetShopId);
+                                    setConfirmAction({
+                                        scope: targetShopId,
+                                        label: `Shop: ${sObj?.name || 'Selected Branch'}`,
+                                        mode: purgeMode
+                                    });
+                                }}
+                                className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shadow-lg shadow-amber-900/30 flex items-center justify-center gap-2 transition active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <i className="fas fa-paper-plane"></i>
+                                <span>{isAdmin ? 'Push Purge to Selected Shop' : 'Admin Only'}</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Last Remote Broadcast Audit Strip */}
+                    {lastRemoteCmd && (
+                        <div className="mt-4 pt-3 border-t border-slate-700/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
+                            <div className="flex items-center gap-2">
+                                <i className="fas fa-history text-cyan-400"></i>
+                                <span>
+                                    Last Remote Push: <strong className="text-slate-200">{lastRemoteCmd.targetShopName || lastRemoteCmd.targetScope}</strong>
+                                    {' '}({lastRemoteCmd.mode === 'hard' ? 'Hard Wipe' : 'Clean'}) by <strong className="text-slate-200">{lastRemoteCmd.triggeredBy || 'Admin'}</strong>
+                                </span>
+                            </div>
+                            <span>
+                                {safeFormatDateTime(lastRemoteCmd.issuedAt)} • ID: {lastRemoteCmd.id}
+                            </span>
+                        </div>
+                    )}
+                </Card>
+
                 <Card>
                     <div className="flex justify-between items-center mb-6">
                         <div>
