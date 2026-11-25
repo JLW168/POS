@@ -6292,6 +6292,31 @@
         const searchInputRef = useRef(null);
         const stockWarningTimerRef = useRef(null);
         const scannerBufferRef = useRef({ chars: '', lastKeyTime: 0, isRapidBurst: false, preBurstSearchTerm: '' });
+        const [isTouchKeyboardOpen, setIsTouchKeyboardOpen] = useState(false);
+        const [isSearchInputFocused, setIsSearchInputFocused] = useState(false);
+        const [scanPulseActive, setScanPulseActive] = useState(false);
+        const scanPulseTimerRef = useRef(null);
+        const refocusTimerRef = useRef(null);
+
+        // Track modal / customer search / keyboard states in refs so auto-refocus & blur guards never use stale closures
+        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showQuickGroupModal || showKhqrSimulator || showClearConfirm || showBankAutoSum || !!thankYouModalData;
+        const isAnyPosModalOpenRef = useRef(isAnyPosModalOpen);
+        isAnyPosModalOpenRef.current = isAnyPosModalOpen;
+
+        const isCustomerSearchFocusedRef = useRef(isCustomerSearchFocused);
+        isCustomerSearchFocusedRef.current = isCustomerSearchFocused;
+
+        const isTouchKeyboardOpenRef = useRef(isTouchKeyboardOpen);
+        isTouchKeyboardOpenRef.current = isTouchKeyboardOpen;
+
+        const activeMobileTabRef = useRef(activeMobileTab);
+        activeMobileTabRef.current = activeMobileTab;
+
+        const triggerScanPulse = useCallback(() => {
+            setScanPulseActive(true);
+            if (scanPulseTimerRef.current) clearTimeout(scanPulseTimerRef.current);
+            scanPulseTimerRef.current = setTimeout(() => setScanPulseActive(false), 900);
+        }, []);
 
         const showPosAlert = useCallback((title, message, isError = false) => {
             setPosMessage({ show: true, title, message, isError });
@@ -6299,70 +6324,374 @@
         const closePosAlert = useCallback(() => {
             setPosMessage(prev => ({ ...prev, show: false }));
         }, []);
-        const refocusSearchInput = useCallback(() => {
-            setTimeout(() => {
-                if (window.innerWidth >= 768) searchInputRef.current?.focus();
-            }, 30);
+
+        // Keeps cursor persistently ready in the Scan/Search box without popping up the tablet virtual keyboard
+        const refocusSearchInput = useCallback((forceHideVirtualKeyboard = false) => {
+            if (refocusTimerRef.current) clearTimeout(refocusTimerRef.current);
+            if (forceHideVirtualKeyboard && isTouchKeyboardOpenRef.current) {
+                setIsTouchKeyboardOpen(false);
+                isTouchKeyboardOpenRef.current = false;
+            }
+            refocusTimerRef.current = setTimeout(() => {
+                if (isAnyPosModalOpenRef.current || isCustomerSearchFocusedRef.current) return;
+                if (window.innerWidth < 768 && activeMobileTabRef.current !== 'products') return;
+
+                const activeEl = document.activeElement;
+                const isOtherFormField = activeEl && activeEl !== searchInputRef.current && (
+                    activeEl.tagName === 'INPUT' ||
+                    activeEl.tagName === 'TEXTAREA' ||
+                    activeEl.tagName === 'SELECT' ||
+                    activeEl.isContentEditable
+                );
+                if (isOtherFormField) return;
+
+                const el = searchInputRef.current;
+                if (!el) return;
+
+                if (forceHideVirtualKeyboard) {
+                    // Synchronously switch inputmode to 'none' & blur briefly so tablet OS hides the virtual keyboard,
+                    // then immediately restore the blinking cursor in Scanner-Ready mode.
+                    el.setAttribute('inputmode', 'none');
+                    el.blur();
+                    setTimeout(() => {
+                        if (searchInputRef.current && !isAnyPosModalOpenRef.current && !isCustomerSearchFocusedRef.current) {
+                            searchInputRef.current.focus({ preventScroll: true });
+                        }
+                    }, 45);
+                } else {
+                    if (!isTouchKeyboardOpenRef.current) {
+                        el.setAttribute('inputmode', 'none');
+                    }
+                    el.focus({ preventScroll: true });
+                }
+            }, 40);
         }, []);
+
+        // Explicitly toggles the tablet on-screen virtual keyboard ON for manual typing or OFF for Scan-Ready mode
+        const handleToggleTouchKeyboard = useCallback((e) => {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            const nextOpen = !isTouchKeyboardOpenRef.current;
+            setIsTouchKeyboardOpen(nextOpen);
+            isTouchKeyboardOpenRef.current = nextOpen;
+
+            const el = searchInputRef.current;
+            if (!el) return;
+
+            if (nextOpen) {
+                // Must set inputmode synchronously inside user gesture so iPadOS/Android opens the virtual keyboard on first tap
+                el.setAttribute('inputmode', 'search');
+                el.focus({ preventScroll: true });
+            } else {
+                el.setAttribute('inputmode', 'none');
+                el.blur();
+                setTimeout(() => {
+                    if (searchInputRef.current && !isAnyPosModalOpenRef.current) {
+                        searchInputRef.current.focus({ preventScroll: true });
+                    }
+                }, 45);
+            }
+        }, []);
+
+        // Auto-restore cursor to Scan/Search box on mount, modal close, shift open, tab switch, and window focus
+        useEffect(() => {
+            if (!isAnyPosModalOpen && !isCustomerSearchFocused) {
+                refocusSearchInput(false);
+            }
+        }, [isAnyPosModalOpen, isCustomerSearchFocused, activeMobileTab, currentShift?.id, currentDeviceId, refocusSearchInput]);
+
+        useEffect(() => {
+            const handleWindowWakeFocus = () => {
+                if (!document.hidden && !isAnyPosModalOpenRef.current && !isCustomerSearchFocusedRef.current) {
+                    refocusSearchInput(false);
+                }
+            };
+            window.addEventListener('focus', handleWindowWakeFocus);
+            document.addEventListener('visibilitychange', handleWindowWakeFocus);
+            return () => {
+                window.removeEventListener('focus', handleWindowWakeFocus);
+                document.removeEventListener('visibilitychange', handleWindowWakeFocus);
+                if (scanPulseTimerRef.current) clearTimeout(scanPulseTimerRef.current);
+                if (refocusTimerRef.current) clearTimeout(refocusTimerRef.current);
+            };
+        }, [refocusSearchInput]);
 
         // Online/Offline Status Listener
         useEffect(() => {
-            const onOnline = () => {
+            const handleOnline = () => {
                 setIsOnline(true);
                 setIsSyncing(true);
-                setTimeout(() => { setIsSyncing(false); setPendingSyncCount(0); }, 1500);
+                setTimeout(() => {
+                    setIsSyncing(false);
+                    setPendingSyncCount(0);
+                }, 1200);
             };
-            const onOffline = () => setIsOnline(false);
-            window.addEventListener('online', onOnline);
-            window.addEventListener('offline', onOffline);
+            const handleOffline = () => setIsOnline(false);
+            window.addEventListener('online', handleOnline);
+            window.addEventListener('offline', handleOffline);
             return () => {
-                window.removeEventListener('online', onOnline);
-                window.removeEventListener('offline', onOffline);
+                window.removeEventListener('online', handleOnline);
+                window.removeEventListener('offline', handleOffline);
             };
         }, []);
 
-        // Held Tickets Real-Time Listener
+        // Keep selectedShopId synchronized with locked device or first assigned shop
         useEffect(() => {
-            if (!selectedShopId) return;
+            if (currentDevice?.shopId) {
+                setSelectedShopId(currentDevice.shopId);
+                return;
+            }
+            if (!selectedShopId && shops.length > 0) {
+                const allowed = userProfile.role === 'Admin'
+                    ? shops
+                    : shops.filter(s => (userProfile.assignedShops || []).includes(s.id));
+                if (allowed.length > 0) {
+                    setSelectedShopId(allowed[0].id);
+                }
+            }
+        }, [currentDevice?.shopId, shops, selectedShopId, userProfile]);
+
+        const currentShopObj = useMemo(() => {
+            return shops.find(s => s.id === selectedShopId) || null;
+        }, [shops, selectedShopId]);
+
+        const [shopKhqrBackup, setShopKhqrBackup] = useState(null);
+        useEffect(() => {
+            if (!selectedShopId || !window.SolarisKHQREngine) {
+                setShopKhqrBackup(null);
+                return;
+            }
+            let active = true;
+            window.SolarisKHQREngine.getStaffPaywaySecrets(selectedShopId)
+                .then(sec => {
+                    if (active) setShopKhqrBackup(sec?.khqrConfigBackup || null);
+                })
+                .catch(() => {
+                    if (active) setShopKhqrBackup(null);
+                });
+            return () => { active = false; };
+        }, [selectedShopId]);
+
+        const effectiveCurrentShopObj = useMemo(() => {
+            if (!currentShopObj) return null;
+            if (!shopKhqrBackup) return currentShopObj;
+            return {
+                ...currentShopObj,
+                khqrConfig: {
+                    ...shopKhqrBackup,
+                    ...(currentShopObj.khqrConfig || {})
+                }
+            };
+        }, [currentShopObj, shopKhqrBackup]);
+
+        const localShiftStorageKey = useMemo(() => {
+            if (!selectedShopId) return '';
+            return `solaris_active_shift_${selectedShopId}_${currentDeviceId || 'default'}`;
+        }, [selectedShopId, currentDeviceId]);
+
+        // Subscribe to sequential invoice counter for the active branch
+        useEffect(() => {
+            if (!selectedShopId || !window.SolarisInvoiceEngine) return;
+            return window.SolarisInvoiceEngine.subscribeShopCounter(selectedShopId);
+        }, [selectedShopId]);
+
+        // Real-time Open Shift Listener (with instant localStorage hydration)
+        useEffect(() => {
+            if (!selectedShopId) {
+                setCurrentShift(null);
+                return;
+            }
+            if (localShiftStorageKey) {
+                try {
+                    const cachedShift = JSON.parse(localStorage.getItem(localShiftStorageKey) || 'null');
+                    if (cachedShift && cachedShift.status === 'open' && cachedShift.shopId === selectedShopId) {
+                        setCurrentShift(cachedShift);
+                    } else {
+                        setCurrentShift(null);
+                    }
+                } catch (e) {
+                    setCurrentShift(null);
+                }
+            }
+
+            const unsub = db.collection('shifts')
+                .where('shopId', '==', selectedShopId)
+                .where('status', '==', 'open')
+                .onSnapshot((snapshot) => {
+                    const openShifts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    const matched = currentDeviceId
+                        ? (openShifts.find(s => s.deviceId === currentDeviceId) || openShifts[0] || null)
+                        : (openShifts[0] || null);
+                    setCurrentShift(matched);
+                    if (localShiftStorageKey) {
+                        try {
+                            if (matched) localStorage.setItem(localShiftStorageKey, JSON.stringify(matched));
+                            else localStorage.removeItem(localShiftStorageKey);
+                        } catch (e) {}
+                    }
+                }, (err) => {
+                    console.warn("Open shift sync paused (using local shift cache):", err?.code || err?.message);
+                });
+
+            return () => unsub();
+        }, [selectedShopId, currentDeviceId, localShiftStorageKey]);
+
+        // Shared Held Tickets Listener for Active Shop
+        useEffect(() => {
+            if (!selectedShopId) {
+                setHeldTickets([]);
+                return;
+            }
             setHeldTicketsLoading(true);
             const unsub = db.collection('heldTickets')
                 .where('shopId', '==', selectedShopId)
-                .onSnapshot(snap => {
-                    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+                .onSnapshot((snapshot) => {
+                    const list = snapshot.docs
+                        .map(doc => ({ id: doc.id, ...doc.data() }))
                         .sort((a, b) => (safeToDate(b.savedAt) || 0) - (safeToDate(a.savedAt) || 0));
                     setHeldTickets(list);
                     setHeldTicketsLoading(false);
-                }, () => setHeldTicketsLoading(false));
-            return () => unsub();
-        }, [selectedShopId]);
-
-        // Today's Sales Real-Time Listener (Shared by SalesHistoryModal, DailyReportModal, ShiftManagementModal)
-        useEffect(() => {
-            if (!selectedShopId) return;
-            const startOfDay = new Date();
-            startOfDay.setHours(0, 0, 0, 0);
-
-            if (window.SolarisLocalSalesStore) {
-                const localToday = window.SolarisLocalSalesStore.getSales().filter(s => {
-                    const d = safeToDate(s.timestamp || s.createdAt);
-                    return s.shopId === selectedShopId && d && d >= startOfDay;
+                }, (err) => {
+                    console.warn("Held tickets listener warning:", err?.code || err?.message);
+                    setHeldTicketsLoading(false);
                 });
-                if (localToday.length > 0) setTodaySales(localToday);
-            }
-
-            setTodaySalesLoading(true);
-            const unsub = db.collection('sales')
-                .where('timestamp', '>=', startOfDay)
-                .onSnapshot({ includeMetadataChanges: true }, snap => {
-                    const cloudToday = snap.docs
-                        .map(d => ({ id: d.id, ...d.data() }))
-                        .filter(s => s.shopId === selectedShopId)
-                        .sort((a, b) => (safeToDate(b.timestamp || b.createdAt) || 0) - (safeToDate(a.timestamp || a.createdAt) || 0));
-                    setTodaySales(cloudToday);
-                    setTodaySalesLoading(false);
-                }, () => setTodaySalesLoading(false));
             return () => unsub();
         }, [selectedShopId]);
+
+        // Shared Today's Sales Listener (Merged with Instant Local Sales Ledger)
+        useEffect(() => {
+            if (!selectedShopId) {
+                setTodaySales([]);
+                return;
+            }
+            const startOfToday = new Date();
+            startOfToday.setHours(0, 0, 0, 0);
+
+            const mergeTodaySales = (cloudList = []) => {
+                const map = new Map();
+                if (window.SolarisLocalSalesStore) {
+                    window.SolarisLocalSalesStore.getSales().forEach(s => {
+                        if (!s || !s.id || s.shopId !== selectedShopId) return;
+                        const dt = safeToDate(s.timestamp || s.createdAt);
+                        if (dt && dt >= startOfToday) map.set(s.id, s);
+                    });
+                }
+                (cloudList || []).forEach(s => {
+                    if (!s || !s.id || s.shopId !== selectedShopId) return;
+                    const dt = safeToDate(s.timestamp || s.createdAt);
+                    if (dt && dt >= startOfToday) {
+                        map.set(s.id, { ...(map.get(s.id) || {}), ...s });
+                    }
+                });
+                return Array.from(map.values()).sort(
+                    (a, b) => (safeToDate(b.timestamp || b.createdAt) || 0) - (safeToDate(a.timestamp || a.createdAt) || 0)
+                );
+            };
+
+            const initialLocal = mergeTodaySales([]);
+            setTodaySales(initialLocal);
+            if (initialLocal.length === 0) setTodaySalesLoading(true);
+
+            let latestCloud = [];
+            const unsubLocal = window.SolarisLocalSalesStore
+                ? window.SolarisLocalSalesStore.subscribe(() => setTodaySales(mergeTodaySales(latestCloud)))
+                : () => {};
+
+            const unsubCloud = db.collection('sales')
+                .where('timestamp', '>=', startOfToday)
+                .onSnapshot({ includeMetadataChanges: true }, (snapshot) => {
+                    latestCloud = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setTodaySales(mergeTodaySales(latestCloud));
+                    setTodaySalesLoading(false);
+                }, (err) => {
+                    console.warn("Today sales listener fallback:", err?.code || err?.message);
+                    setTodaySales(mergeTodaySales([]));
+                    setTodaySalesLoading(false);
+                });
+
+            return () => {
+                unsubLocal();
+                unsubCloud();
+            };
+        }, [selectedShopId]);
+
+        // Active Loyalty Rule for Current Branch
+        const activeLoyaltyRule = useMemo(() => {
+            if (!loyaltyRules || loyaltyRules.length === 0) return null;
+            const branchRule = loyaltyRules.find(r => r.shopId === selectedShopId && r.status !== 'Inactive');
+            if (branchRule) return branchRule;
+            return loyaltyRules.find(r => r.shopId === 'All' && r.status !== 'Inactive') || null;
+        }, [loyaltyRules, selectedShopId]);
+
+        // Selected Customer & Search Filtering
+        const selectedCustomerObj = useMemo(() => {
+            if (!selectedCustomerId || !customers) return null;
+            return customers.find(c => c.id === selectedCustomerId) || null;
+        }, [customers, selectedCustomerId]);
+
+        const customerLoyaltyStatus = useMemo(() => {
+            return evaluateCustomerLoyaltyStatus(selectedCustomerObj, activeLoyaltyRule);
+        }, [selectedCustomerObj, activeLoyaltyRule]);
+
+        const filteredCustomers = useMemo(() => {
+            if (!customers) return [];
+            const q = customerSearchTerm.trim().toLowerCase();
+            if (!q) return customers.slice(0, 12);
+            return customers
+                .filter(c =>
+                    (c.name || '').toLowerCase().includes(q) ||
+                    String(c.phone || '').toLowerCase().includes(q)
+                )
+                .slice(0, 20);
+        }, [customers, customerSearchTerm]);
+
+        // Vendor Filter Tabs & O(1) Barcode / Product Code Map
+        const filterTabs = useMemo(() => {
+            const vendorsSet = new Set();
+            (products || []).forEach(p => {
+                const v = p.vendorName ? p.vendorName.trim() : '';
+                if (v) vendorsSet.add(v);
+            });
+            return ['All', ...Array.from(vendorsSet).sort()];
+        }, [products]);
+
+        const productByCodeOrBarcodeMap = useMemo(() => {
+            const map = new Map();
+            (products || []).forEach(p => {
+                if (p.barcode) map.set(String(p.barcode).trim().toLowerCase(), p);
+                if (p.code) map.set(String(p.code).trim().toLowerCase(), p);
+            });
+            return map;
+        }, [products]);
+
+        const filteredProducts = useMemo(() => {
+            let list = products || [];
+            if (activeQuickGroupId) {
+                const activeGroup = quickGroups.find(g => g.id === activeQuickGroupId);
+                if (activeGroup && Array.isArray(activeGroup.productIds)) {
+                    const idSet = new Set(activeGroup.productIds);
+                    list = list.filter(p => idSet.has(p.id));
+                }
+            }
+            if (selectedTab !== 'All') {
+                list = list.filter(p => (p.vendorName ? p.vendorName.trim() : '') === selectedTab);
+            }
+            if (searchTerm.trim()) {
+                const q = searchTerm.trim().toLowerCase();
+                list = list.filter(p =>
+                    (p.name || '').toLowerCase().includes(q) ||
+                    (p.code || '').toLowerCase().includes(q) ||
+                    String(p.barcode || '').toLowerCase().includes(q)
+                );
+            }
+            return list;
+        }, [products, activeQuickGroupId, quickGroups, selectedTab, searchTerm]);
+
+        useEffect(() => {
+            setHighlightedIndex(0);
+        }, [searchTerm, selectedTab, activeQuickGroupId]);
 
         const cartQtyMap = useMemo(() => {
             const map = new Map();
@@ -6370,384 +6699,33 @@
             return map;
         }, [cart]);
 
-        const filteredCustomers = useMemo(() => {
-            if (!customers || customers.length === 0) return [];
-            const q = customerSearchTerm.trim().toLowerCase();
-            if (!q) return customers.slice(0, 15);
-            return customers.filter(c =>
-                (c.name || '').toLowerCase().includes(q) ||
-                String(c.phone || '').toLowerCase().includes(q)
-            ).slice(0, 15);
-        }, [customers, customerSearchTerm]);
+        const cartItemCount = useMemo(() => {
+            return cart.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+        }, [cart]);
 
-        useEffect(() => {
-            return () => {
-                if (stockWarningTimerRef.current) clearTimeout(stockWarningTimerRef.current);
-            };
-        }, []);
+        const cartTotal = useMemo(() => {
+            return cart.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.quantity) || 0)), 0);
+        }, [cart]);
 
-        const currentShopObj = useMemo(() => shops.find(s => s.id === selectedShopId), [shops, selectedShopId]);
-
-        // O(1) Product Map & Barcode Lookup Map (Eliminates O(N) .find() scans across cart, search, and barcode scanner)
-        const productByIdMap = useMemo(() => {
-            const map = new Map();
-            if (products) {
-                for (let i = 0; i < products.length; i++) {
-                    map.set(products[i].id, products[i]);
-                }
+        const estimatedPoints = useMemo(() => {
+            if (!selectedCustomerObj || cartTotal <= 0) return 0;
+            if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
+                return Math.floor(cartTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints);
             }
-            return map;
-        }, [products]);
-
-        const productByCodeOrBarcodeMap = useMemo(() => {
-            const map = new Map();
-            if (products) {
-                for (let i = 0; i < products.length; i++) {
-                    const p = products[i];
-                    if (p.code) map.set(String(p.code).toLowerCase(), p);
-                    if (p.barcode) map.set(String(p.barcode).toLowerCase(), p);
-                }
-            }
-            return map;
-        }, [products]);
+            const legacyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
+            return legacyRate > 0 ? Math.floor(cartTotal * (legacyRate / 100)) : 0;
+        }, [selectedCustomerObj, cartTotal, activeLoyaltyRule, systemConfig?.loyaltyRate]);
 
         const getAvailableStock = useCallback((productId) => {
-            const prod = productByIdMap.get(productId);
-            if (!prod) return 0;
-            return prod.stockByShop?.[selectedShopId] || 0;
-        }, [productByIdMap, selectedShopId]);
+            const prod = (products || []).find(p => p.id === productId);
+            return Number(prod?.stockByShop?.[selectedShopId]) || 0;
+        }, [products, selectedShopId]);
 
-        // --- NEW: Auto-Sync Branch KHQR & ABA PayWay Secrets for POS Terminal ---
-        const [posBranchKhqrConfig, setPosBranchKhqrConfig] = useState(null);
-
-        // Subscribe to real-time sequential invoice counter (`invoice_counters/{selectedShopId}`)
-        useEffect(() => {
-            if (!selectedShopId || !window.SolarisInvoiceEngine) return;
-            const unsubCounter = window.SolarisInvoiceEngine.subscribeShopCounter(selectedShopId);
-            return () => {
-                if (typeof unsubCounter === 'function') unsubCounter();
-            };
-        }, [selectedShopId]);
-
-        useEffect(() => {
-            if (!selectedShopId) {
-                setPosBranchKhqrConfig(null);
-                return;
-            }
-            let isMounted = true;
-            const shopObj = shops.find(s => s.id === selectedShopId);
-            if (shopObj?.khqrConfig) {
-                setPosBranchKhqrConfig(shopObj.khqrConfig);
-            }
-
-            // Pre-warm real-time ABA PayWay Firestore listeners as soon as POS Terminal loads so 0ms stream is hot before cashier clicks KHQR
-            if (window.SolarisPayWayVerifier) {
-                window.SolarisPayWayVerifier.loadLocalAbaCache();
-                window.SolarisPayWayVerifier.ensureSharedListeners();
-            }
-
-            // Load staff-only `payway_secrets/{selectedShopId}` via quota-safe cache & auto-connect live MTProto if configured
-            window.SolarisKHQREngine.getStaffPaywaySecrets(selectedShopId).then(sec => {
-                if (!isMounted || !sec) return;
-                if (sec.khqrConfigBackup) {
-                    setPosBranchKhqrConfig(prev => ({ ...sec.khqrConfigBackup, ...(prev || {}) }));
-                }
-                const isCanvasIframe = window.location.hostname.includes('usercontent.goog') || window.self !== window.top;
-                if (
-                    !isCanvasIframe &&
-                    sec.tgApiId &&
-                    sec.tgApiHash &&
-                    window.SolarisKHQREngine?.isValidGramJsSessionString(sec.tgSessionString) &&
-                    !window.SolarisBrowserMTProto?.isConnected &&
-                    !window.SolarisBrowserMTProto?.isConnecting
-                ) {
-                    window.SolarisBrowserMTProto.connectWithSession(
-                        sec.tgApiId,
-                        sec.tgApiHash,
-                        sec.tgSessionString
-                    ).catch(() => {});
-                }
-            }).catch(() => {});
-
-            return () => { isMounted = false; };
-        }, [selectedShopId, shops]);
-
-        const effectiveCurrentShopObj = useMemo(() => {
-            if (!currentShopObj) return null;
-            return {
-                ...currentShopObj,
-                khqrConfig: {
-                    ...(posBranchKhqrConfig || {}),
-                    ...(currentShopObj.khqrConfig || {})
-                }
-            };
-        }, [currentShopObj, posBranchKhqrConfig]);
-
-        // --- NEW: Strict Device-Shop Locking Logic ---
-        useEffect(() => {
-            if (currentDevice) {
-                setSelectedShopId(currentDevice.shopId);
-            } else if (shops.length > 0 && !selectedShopId) {
-                const allowed = userProfile.assignedShops || [];
-                const defaultShop = shops.find(s => allowed.includes(s.id)) || shops[0];
-                if (defaultShop) setSelectedShopId(defaultShop.id);
-            }
-        }, [currentDevice, shops, userProfile, selectedShopId]);
-
-        // --- NEW: Check User Access to Device's Shop ---
-        const userHasAccess = useMemo(() => {
-            if (!currentDevice || userProfile.role === 'Admin') return true;
-            const allowed = userProfile.assignedShops || [];
-            return allowed.includes(currentDevice.shopId);
-        }, [currentDevice, userProfile]);
-
-        // --- FIXED: Check for Open Shift (Single-Field Query + Local Cache Recovery + Background Cloud Sync) ---
-        const localShiftStorageKey = useMemo(() => {
-            if (!selectedShopId || !userProfile?.uid || !currentDeviceId) return null;
-            return `solaris_active_shift_${selectedShopId}_${currentDeviceId}_${userProfile.uid}`;
-        }, [selectedShopId, userProfile?.uid, currentDeviceId]);
-
-        useEffect(() => {
-            if (!selectedShopId || !userProfile.uid || !currentDeviceId) return;
-
-            const isDeletedShiftId = (id) => {
-                if (!id) return false;
-                try {
-                    const delIds = JSON.parse(localStorage.getItem('solaris_deleted_shifts_v1') || '[]');
-                    return Array.isArray(delIds) && delIds.includes(id);
-                } catch (e) {
-                    return false;
-                }
-            };
-
-            const findLocalOpenShift = () => {
-                try {
-                    if (localShiftStorageKey) {
-                        const direct = localStorage.getItem(localShiftStorageKey);
-                        if (direct) {
-                            const parsed = JSON.parse(direct);
-                            if (parsed && parsed.status === 'open' && !isDeletedShiftId(parsed.id)) {
-                                return parsed;
-                            }
-                        }
-                    }
-                    // Fallback: Check global shift report cache (`solaris_shifts_report_cache_v1`) in case shopId resolved after initial mount
-                    const cachedList = JSON.parse(localStorage.getItem('solaris_shifts_report_cache_v1') || '[]');
-                    if (Array.isArray(cachedList)) {
-                        const match = cachedList.find(s =>
-                            s &&
-                            s.status === 'open' &&
-                            s.shopId === selectedShopId &&
-                            s.deviceId === currentDeviceId &&
-                            s.cashierId === userProfile.uid &&
-                            !isDeletedShiftId(s.id)
-                        );
-                        if (match) return match;
-                    }
-                } catch (e) {}
-                return null;
-            };
-
-            // 1. Immediately restore active shift from localStorage / report cache on refresh
-            const restoredLocalShift = findLocalOpenShift();
-            if (restoredLocalShift) {
-                setCurrentShift(restoredLocalShift);
-                if (localShiftStorageKey) {
-                    try { localStorage.setItem(localShiftStorageKey, JSON.stringify(restoredLocalShift)); } catch (e) {}
-                }
-                // Background Self-Heal: Ensure this open shift is saved in Firestore in case it was created while offline/throttled
-                if (restoredLocalShift.id) {
-                    db.collection('shifts').doc(restoredLocalShift.id).set({
-                        ...restoredLocalShift,
-                        startTime: safeToDate(restoredLocalShift.startTime) || new Date(),
-                        createdAt: safeToDate(restoredLocalShift.createdAt) || new Date()
-                    }, { merge: true }).catch(() => {});
-                }
-            }
-
-            // 2. CRITICAL FIX: Query ONLY on `.where('status', '==', 'open')` (single-field built-in index)
-            // and filter `shopId`, `deviceId`, and `cashierId` in JavaScript memory!
-            // Previously, combining 4 `.where()` clauses failed or returned empty without a 4-field composite index!
-            const unsubscribe = db.collection('shifts')
-                .where('status', '==', 'open')
-                .onSnapshot({ includeMetadataChanges: true }, snapshot => {
-                    const matchingDocs = snapshot.docs
-                        .map(doc => ({ id: doc.id, ...doc.data() }))
-                        .filter(s =>
-                            s.shopId === selectedShopId &&
-                            s.cashierId === userProfile.uid &&
-                            s.deviceId === currentDeviceId &&
-                            !isDeletedShiftId(s.id)
-                        )
-                        .sort((a, b) => (safeToDate(b.startTime || b.createdAt) || 0) - (safeToDate(a.startTime || a.createdAt) || 0));
-
-                    if (matchingDocs.length > 0) {
-                        const cloudShift = matchingDocs[0];
-                        // Merge with local running totals if local has newer optimistic sales
-                        setCurrentShift(prev => {
-                            const merged = (prev && prev.id === cloudShift.id)
-                                ? {
-                                    ...cloudShift,
-                                    totalSales: Math.max(Number(cloudShift.totalSales) || 0, Number(prev.totalSales) || 0),
-                                    transactionCount: Math.max(Number(cloudShift.transactionCount) || 0, Number(prev.transactionCount) || 0),
-                                    totalCashSales: Math.max(Number(cloudShift.totalCashSales) || 0, Number(prev.totalCashSales) || 0),
-                                    totalKHQRSales: Math.max(Number(cloudShift.totalKHQRSales) || 0, Number(prev.totalKHQRSales) || 0)
-                                }
-                                : cloudShift;
-                            if (localShiftStorageKey) {
-                                try { localStorage.setItem(localShiftStorageKey, JSON.stringify(merged)); } catch (e) {}
-                            }
-                            return merged;
-                        });
-                    } else {
-                        // Keep local shift if one exists in localStorage and hasn't been explicitly closed or deleted
-                        const stillLocal = findLocalOpenShift();
-                        if (stillLocal) {
-                            setCurrentShift(stillLocal);
-                        } else {
-                            setCurrentShift(null);
-                        }
-                    }
-                }, err => {
-                    console.warn("Open shift listener warning (using local state):", err?.code || err?.message);
-                });
-            return () => unsubscribe();
-        }, [selectedShopId, userProfile.uid, currentDeviceId, localShiftStorageKey]);
-
-        // Derive Tabs (Vendors) from Products
-        const filterTabs = useMemo(() => {
-            const uniqueVendors = new Set();
-            if (products) {
-                products.forEach(p => {
-                    // Normalize: Trim whitespace, handle empty/null
-                    const vName = p.vendorName ? p.vendorName.trim() : '';
-                    if (vName && vName.toLowerCase() !== 'all') {
-                        uniqueVendors.add(vName);
-                    } else if (!vName) {
-                        uniqueVendors.add('Uncategorized'); // Products with no vendor
-                    }
-                });
-            }
-            // Sort alphabetically
-            const sortedVendors = Array.from(uniqueVendors).sort();
-            
-            // Ensure 'All' is always first
-            return ['All', ...sortedVendors];
-        }, [products]);
-
-        // Debounce search term slightly for large catalogs while keeping instant barcode Enter response
-        const debouncedPosSearchTerm = useDebounce(searchTerm, 80);
-
-        // Filter Products for Grid
-        const filteredProducts = useMemo(() => {
-            if (!products) return [];
-            let res = products;
-            
-            // 0. Filter by Active Quick Access Group (if selected)
-            if (activeQuickGroupId) {
-                const grp = quickGroups.find(g => g.id === activeQuickGroupId);
-                if (grp && Array.isArray(grp.productIds)) {
-                    const idSet = new Set(grp.productIds);
-                    res = res.filter(p => idSet.has(p.id));
-                }
-            }
-
-            // 1. Filter by Vendor Dropdown
-            if (selectedTab !== 'All') {
-                res = res.filter(p => {
-                    const vName = p.vendorName ? p.vendorName.trim() : '';
-                    const effectiveVendor = vName || 'Uncategorized';
-                    return effectiveVendor === selectedTab;
-                });
-            }
-
-            // 2. Filter by Search
-            if (debouncedPosSearchTerm) {
-                const lower = debouncedPosSearchTerm.toLowerCase();
-                res = res.filter(p => 
-                    p.name.toLowerCase().includes(lower) || 
-                    p.code.toLowerCase().includes(lower) || 
-                    (p.barcode && String(p.barcode).toLowerCase().includes(lower))
-                );
-            }
-            return res;
-        }, [products, activeQuickGroupId, quickGroups, selectedTab, debouncedPosSearchTerm]);
-
-        // Reset highlight when search changes
-        useEffect(() => {
-            setHighlightedIndex(0);
-        }, [debouncedPosSearchTerm, selectedTab, activeQuickGroupId]);
-
-        // Cart Actions
-        const addToCart = useCallback((product) => {
-            if (!currentShift) {
-                setShowShiftModal(true);
-                return;
-            }
-
-            // Strictly apply the active shop's configured selling price (falls back to base price if legacy record is unset)
-            const shopSellingPrice = getEffectiveShopPrice(product, selectedShopId);
-
-            setCart(prevCart => {
-                const existingItem = prevCart.find(item => item.productId === product.id);
-                const currentQty = existingItem ? (parseInt(existingItem.quantity, 10) || 0) : 0;
-                const newQty = currentQty + 1;
-
-                if (existingItem) {
-                    return prevCart.map(item => item.productId === product.id ? { ...item, quantity: newQty } : item);
-                }
-                return [...prevCart, { 
-                    productId: product.id, 
-                    name: product.name, 
-                    price: shopSellingPrice, 
-                    originalPrice: shopSellingPrice,
-                    cost: product.cost, 
-                    quantity: 1,
-                    code: product.code,
-                    note: ''
-                }];
-            });
-            refocusSearchInput();
-        }, [currentShift, selectedShopId, refocusSearchInput]);
-
-        // Keep non-overridden cart items synchronized if an Admin switches the active POS shop
-        useEffect(() => {
-            if (!selectedShopId) return;
-            setCart(prevCart => {
-                if (prevCart.length === 0) return prevCart;
-                let changed = false;
-                const nextCart = prevCart.map(item => {
-                    const prod = productByIdMap.get(item.productId);
-                    if (!prod) return item;
-                    const shopPrice = getEffectiveShopPrice(prod, selectedShopId);
-                    const wasManuallyOverridden = item.originalPrice !== undefined && item.price !== item.originalPrice;
-                    if (!wasManuallyOverridden && item.price !== shopPrice) {
-                        changed = true;
-                        return { ...item, price: shopPrice, originalPrice: shopPrice };
-                    }
-                    return item;
-                });
-                return changed ? nextCart : prevCart;
-            });
-        }, [selectedShopId, productByIdMap]);
-
-        const handleApplyLineItemEdit = (productId, updates) => {
-            setCart(prev => prev.map(item => {
-                if (item.productId === productId) {
-                    const newQty = Math.max(1, parseInt(updates.quantity, 10) || 1);
-                    return {
-                        ...item,
-                        quantity: newQty,
-                        price: updates.price !== undefined ? Math.max(0, parseFloat(updates.price) || 0) : item.price,
-                        originalPrice: item.originalPrice ?? item.price,
-                        note: updates.note !== undefined ? updates.note : (item.note || '')
-                    };
-                }
-                return item;
-            }));
-            setEditingCartItem(null);
-            refocusSearchInput();
-        };
+        const showStockWarningToast = useCallback((msg) => {
+            setStockWarning(msg);
+            if (stockWarningTimerRef.current) clearTimeout(stockWarningTimerRef.current);
+            stockWarningTimerRef.current = setTimeout(() => setStockWarning(null), 4000);
+        }, []);
 
         // Shared Audit Logger for Cart Clear, Single Item Deletion & Recall Bill Deletion (Anti-Fraud "Cat & Dog" Protection)
         const logCartRemovalAudit = useCallback((removedItems, actionType = 'clear_cart', extraMeta = {}) => {
@@ -6756,51 +6734,132 @@
             const totalAmount = removedItems.reduce((sum, i) => sum + ((Number(i.price) || 0) * (Number(i.quantity) || 0)), 0);
             const clearDocRef = db.collection('clearedCarts').doc();
             const nowIso = new Date().toISOString();
-            const localClearedEntry = {
+
+            const logPayload = {
                 id: clearDocRef.id,
                 actionType, // 'clear_cart' | 'delete_item' | 'delete_recall'
-                shopId: selectedShopId,
-                shopName: effectiveCurrentShopObj?.name || 'Unknown',
-                cashierId: userProfile.uid,
-                cashierName: userProfile.name,
-                items: removedItems,
-                totalAmount,
-                totalQty,
-                timestamp: nowIso,
-                createdAt: nowIso,
+                shopId: selectedShopId || '',
+                shopName: currentShopObj?.name || 'Unknown Shop',
                 deviceId: currentDeviceId || '',
-                deviceName: currentDevice?.name || '',
-                ...extraMeta
+                deviceName: currentDevice?.name || 'POS Terminal',
+                shiftId: currentShift?.id || '',
+                cashierId: userProfile?.uid || '',
+                cashierName: userProfile?.name || 'Staff',
+                items: removedItems.map(i => ({
+                    productId: i.productId || '',
+                    code: i.code || '',
+                    name: i.name || 'Item',
+                    price: Number(i.price) || 0,
+                    quantity: Number(i.quantity) || 0
+                })),
+                totalQty,
+                totalAmount,
+                ...(extraMeta.referenceNote ? { referenceNote: String(extraMeta.referenceNote) } : {}),
+                ...(extraMeta.savedBy ? { savedBy: String(extraMeta.savedBy) } : {}),
+                createdAt: nowIso
             };
+
             if (window.SolarisLocalSalesStore) {
-                window.SolarisLocalSalesStore.recordClearedCart(localClearedEntry);
+                window.SolarisLocalSalesStore.recordClearedCart(logPayload);
             }
+
             clearDocRef.set({
-                ...localClearedEntry,
+                ...logPayload,
                 timestamp: firebase.firestore.FieldValue.serverTimestamp()
-            }).catch(() => {});
-        }, [selectedShopId, effectiveCurrentShopObj?.name, userProfile.uid, userProfile.name, currentDeviceId, currentDevice?.name]);
+            }).catch(err => {
+                console.warn("Cleared cart audit log queued locally:", err?.code || err?.message);
+            });
+        }, [selectedShopId, currentShopObj?.name, currentDeviceId, currentDevice?.name, currentShift?.id, userProfile]);
 
-        const removeFromCart = (productId) => {
-            const removedItem = cart.find(item => item.productId === productId);
-            if (removedItem) {
-                logCartRemovalAudit([removedItem], 'delete_item');
+        // Add Product to Cart
+        const addToCart = useCallback((product) => {
+            if (!product) return;
+            if (!currentShift) {
+                setShowShiftModal(true);
+                return;
             }
-            setCart(prev => prev.filter(item => item.productId !== productId));
-            refocusSearchInput();
-        };
+            const manageStock = currentShopObj?.manageStock !== false;
+            const availableStock = Number(product.stockByShop?.[selectedShopId]) || 0;
+            const shopSellingPrice = getEffectiveShopPrice(product, selectedShopId);
 
-        const updateQty = (productId, delta) => {
+            setCart(prevCart => {
+                const existingIndex = prevCart.findIndex(item => item.productId === product.id);
+                if (existingIndex > -1) {
+                    const nextQty = (Number(prevCart[existingIndex].quantity) || 0) + 1;
+                    if (manageStock && nextQty > availableStock) {
+                        showStockWarningToast(`Low stock warning: "${product.name}" only has ${availableStock} left in ${currentShopObj?.name || 'this shop'}.`);
+                    }
+                    return prevCart.map((item, idx) =>
+                        idx === existingIndex ? { ...item, quantity: nextQty } : item
+                    );
+                }
+                if (manageStock && availableStock <= 0) {
+                    showStockWarningToast(`Out of stock warning: "${product.name}" has ${availableStock} qty in ${currentShopObj?.name || 'this shop'}.`);
+                }
+                return [...prevCart, {
+                    productId: product.id,
+                    name: product.name,
+                    price: shopSellingPrice,
+                    originalPrice: shopSellingPrice,
+                    cost: Number(product.cost) || 0,
+                    quantity: 1,
+                    code: product.code || '',
+                    note: ''
+                }];
+            });
+            // Dismiss tablet virtual keyboard if cashier tapped a product after searching, and keep cursor scan-ready
+            refocusSearchInput(isTouchKeyboardOpenRef.current);
+        }, [currentShift, currentShopObj, selectedShopId, showStockWarningToast, refocusSearchInput]);
+
+        // Keep non-overridden cart items synchronized if an Admin switches the active POS shop
+        useEffect(() => {
+            if (!selectedShopId || cart.length === 0) return;
+            const prodMap = new Map((products || []).map(p => [p.id, p]));
             setCart(prev => prev.map(item => {
-                if (item.productId === productId) {
-                    const currentQty = parseInt(item.quantity, 10) || 0;
-                    const newQty = Math.max(1, currentQty + delta);
-                    return { ...item, quantity: newQty };
+                const prod = prodMap.get(item.productId);
+                if (!prod) return item;
+                const isManuallyOverridden = item.originalPrice !== undefined && item.price !== item.originalPrice;
+                const nextShopPrice = getEffectiveShopPrice(prod, selectedShopId);
+                if (!isManuallyOverridden && nextShopPrice !== item.price) {
+                    return { ...item, price: nextShopPrice, originalPrice: nextShopPrice };
                 }
                 return item;
             }));
-            refocusSearchInput();
-        };
+        }, [selectedShopId, products]);
+
+        const updateQty = useCallback((productId, delta) => {
+            setCart(prevCart => {
+                const target = prevCart.find(i => i.productId === productId);
+                if (!target) return prevCart;
+                const nextQty = (Number(target.quantity) || 0) + delta;
+                if (nextQty <= 0) {
+                    logCartRemovalAudit([target], 'delete_item');
+                    return prevCart.filter(i => i.productId !== productId);
+                }
+                return prevCart.map(i => i.productId === productId ? { ...i, quantity: nextQty } : i);
+            });
+        }, [logCartRemovalAudit]);
+
+        const removeFromCart = useCallback((productId) => {
+            setCart(prevCart => {
+                const target = prevCart.find(i => i.productId === productId);
+                if (target) {
+                    logCartRemovalAudit([target], 'delete_item');
+                }
+                return prevCart.filter(i => i.productId !== productId);
+            });
+            refocusSearchInput(false);
+        }, [logCartRemovalAudit, refocusSearchInput]);
+
+        const handleApplyLineItemEdit = useCallback((productId, updates) => {
+            setCart(prev => prev.map(item =>
+                item.productId === productId
+                    ? { ...item, quantity: updates.quantity, price: updates.price, note: updates.note }
+                    : item
+            ));
+            setEditingCartItem(null);
+            refocusSearchInput(false);
+        }, [refocusSearchInput]);
 
         // --- SEARCH INPUT KEYBOARD NAVIGATION & BARCODE ENTER HANDLER ---
         const handleSearchKeyDown = (e) => {
@@ -6823,8 +6882,10 @@
                     const exactMatch = productByCodeOrBarcodeMap.get(trimmed.toLowerCase());
                     if (exactMatch) {
                         addToCart(exactMatch);
+                        triggerScanPulse();
                         setSearchTerm('');
                         setHighlightedIndex(0);
+                        refocusSearchInput(isTouchKeyboardOpenRef.current);
                         return;
                     }
                 }
@@ -6833,20 +6894,25 @@
                     const targetProduct = filteredProducts[highlightedIndex] || filteredProducts[0];
                     if (targetProduct) {
                         addToCart(targetProduct);
+                        triggerScanPulse();
                         setSearchTerm('');
                         setHighlightedIndex(0);
+                        refocusSearchInput(isTouchKeyboardOpenRef.current);
                     }
+                } else if (trimmed) {
+                    showPosAlert("Product Not Found", `No product matching "${trimmed}" found in catalog.`, true);
+                    setSearchTerm('');
+                    setHighlightedIndex(0);
                 }
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 setSearchTerm('');
                 setHighlightedIndex(0);
+                refocusSearchInput(true);
             }
         };
 
-        // --- GLOBAL BARCODE SCANNER LISTENER (<35ms burst detection) ---
-        const isAnyPosModalOpen = showPaymentModal || showReceiptModal || showSalesHistory || showDailyReport || showShiftModal || showAddCustomerModal || showSaveTicketModal || showHeldTicketsModal || posMessage.show || !!pendingRestoreTicket || !!editingCartItem || showQuickGroupModal || showKhqrSimulator;
-
+        // --- GLOBAL BARCODE SCANNER LISTENER (<80ms Bluetooth/USB HID burst detection) ---
         useEffect(() => {
             const handleGlobalKeyDown = (e) => {
                 if (isAnyPosModalOpen) return;
@@ -6863,12 +6929,12 @@
                 // Ignore modifier shortcuts (Ctrl+C, Alt+Tab, etc.) or function keys
                 if (e.ctrlKey || e.altKey || e.metaKey || /^F\d+$/.test(key)) return;
 
-                // Focus-Free Hardware Barcode Scanner Detector (< 35ms keystroke bursts ending in Enter)
+                // Focus-Free Hardware Barcode Scanner Detector (< 80ms keystroke bursts ending in Enter for USB & Bluetooth scanners)
                 const now = performance.now();
                 const timeDiff = now - scannerBufferRef.current.lastKeyTime;
 
                 if (key && key.length === 1) {
-                    if (timeDiff < 35) {
+                    if (timeDiff < 80) {
                         // Rapid hardware scanner burst detected!
                         scannerBufferRef.current.chars += key;
                         scannerBufferRef.current.isRapidBurst = true;
@@ -6888,16 +6954,21 @@
                             preBurstSearchTerm: searchTerm
                         };
 
-                        // If no input is focused, focus search bar so normal typing still works seamlessly
+                        // If no input is focused, focus search bar silently (without popping up tablet keyboard) so typing/scanning works seamlessly
                         if (!isSearchFocused && !isTypingInOtherInput) {
                             e.preventDefault();
-                            searchInputRef.current?.focus();
+                            if (searchInputRef.current) {
+                                if (!isTouchKeyboardOpenRef.current) {
+                                    searchInputRef.current.setAttribute('inputmode', 'none');
+                                }
+                                searchInputRef.current.focus({ preventScroll: true });
+                            }
                             setSearchTerm(prev => prev + key);
                         }
                     }
                 } else if (key === 'Enter') {
                     const { chars, isRapidBurst, preBurstSearchTerm } = scannerBufferRef.current;
-                    if ((isRapidBurst && chars.length >= 3) || (!isSearchFocused && !isTypingInOtherInput && chars.length >= 2 && timeDiff < 120)) {
+                    if ((isRapidBurst && chars.length >= 3) || (!isSearchFocused && !isTypingInOtherInput && chars.length >= 2 && timeDiff < 160)) {
                         e.preventDefault();
                         e.stopPropagation();
                         const scannedCode = chars.trim();
@@ -6906,9 +6977,11 @@
                         const exactMatch = productByCodeOrBarcodeMap.get(scannedCode.toLowerCase());
                         if (exactMatch) {
                             addToCart(exactMatch);
+                            triggerScanPulse();
                             // Restore previous search term if the scan happened while search input was focused
                             setSearchTerm(preBurstSearchTerm || '');
                             setHighlightedIndex(0);
+                            refocusSearchInput(false);
                         } else {
                             showPosAlert("Product Not Found", `Scanned barcode "${scannedCode}" not found in product catalog.`, true);
                             setSearchTerm('');
@@ -6921,152 +6994,81 @@
 
             window.addEventListener('keydown', handleGlobalKeyDown, true);
             return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
-        }, [isAnyPosModalOpen, searchTerm, productByCodeOrBarcodeMap, addToCart, showPosAlert]);
+        }, [isAnyPosModalOpen, searchTerm, productByCodeOrBarcodeMap, addToCart, showPosAlert, triggerScanPulse, refocusSearchInput]);
 
-        const cartTotal = cart.reduce((sum, item) => sum + (item.price * (Number(item.quantity) || 0)), 0);
-        const cartTotalCost = cart.reduce((sum, item) => sum + (item.cost * (Number(item.quantity) || 0)), 0);
-        const cartItemCount = cart.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
-
-        // Get selected customer details for points display
-        const selectedCustomerObj = useMemo(() => {
-            return customers?.find(c => c.id === selectedCustomerId);
-        }, [customers, selectedCustomerId]);
-
-        // --- NEW: Active Branch Loyalty Rule (Matches selectedShopId or 'All') ---
-        const activeLoyaltyRule = useMemo(() => {
-            if (!loyaltyRules || loyaltyRules.length === 0) return null;
-            const branchRule = loyaltyRules.find(r => r.shopId === selectedShopId && r.status !== 'Inactive');
-            if (branchRule) return branchRule;
-            return loyaltyRules.find(r => r.shopId === 'All' && r.status !== 'Inactive') || null;
-        }, [loyaltyRules, selectedShopId]);
-
-        // --- NEW: Evaluate Customer Points & Expiration Status ---
-        const customerLoyaltyStatus = useMemo(() => {
-            return evaluateCustomerLoyaltyStatus(selectedCustomerObj, activeLoyaltyRule);
-        }, [selectedCustomerObj, activeLoyaltyRule]);
-
-        // --- NEW: Calculate Estimated Points for UI (Supports Branch Rule "Spend X KHR -> Earn Y Pts" or Legacy %) ---
-        const loyaltyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
-        const estimatedPoints = useMemo(() => {
-            if (!selectedCustomerId || cartTotal <= 0) return 0;
-            if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
-                return Math.floor(cartTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints);
-            }
-            return loyaltyRate > 0 ? Math.floor(cartTotal * (loyaltyRate / 100)) : 0;
-        }, [selectedCustomerId, cartTotal, activeLoyaltyRule, loyaltyRate]);
-
-        // --- NEW: Broadcast Live POS Cart (status: 'CART' or 'IDLE') to Customer-Facing Display (`POS-KHRQ.html`) in 0ms ---
-        React.useLayoutEffect(() => {
-            if (!selectedShopId || !window.SolarisPayWayVerifier) return;
-            // When PaymentModal is open, PaymentModal manages the ACTIVE / PAID display states
-            if (showPaymentModal || showReceiptModal || thankYouModalData) return;
-
+        // Broadcast Live Cart or Idle State to Customer Display when Payment Modal is closed
+        useEffect(() => {
+            if (!selectedShopId || showPaymentModal || !window.SolarisPayWayVerifier) return;
             const rate = Math.max(100, Number(effectiveCurrentShopObj?.khqrConfig?.exchangeRate) || 4000);
-            if (cart.length > 0) {
-                const sanitizedItems = cart.map(item => ({
-                    productId: item.productId,
-                    code: item.code || '',
-                    name: item.name || 'Item',
-                    price: Number(item.price) || 0,
-                    originalPrice: Number(item.originalPrice ?? item.price) || 0,
-                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
-                    note: item.note || ''
-                }));
-                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
-                    status: 'CART',
-                    shopId: selectedShopId,
-                    shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
-                    deviceId: currentDeviceId || '',
-                    deviceName: currentDevice?.name || 'Counter Terminal',
-                    cashierName: userProfile?.name || 'Cashier',
-                    items: sanitizedItems,
-                    itemCount: cartItemCount,
-                    subtotalKhr: cartTotal,
-                    discountKhr: 0,
-                    rewardProductClaimed: null,
-                    amountKhr: cartTotal,
-                    amountUsd: Number((cartTotal / rate).toFixed(2)),
-                    exchangeRate: rate,
-                    customerName: selectedCustomerObj ? selectedCustomerObj.name : null,
-                    customerPhone: selectedCustomerObj ? selectedCustomerObj.phone : null,
-                    customerPoints: selectedCustomerObj ? customerLoyaltyStatus.effectivePoints : 0,
-                    estimatedPointsEarned: estimatedPoints,
-                    loyaltyRule: activeLoyaltyRule,
-                    invoiceNo: ''
-                });
-            } else {
+            if (cart.length === 0) {
                 window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
                     status: 'IDLE',
                     shopId: selectedShopId,
                     shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                    exchangeRate: rate
+                });
+            } else {
+                window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                    status: 'CART',
+                    shopId: selectedShopId,
+                    shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
                     exchangeRate: rate,
-                    items: [],
-                    itemCount: 0,
-                    subtotalKhr: 0,
+                    items: cart.map(item => ({
+                        productId: item.productId,
+                        code: item.code || '',
+                        name: item.name || 'Item',
+                        price: Number(item.price) || 0,
+                        originalPrice: Number(item.originalPrice ?? item.price) || 0,
+                        quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
+                        note: item.note || ''
+                    })),
+                    itemCount: cartItemCount,
+                    subtotalKhr: cartTotal,
                     discountKhr: 0,
-                    rewardProductClaimed: null,
-                    amountKhr: 0,
-                    amountUsd: 0,
-                    customerName: null,
-                    customerPoints: 0,
-                    estimatedPointsEarned: 0,
-                    loyaltyRule: activeLoyaltyRule,
-                    invoiceNo: ''
+                    amountKhr: cartTotal,
+                    amountUsd: Number((cartTotal / rate).toFixed(2)),
+                    customerName: selectedCustomerObj?.name || null,
+                    customerPoints: customerLoyaltyStatus.effectivePoints,
+                    estimatedPointsEarned: estimatedPoints
                 });
             }
-        }, [
-            cart,
-            cartTotal,
-            cartItemCount,
-            selectedShopId,
-            selectedCustomerObj,
-            customerLoyaltyStatus.effectivePoints,
-            estimatedPoints,
-            activeLoyaltyRule,
-            showPaymentModal,
-            showReceiptModal,
-            thankYouModalData,
-            effectiveCurrentShopObj,
-            systemConfig?.appName,
-            currentDeviceId,
-            currentDevice?.name,
-            userProfile?.name
-        ]);
+        }, [selectedShopId, showPaymentModal, cart, cartItemCount, cartTotal, selectedCustomerObj?.name, customerLoyaltyStatus.effectivePoints, estimatedPoints, effectiveCurrentShopObj, systemConfig?.appName]);
 
-        // --- NEW: Handle Save Ticket (Open Modal) ---
-        const handleOpenSaveTicket = () => {
-            if (cart.length === 0) {
-                showPosAlert("Empty Cart", "Cart is empty. Nothing to save.", true);
-                return;
+        const handleNewCustomerSaved = useCallback((newCust) => {
+            if (newCust?.id) {
+                setSelectedCustomerId(newCust.id);
             }
-            if (!selectedShopId) return;
-            setShowSaveTicketModal(true);
-        };
+            setCustomerSearchTerm('');
+            setShowAddCustomerModal(false);
+            refocusSearchInput(true);
+        }, [refocusSearchInput]);
 
-        // --- NEW: Process Save Ticket (DB Write) ---
-        const processSaveTicket = async (note) => {
+        const handleOpenSaveTicket = useCallback(() => {
+            if (cart.length === 0) return;
+            setShowSaveTicketModal(true);
+        }, [cart.length]);
+
+        const processSaveTicket = async (referenceNote = '') => {
+            if (cart.length === 0 || !selectedShopId) return;
             setIsProcessing(true);
             try {
-                // If no specific note is provided, fallback to customer name or 'Walk-in'
-                const referenceName = note || (selectedCustomerObj ? selectedCustomerObj.name : 'Walk-in Customer');
-                
                 await db.collection('heldTickets').add({
                     shopId: selectedShopId,
+                    shopName: currentShopObj?.name || 'Unknown Shop',
                     items: cart,
-                    customerId: selectedCustomerId,
-                    customerName: selectedCustomerObj ? selectedCustomerObj.name : 'Walk-in Customer',
-                    referenceNote: referenceName, // <-- NEW FIELD
-                    savedBy: userProfile.name,
-                    savedAt: firebase.firestore.FieldValue.serverTimestamp(),
-                    totalAmount: cartTotal
+                    totalAmount: cartTotal,
+                    customerId: selectedCustomerId || '',
+                    customerName: selectedCustomerObj?.name || 'Walk-in Customer',
+                    referenceNote: String(referenceNote || '').trim() || selectedCustomerObj?.name || `Saved Bill (${cartItemCount} items)`,
+                    savedBy: userProfile?.name || 'Staff',
+                    savedAt: firebase.firestore.FieldValue.serverTimestamp()
                 });
-
                 // Clear current session
                 setCart([]);
                 setSelectedCustomerId('');
                 setSearchTerm('');
                 setShowSaveTicketModal(false);
-                setTimeout(() => searchInputRef.current?.focus(), 50);
+                refocusSearchInput(true);
             } catch (err) {
                 console.error("Error saving ticket:", err);
                 showPosAlert("Save Error", "Failed to save ticket. Please try again.", true);
@@ -7075,7 +7077,7 @@
             }
         };
 
-        // --- NEW: Restore Held Ticket Logic ---
+        // --- Restore Held Ticket Logic ---
         const executeRestoreTicket = async (ticket) => {
             if (!ticket) return;
             try {
@@ -7084,243 +7086,152 @@
                 await db.collection('heldTickets').doc(ticket.id).delete();
                 setPendingRestoreTicket(null);
                 setShowHeldTicketsModal(false);
-                setTimeout(() => searchInputRef.current?.focus(), 50);
+                refocusSearchInput(true);
             } catch (err) {
                 console.error("Error restoring ticket:", err);
                 showPosAlert("Restore Error", "Failed to restore saved bill.", true);
             }
         };
 
-        const handleRestoreTicket = (ticket) => {
+        const handleRestoreTicket = useCallback((ticket) => {
             if (!ticket) return;
             if (cart.length > 0) {
-                setShowHeldTicketsModal(false);
                 setPendingRestoreTicket(ticket);
             } else {
                 executeRestoreTicket(ticket);
             }
-        };
+        }, [cart.length]);
 
-        // --- PHASE 2: Transaction Logic (Optimized for Quota & Speed) ---
-        const handleProcessSale = async (paymentDetails) => {
-            if (!selectedShopId || cart.length === 0) return;
-            
-            // Validation: Device must be set
-            if (!currentDeviceId) {
-                showPosAlert("Device Not Configured", "Device not configured. Please go to Settings > Devices & Terminals to select this terminal.", true);
-                return;
-            }
-
-            if (!currentShift) {
-                setShowPaymentModal(false);
-                setShowShiftModal(true);
-                showPosAlert("Shift Required", "Please open a shift first before processing sales.", true);
-                return;
-            }
+        // --- Complete Sale Processing Engine ---
+        const handleProcessSale = async (paymentInfo) => {
+            if (isProcessing || cart.length === 0 || !currentShift) return;
             setIsProcessing(true);
-
             try {
-                const shop = shops.find(s => s.id === selectedShopId);
-                const customer = customers.find(c => c.id === selectedCustomerId);
-                
-                // If cashier picked a Free Reward Product inside PaymentModal that wasn't in the cart yet, append 1 unit of it to the sale items
-                const workingCart = [...cart];
-                if (paymentDetails.addedRewardProduct && paymentDetails.addedRewardProduct.id) {
-                    const rp = paymentDetails.addedRewardProduct;
-                    const rpShopPrice = getEffectiveShopPrice(rp, selectedShopId);
-                    workingCart.push({
+                const saleRef = db.collection('sales').doc();
+                const receiptNo = window.SolarisInvoiceEngine
+                    ? window.SolarisInvoiceEngine.allocateInvoiceNumber(effectiveCurrentShopObj, paymentInfo.invoiceNo)
+                    : (paymentInfo.invoiceNo || `POS-${Date.now().toString().slice(-8)}`);
+
+                // Build final items list (include auto-added free catalog reward product if claimed)
+                const finalItems = cart.map(item => ({
+                    productId: item.productId,
+                    code: item.code || '',
+                    name: item.name,
+                    price: Number(item.price) || 0,
+                    originalPrice: Number(item.originalPrice ?? item.price) || 0,
+                    cost: Number(item.cost) || 0,
+                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1),
+                    note: item.note || ''
+                }));
+
+                if (paymentInfo.addedRewardProduct) {
+                    const rp = paymentInfo.addedRewardProduct;
+                    finalItems.push({
                         productId: rp.id,
+                        code: rp.code || '',
                         name: rp.name,
-                        price: rpShopPrice,
-                        originalPrice: rpShopPrice,
+                        price: getEffectiveShopPrice(rp, selectedShopId),
+                        originalPrice: getEffectiveShopPrice(rp, selectedShopId),
                         cost: Number(rp.cost) || 0,
                         quantity: 1,
-                        code: rp.code || '',
                         note: 'Loyalty Free Reward Claim'
                     });
                 }
 
-                const effectiveCartSubtotal = workingCart.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.quantity) || 1)), 0);
-                const effectiveCartTotalCost = workingCart.reduce((sum, item) => sum + ((Number(item.cost) || 0) * (Number(item.quantity) || 1)), 0);
+                const subtotal = finalItems.reduce((sum, i) => sum + (i.price * i.quantity), 0);
+                const totalCost = finalItems.reduce((sum, i) => sum + (i.cost * i.quantity), 0);
+                const discount = Math.min(subtotal, Number(paymentInfo.discount) || 0);
+                const grandTotal = Math.max(0, subtotal - discount);
+                const nowIso = new Date().toISOString();
 
-                // Calculate Points & Redemption Logic (Pre-computation with Expiration Guard)
-                const rate = parseFloat(systemConfig?.loyaltyRate) || 0;
-                const redemptionAmount = Math.max(0, parseFloat(paymentDetails.redemptionAmount) || 0);
-                const pointsRedeemed = Math.max(0, parseInt(paymentDetails.pointsRedeemed ?? redemptionAmount, 10) || 0);
-                const manualDiscount = Math.max(0, parseFloat(paymentDetails.manualDiscount) || 0);
-                const totalDiscount = Math.min(effectiveCartSubtotal, redemptionAmount + manualDiscount);
-                const finalGrandTotal = Math.max(0, effectiveCartSubtotal - totalDiscount);
-
-                // Earn points strictly on net paid amount (after discount & free reward deduction)
-                const pointsEarned = selectedCustomerId
-                    ? (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0
-                        ? Math.floor(finalGrandTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints)
-                        : (rate > 0 ? Math.floor(finalGrandTotal * (rate / 100)) : 0))
-                    : 0;
-
-                // Evaluate pre-sale active points (resets to 0 if expired per branch rule)
-                const loyaltyEval = evaluateCustomerLoyaltyStatus(customer, activeLoyaltyRule);
-                const startingEffectivePoints = loyaltyEval.effectivePoints;
-                const updatedPointsBalance = Math.max(0, startingEffectivePoints - pointsRedeemed + pointsEarned);
-
-                // 1. SEQUENTIAL INVOICE NUMBER ({Last 3 Chars of Shop Name}-{9-Digit Sequence}, e.g., HOP-000000001)
-                const receiptNo = window.SolarisInvoiceEngine
-                    ? window.SolarisInvoiceEngine.allocateInvoiceNumber(shop, paymentDetails.invoiceNo)
-                    : (paymentDetails.invoiceNo || `POS-${String(Date.now()).slice(-9)}`);
-
-                // 2. BATCH WRITE: Save everything else efficiently in one go (Queues in IndexedDB if offline)
-                const batch = db.batch();
-                
-                // Normalize cart quantities to ensure valid positive integers before saving
-                const sanitizedCart = workingCart.map(item => ({
-                    ...item,
-                    quantity: Math.max(1, parseInt(item.quantity, 10) || 1)
-                }));
-
-                // Prepare Sale Document
-                const saleRef = db.collection("sales").doc();
-                const verifiedAba = paymentDetails.verifiedAba || null;
-                const isAbaVerified = !!(verifiedAba && verifiedAba.isValid && verifiedAba.trxId);
-                const abaChannelBadge = isAbaVerified && verifiedAba.paymentChannel && verifiedAba.paymentChannel !== 'ABA PAY'
+                const isBankMethod = paymentInfo.method === 'KHQR' || paymentInfo.method === 'KHQR (ABA)' || paymentInfo.method === 'Bank';
+                const verifiedAba = paymentInfo.verifiedAba || null;
+                const abaChannelBadge = verifiedAba?.paymentChannel && verifiedAba.paymentChannel !== 'ABA PAY'
                     ? ` via ${verifiedAba.paymentChannel}`
                     : '';
-                const abaPayerDisplay = isAbaVerified
+                const abaPayerDisplay = verifiedAba
                     ? `${verifiedAba.payerName || 'ABA Customer'} (${verifiedAba.maskedAccount || '*ABA'})${abaChannelBadge}`
-                    : (paymentDetails.apvRef ? 'Verified by Cashier' : null);
-                const abaAmountDisplay = isAbaVerified
+                    : '';
+                const abaPaidAmountStr = verifiedAba
                     ? (verifiedAba.currency === 'KHR'
                         ? `៛${Number(verifiedAba.amount).toLocaleString()}`
                         : `$${Number(verifiedAba.amount).toFixed(2)}`)
-                    : null;
+                    : '';
 
-                const saleData = {
-                    receiptNo: receiptNo,
+                // Calculate Loyalty Points Earned & Resulting Balance
+                let pointsEarned = 0;
+                const pointsRedeemed = Number(paymentInfo.pointsRedeemed) || 0;
+                if (selectedCustomerObj && grandTotal > 0) {
+                    if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
+                        pointsEarned = Math.floor(grandTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints);
+                    } else {
+                        const legacyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
+                        pointsEarned = legacyRate > 0 ? Math.floor(grandTotal * (legacyRate / 100)) : 0;
+                    }
+                }
+                const customerPointsAfter = selectedCustomerObj
+                    ? Math.max(0, customerLoyaltyStatus.effectivePoints - pointsRedeemed + pointsEarned)
+                    : 0;
+
+                const saleRecord = {
+                    id: saleRef.id,
+                    receiptNo,
                     shopId: selectedShopId,
-                    shopName: shop?.name || 'Unknown',
-                    cashierId: userProfile.uid,
-                    cashierName: userProfile.name,
+                    shopName: currentShopObj?.name || 'Unknown Shop',
+                    deviceId: currentDeviceId || '',
+                    deviceName: currentDevice?.name || 'POS Terminal',
                     shiftId: currentShift.id,
-                    deviceId: currentDeviceId, 
-                    deviceName: currentDevice?.name || 'Unknown Device', 
-                    customerId: selectedCustomerId || null,
-                    customerName: customer?.name || 'Walk-in',
-                    items: sanitizedCart,
-                    subtotal: effectiveCartSubtotal,
-                    discount: totalDiscount,
-                    manualDiscount: manualDiscount,
-                    manualDiscountPct: parseFloat(paymentDetails.manualDiscountPct) || 0,
-                    redemptionAmount: redemptionAmount,
-                    pointsRedeemed: pointsRedeemed,
-                    rewardProductClaimed: paymentDetails.rewardProductClaimed || null,
-                    tax: 0, 
-                    grandTotal: finalGrandTotal,
-                    totalCost: effectiveCartTotalCost, 
-                    paymentMethod: paymentDetails.method, 
-                    amountTendered: paymentDetails.tendered,
-                    tenderedUSD: paymentDetails.tenderedUSD || 0,
-                    tenderedKHR: paymentDetails.tenderedKHR || 0,
-                    exchangeRate: paymentDetails.exchangeRate || 4000,
-                    changeDue: paymentDetails.change,
-                    changeBreakdown: paymentDetails.changeBreakdown || null,
-                    pointsEarned: pointsEarned,
-                    customerPointsBefore: startingEffectivePoints,
-                    customerPointsAfter: selectedCustomerId ? updatedPointsBalance : 0,
-                    abaVerified: isAbaVerified || !!(paymentDetails.method === 'KHQR' && paymentDetails.apvRef),
-                    abaTrxId: isAbaVerified ? String(verifiedAba.trxId).trim() : null,
-                    abaApv: isAbaVerified ? String(verifiedAba.apv || '') : (paymentDetails.apvRef || null),
+                    cashierId: userProfile?.uid || '',
+                    cashierName: userProfile?.name || 'Staff',
+                    customerId: selectedCustomerObj?.id || '',
+                    customerName: selectedCustomerObj?.name || 'Walk-in',
+                    items: finalItems,
+                    subtotal,
+                    discount,
+                    manualDiscount: Number(paymentInfo.manualDiscount) || 0,
+                    manualDiscountPct: Number(paymentInfo.manualDiscountPct) || 0,
+                    redemptionAmount: Number(paymentInfo.redemptionAmount) || 0,
+                    pointsRedeemed,
+                    rewardProductClaimed: paymentInfo.rewardProductClaimed || null,
+                    pointsEarned,
+                    customerPointsAfter,
+                    grandTotal,
+                    totalCost,
+                    paymentMethod: isBankMethod ? 'KHQR (ABA)' : 'Cash',
+                    amountTendered: Number(paymentInfo.tendered) || grandTotal,
+                    tenderedUSD: Number(paymentInfo.tenderedUSD) || 0,
+                    tenderedKHR: Number(paymentInfo.tenderedKHR) || 0,
+                    exchangeRate: Number(paymentInfo.exchangeRate) || 4000,
+                    changeDue: Number(paymentInfo.change) || 0,
+                    changeBreakdown: paymentInfo.changeBreakdown || null,
+                    abaVerified: !!verifiedAba,
+                    abaTrxId: verifiedAba?.trxId ? String(verifiedAba.trxId).trim() : '',
+                    abaApv: verifiedAba?.apv ? String(verifiedAba.apv).trim() : (paymentInfo.apvRef || ''),
                     abaPayer: abaPayerDisplay,
-                    abaPaymentChannel: isAbaVerified ? (verifiedAba.paymentChannel || 'ABA PAY') : null,
-                    abaSourceBank: isAbaVerified ? (verifiedAba.sourceBank || 'ABA Bank') : null,
-                    abaPaidAmountStr: abaAmountDisplay,
-                    abaCurrency: isAbaVerified ? verifiedAba.currency : (paymentDetails.khqrCurrency || null),
-                    abaPaidAtStr: isAbaVerified ? (verifiedAba.paidAtStr || '') : null,
-                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-                    createdAt: new Date().toISOString()
+                    abaPaymentChannel: verifiedAba?.paymentChannel || (isBankMethod ? 'ABA PAY' : ''),
+                    abaSourceBank: verifiedAba?.sourceBank || (isBankMethod ? 'ABA Bank' : ''),
+                    abaPaidAmountStr,
+                    abaCurrency: verifiedAba?.currency || (paymentInfo.khqrCurrency || 'KHR'),
+                    abaPaidAtStr: verifiedAba?.paidAtStr || '',
+                    status: 'paid',
+                    createdAt: nowIso,
+                    timestamp: nowIso
                 };
 
-                batch.set(saleRef, saleData);
-
-                // Claim ABA PayWay transaction in `aba_payments/{trxId}` so it cannot be reused
-                if (isAbaVerified && verifiedAba.trxId && window.SolarisPayWayVerifier) {
-                    window.SolarisPayWayVerifier.claimAbaPaymentForSale(verifiedAba.trxId, saleRef.id, receiptNo);
-                }
-
-                // Inventory Deduction (Only decrement stock if shop manages stock; skip redundant per-item movement docs on regular POS sales to cut writes by 50%)
-                if (shop?.manageStock !== false) {
-                    sanitizedCart.forEach(item => {
-                        const productRef = db.collection("products").doc(item.productId);
-                        batch.update(productRef, {
-                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
-                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                        });
-                        if (window.SolarisSmartProductEngine) {
-                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, selectedShopId, -item.quantity);
-                        }
-                    });
-                }
-
-                // Customer Points Update (Earn & Redeem with Expiration Reset Protection)
-                if (selectedCustomerId) {
-                    const custRef = db.collection("customers").doc(selectedCustomerId);
-                    const updateData = {
-                        visitCount: firebase.firestore.FieldValue.increment(1),
-                        totalSpent: firebase.firestore.FieldValue.increment(saleData.grandTotal),
-                        lastVisit: firebase.firestore.FieldValue.serverTimestamp()
-                    };
-                    
-                    if (loyaltyEval.isExpired) {
-                        // Previous points were expired: reset balance to exact new post-sale balance
-                        updateData.points = updatedPointsBalance;
-                    } else {
-                        const netPointsChange = pointsEarned - pointsRedeemed;
-                        if (netPointsChange !== 0) {
-                            updateData.points = firebase.firestore.FieldValue.increment(netPointsChange);
-                        }
-                    }
-                    
-                    batch.update(custRef, updateData);
-                }
-
-                // Update Shift Totals (Use .set with { merge: true } instead of .update so if the shift doc wasn't in cloud yet, the entire sale batch NEVER fails!)
-                const shiftRef = db.collection("shifts").doc(currentShift.id);
-                const isCash = paymentDetails.method === 'Cash';
-                const isKHQR = paymentDetails.method === 'KHQR';
-
-                batch.set(shiftRef, {
-                    shopId: selectedShopId,
-                    cashierId: userProfile.uid,
-                    cashierName: userProfile.name,
-                    shiftName: currentShift.shiftName || 'AM',
-                    deviceId: currentDeviceId,
-                    deviceName: currentDevice?.name || currentShift.deviceName || 'Unknown Device',
-                    status: 'open',
-                    startCash: Number(currentShift.startCash) || 0,
-                    totalSales: firebase.firestore.FieldValue.increment(saleData.grandTotal),
-                    transactionCount: firebase.firestore.FieldValue.increment(1),
-                    totalCashSales: isCash ? firebase.firestore.FieldValue.increment(saleData.grandTotal) : firebase.firestore.FieldValue.increment(0),
-                    totalKHQRSales: isKHQR ? firebase.firestore.FieldValue.increment(saleData.grandTotal) : firebase.firestore.FieldValue.increment(0),
-                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
-
-                // 3. 0ms Optimistic UI Transition: Update UI state and open Receipt Modal immediately
-                const completedSale = { ...saleData, id: saleRef.id, queuedOffline: !navigator.onLine };
-                setLastSaleData(completedSale);
-                setTodaySales(prev => prev.some(s => s.id === completedSale.id) ? prev : [completedSale, ...prev]);
-
-                // Save immediately to SolarisLocalSalesStore so Sale Report displays it in 0ms!
+                // 1. Instant 0ms Local Ledger + Today Sales + Shift State Update
                 if (window.SolarisLocalSalesStore) {
-                    window.SolarisLocalSalesStore.recordSale(completedSale);
+                    window.SolarisLocalSalesStore.recordSale(saleRecord);
                 }
+                setTodaySales(prev => [saleRecord, ...prev.filter(s => s.id !== saleRecord.id)]);
 
-                // Also update local shift running totals AND global shift report cache immediately
                 setCurrentShift(prev => {
                     if (!prev) return prev;
                     const updatedShift = {
                         ...prev,
-                        totalSales: (Number(prev.totalSales) || 0) + saleData.grandTotal,
+                        totalSales: (Number(prev.totalSales) || 0) + grandTotal,
                         transactionCount: (Number(prev.transactionCount) || 0) + 1,
-                        totalCashSales: (Number(prev.totalCashSales) || 0) + (isCash ? saleData.grandTotal : 0),
-                        totalKHQRSales: (Number(prev.totalKHQRSales) || 0) + (isKHQR ? saleData.grandTotal : 0)
+                        totalCashSales: !isBankMethod ? (Number(prev.totalCashSales) || 0) + grandTotal : (Number(prev.totalCashSales) || 0),
+                        totalKHQRSales: isBankMethod ? (Number(prev.totalKHQRSales) || 0) + grandTotal : (Number(prev.totalKHQRSales) || 0)
                     };
                     if (localShiftStorageKey) {
                         try { localStorage.setItem(localShiftStorageKey, JSON.stringify(updatedShift)); } catch (e) {}
@@ -7336,95 +7247,120 @@
                     return updatedShift;
                 });
 
+                // 2. Claim ABA Payment Transaction if Verified
+                if (verifiedAba?.trxId && window.SolarisPayWayVerifier) {
+                    window.SolarisPayWayVerifier.claimAbaPaymentForSale(verifiedAba.trxId, saleRef.id, receiptNo);
+                }
+
+                // 3. Firestore Batch Commit (Sale, Stock Deduction, Product Movement, Shift Totals, Customer Points)
+                const batch = db.batch();
+                batch.set(saleRef, {
+                    ...saleRecord,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                });
+
+                const manageStock = currentShopObj?.manageStock !== false;
+                finalItems.forEach(item => {
+                    if (!item.productId) return;
+                    if (manageStock) {
+                        const prodRef = db.collection('products').doc(item.productId);
+                        batch.update(prodRef, {
+                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                        if (window.SolarisSmartProductEngine) {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, selectedShopId, -item.quantity);
+                        }
+                    }
+
+                    const moveRef = db.collection('productMovement').doc();
+                    batch.set(moveRef, {
+                        productId: item.productId,
+                        productCode: item.code,
+                        productName: item.name,
+                        type: 'Sale',
+                        quantityChange: -item.quantity,
+                        from: currentShopObj?.name || 'Shop',
+                        to: selectedCustomerObj?.name || 'Customer',
+                        referenceNo: receiptNo,
+                        performedBy: userProfile?.name || 'Staff',
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                });
+
+                const shiftRef = db.collection('shifts').doc(currentShift.id);
+                const shiftInc = {
+                    totalSales: firebase.firestore.FieldValue.increment(grandTotal),
+                    transactionCount: firebase.firestore.FieldValue.increment(1)
+                };
+                if (!isBankMethod) {
+                    shiftInc.totalCashSales = firebase.firestore.FieldValue.increment(grandTotal);
+                } else {
+                    shiftInc.totalKHQRSales = firebase.firestore.FieldValue.increment(grandTotal);
+                }
+                batch.set(shiftRef, shiftInc, { merge: true });
+
+                if (selectedCustomerObj?.id) {
+                    const custRef = db.collection('customers').doc(selectedCustomerObj.id);
+                    batch.update(custRef, {
+                        points: customerPointsAfter,
+                        visitCount: firebase.firestore.FieldValue.increment(1),
+                        totalSpent: firebase.firestore.FieldValue.increment(grandTotal),
+                        lastVisit: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                }
+
+                if (!isOnline) {
+                    setPendingSyncCount(c => c + 1);
+                }
+
+                batch.commit().catch(err => {
+                    console.warn("Sale cloud batch queued locally:", err?.code || err?.message);
+                });
+
+                // 4. Reset POS Session & Show Receipt / Celebratory Modal
                 setCart([]);
-                setSearchTerm('');
                 setSelectedCustomerId('');
+                setCustomerSearchTerm('');
+                setSearchTerm('');
                 setShowPaymentModal(false);
-                setShowReceiptModal(true);
-                setIsProcessing(false);
+                setLastSaleData(saleRecord);
 
-                // Show celebratory Thank You! modal when KHQR / ABA PayWay is verified
-                if (isAbaVerified || (paymentDetails.method === 'KHQR' && paymentDetails.apvRef)) {
+                if (verifiedAba) {
                     setThankYouModalData({
-                        sourceLabel: isAbaVerified
-                            ? (verifiedAba.paymentCategory === 'OUTDOOR_KHQR'
-                                ? `KHQR Interbank Verified (${verifiedAba.sourceBank || verifiedAba.paymentChannel})`
-                                : 'Indoor ABA PAY Auto-Verified')
-                            : 'KHQR Reference Confirmed',
-                        shopName: shop?.brandingName || shop?.name || systemConfig?.appName || 'POS Terminal',
-                        amountDisplay: abaAmountDisplay || `៛${new Intl.NumberFormat('en-US').format(finalGrandTotal)}`,
-                        payerDisplay: abaPayerDisplay || customer?.name || 'Valued Guest',
-                        paymentChannel: isAbaVerified ? (verifiedAba.paymentChannel || 'ABA PAY') : 'KHQR',
-                        customerName: customer?.name || null,
+                        shopName: effectiveCurrentShopObj?.brandingName || effectiveCurrentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                        amountDisplay: abaPaidAmountStr || `៛${khrFormatter.format(grandTotal)}`,
+                        payerDisplay: abaPayerDisplay || 'ABA Customer',
+                        paymentChannel: verifiedAba.paymentChannel || 'ABA PAY',
+                        customerName: selectedCustomerObj?.name || '',
                         invoiceNo: receiptNo,
-                        apv: saleData.abaApv || 'VERIFIED'
+                        apv: verifiedAba.apv || 'VERIFIED',
+                        sourceLabel: 'ABA PayWay Auto-Verified'
                     });
+                    setShowReceiptModal(true);
+                } else {
+                    setShowReceiptModal(true);
                 }
 
-                // 4. Commit Firestore batch asynchronously in the background (IndexedDB local cache updates immediately)
-                if (!navigator.onLine) {
-                    setPendingSyncCount(prev => prev + 1);
-                }
-                batch.commit()
-                    .then(() => {
-                        if (!navigator.onLine) {
-                            setPendingSyncCount(prev => Math.max(0, prev - 1));
-                        }
-                    })
-                    .catch(error => {
-                        console.warn("Background Sale Commit queued in IndexedDB (Quota/Network):", error?.code || error?.message);
-                        if (error.code === 'resource-exhausted' || error.message?.includes('Quota')) {
-                            if (window.SolarisPayWayVerifier) window.SolarisPayWayVerifier.isQuotaExceeded = true;
-                            setPendingSyncCount(prev => prev + 1);
-                        }
-                    });
-
-                // Refocus search input after sale
-                setTimeout(() => searchInputRef.current?.focus(), 50);
+                // Refocus search input after sale (without popping up tablet keyboard)
+                refocusSearchInput(true);
 
             } catch (error) {
-                console.error("Sale Error:", error);
+                console.error("Sale processing error:", error);
+                showPosAlert("Checkout Error", error.message || "Failed to complete sale. Please try again.", true);
+            } finally {
                 setIsProcessing(false);
-                if (error.code === 'resource-exhausted' || error.message?.includes('Quota')) {
-                    showPosAlert("Quota Exceeded", "Firebase Quota Exceeded! You have reached the daily free limits (50k reads / 20k writes). The transaction cannot be saved until the quota resets tomorrow, or the Firebase plan is upgraded to Blaze.", true);
-                } else {
-                    showPosAlert("Transaction Failed", "Failed to process sale. Please check your connection.", true);
-                }
-            } 
+            }
         };
 
-        const handleNewCustomerSaved = (newCustomer) => {
-            setShowAddCustomerModal(false);
-            setSelectedCustomerId(newCustomer.id); 
-        };
-
-        // --- NEW: Render Setup Wizard if No Device Set ---
-        if (!currentDeviceId) {
+        // Require Terminal Device Selection for Non-Admin Cashiers when devices are configured
+        if (!currentDeviceId && devices.length > 0 && userProfile.role !== 'Admin') {
             return <DeviceSetup userProfile={userProfile} />;
         }
 
-        // --- NEW: Access Denied if User cannot access Device Shop ---
-        if (currentDevice && !userHasAccess) {
-             return (
-                <div className="flex items-center justify-center h-full">
-                    <div className="bg-slate-800 p-8 rounded-xl border border-red-500/50 text-center max-w-lg shadow-2xl">
-                        <i className="fas fa-ban text-5xl text-red-500 mb-4"></i>
-                        <h2 className="text-2xl font-bold text-white mb-2">Access Denied</h2>
-                        <p className="text-slate-400 mb-4">
-                            This terminal <strong>{currentDevice.name}</strong> is strictly assigned to: <br/>
-                            <span className="text-white font-bold text-lg mt-1 block">{shops.find(s => s.id === currentDevice.shopId)?.name || 'Unknown'}</span>
-                        </p>
-                        <p className="text-sm text-red-400 bg-red-900/20 p-2 rounded border border-red-500/30">
-                            You do not have permission to access this shop.
-                        </p>
-                    </div>
-                </div>
-            );
-        }
-
         return (
-            <div className="flex flex-col h-[calc(100dvh-76px)] sm:h-[calc(100dvh-88px)] md:h-[calc(100dvh-96px)] select-none">
-                {/* Non-blocking POS Message & Confirmation Modals */}
+            <div className="flex flex-col h-full overflow-hidden">
                 <MessageModal
                     show={posMessage.show}
                     title={posMessage.title}
@@ -7432,6 +7368,7 @@
                     isError={posMessage.isError}
                     onClose={closePosAlert}
                 />
+
                 <ConfirmationModal
                     show={!!pendingRestoreTicket}
                     title="Overwrite Current Cart?"
@@ -7439,7 +7376,7 @@
                     onConfirm={() => executeRestoreTicket(pendingRestoreTicket)}
                     onCancel={() => {
                         setPendingRestoreTicket(null);
-                        setTimeout(() => searchInputRef.current?.focus(), 50);
+                        refocusSearchInput(true);
                     }}
                 />
 
@@ -7704,25 +7641,91 @@
                                 <div className="flex-1 relative flex items-center min-w-0">
                                     <input 
                                         ref={searchInputRef}
-                                        type="text" 
-                                        placeholder="Search or Scan Barcode..." 
+                                        type="text"
+                                        inputMode={isTouchKeyboardOpen ? 'search' : 'none'}
+                                        enterKeyHint="search"
+                                        autoComplete="off"
+                                        autoCorrect="off"
+                                        autoCapitalize="off"
+                                        spellCheck={false}
+                                        placeholder={isTouchKeyboardOpen ? "Type product name, code, or barcode..." : "Scan Barcode or Search Product..."}
                                         value={searchTerm}
+                                        onFocus={() => setIsSearchInputFocused(true)}
+                                        onBlur={() => {
+                                            setIsSearchInputFocused(false);
+                                            // Keep cursor persistently ready unless user intentionally moved focus to another input/select or modal
+                                            setTimeout(() => {
+                                                if (isAnyPosModalOpenRef.current || isCustomerSearchFocusedRef.current) return;
+                                                if (window.innerWidth < 768 && activeMobileTabRef.current !== 'products') return;
+                                                const activeEl = document.activeElement;
+                                                const stayedInFormField = activeEl && (
+                                                    activeEl.tagName === 'INPUT' ||
+                                                    activeEl.tagName === 'TEXTAREA' ||
+                                                    activeEl.tagName === 'SELECT' ||
+                                                    activeEl.isContentEditable
+                                                );
+                                                if (!stayedInFormField && searchInputRef.current) {
+                                                    if (isTouchKeyboardOpenRef.current) {
+                                                        setIsTouchKeyboardOpen(false);
+                                                        isTouchKeyboardOpenRef.current = false;
+                                                    }
+                                                    searchInputRef.current.setAttribute('inputmode', 'none');
+                                                    searchInputRef.current.focus({ preventScroll: true });
+                                                }
+                                            }, 120);
+                                        }}
                                         onChange={(e) => setSearchTerm(e.target.value)}
                                         onKeyDown={handleSearchKeyDown}
-                                        className="w-full bg-slate-800/90 text-white pl-9 pr-9 py-2 sm:py-2.5 rounded-xl border border-slate-600/80 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-sm sm:text-base shadow-inner transition-all"
+                                        className={`w-full bg-slate-800/90 text-white pl-9 ${searchTerm ? 'pr-20' : 'pr-12'} py-2 sm:py-2.5 rounded-xl border outline-none text-sm sm:text-base shadow-inner transition-all ${
+                                            scanPulseActive
+                                                ? 'border-emerald-400 ring-2 ring-emerald-400/60 bg-emerald-950/30'
+                                                : isTouchKeyboardOpen
+                                                    ? 'border-blue-500 ring-2 ring-blue-500/40'
+                                                    : isSearchInputFocused
+                                                        ? 'border-emerald-500/80 ring-2 ring-emerald-500/30'
+                                                        : 'border-slate-600/80 focus:ring-2 focus:ring-blue-500 focus:border-blue-500'
+                                        }`}
                                         autoFocus
                                     />
-                                    <i className="fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                                    {searchTerm && (
+                                    <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
+                                        <i className={`fas fa-barcode transition-colors ${
+                                            scanPulseActive
+                                                ? 'text-emerald-300'
+                                                : isSearchInputFocused && !isTouchKeyboardOpen
+                                                    ? 'text-emerald-400'
+                                                    : 'text-slate-400'
+                                        }`}></i>
+                                    </div>
+                                    <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                                        {searchTerm && (
+                                            <button
+                                                type="button"
+                                                onMouseDown={(e) => e.preventDefault()}
+                                                onClick={() => {
+                                                    setSearchTerm('');
+                                                    setHighlightedIndex(0);
+                                                    refocusSearchInput(false);
+                                                }}
+                                                className="w-7 h-7 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 flex items-center justify-center transition"
+                                                title="Clear search"
+                                            >
+                                                <i className="fas fa-times-circle text-sm"></i>
+                                            </button>
+                                        )}
                                         <button
                                             type="button"
-                                            onClick={() => { setSearchTerm(''); searchInputRef.current?.focus(); }}
-                                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1"
-                                            title="Clear search"
+                                            onMouseDown={(e) => e.preventDefault()}
+                                            onClick={handleToggleTouchKeyboard}
+                                            className={`w-8 h-8 rounded-lg flex items-center justify-center border transition active:scale-95 ${
+                                                isTouchKeyboardOpen
+                                                    ? 'bg-blue-600 text-white border-blue-400 shadow-sm shadow-blue-900/40'
+                                                    : 'bg-slate-700/80 hover:bg-slate-600 text-slate-300 hover:text-white border-slate-600'
+                                            }`}
+                                            title={isTouchKeyboardOpen ? "Hide On-Screen Keyboard (Return to Scan-Ready Mode)" : "Open On-Screen Keyboard to Type Product Name"}
                                         >
-                                            <i className="fas fa-times-circle"></i>
+                                            <i className="fas fa-keyboard text-xs"></i>
                                         </button>
-                                    )}
+                                    </div>
                                 </div>
 
                                 {/* LOCKED SHOP SELECTOR */}
