@@ -28566,7 +28566,8 @@
         });
 
         // Core Registry, Branch Lock Status & Action States
-        const [registryData, setRegistryData] = useState({ devices: {}, blockedDeviceIds: [], revokedDevices: {} });
+        const DEFAULT_KHQR_HOST_URL = 'https://jlw168.github.io/POS/POS-KHRQ.html';
+        const [registryData, setRegistryData] = useState({ devices: {}, blockedDeviceIds: [], revokedDevices: {}, displayHostUrl: DEFAULT_KHQR_HOST_URL });
         const [branchDisplayDocs, setBranchDisplayDocs] = useState({});
         const [loadingRegistry, setLoadingRegistry] = useState(true);
         const [isExecutingAction, setIsExecutingAction] = useState(false);
@@ -28575,12 +28576,18 @@
         const [customLockReasonInput, setCustomLockReasonInput] = useState('Security lock triggered by Admin');
 
         // Device Registration & Link Sharing States
-        const KHQR_DISPLAY_BASE_URL = 'https://jlw168.github.io/POS/POS-KHRQ.html';
         const [showRegisterModal, setShowRegisterModal] = useState(false);
-        const [deviceFormData, setDeviceFormData] = useState({ deviceId: '', shopId: '', note: '' });
+        const [deviceFormData, setDeviceFormData] = useState({ deviceId: '', shopId: '', note: '', hostUrl: DEFAULT_KHQR_HOST_URL });
         const [editingDeviceId, setEditingDeviceId] = useState(null);
         const [shareLinkDevice, setShareLinkDevice] = useState(null);
         const [copiedDeviceKey, setCopiedDeviceKey] = useState('');
+
+        const normalizeHostUrl = useCallback((rawUrl) => {
+            const trimmed = String(rawUrl || DEFAULT_KHQR_HOST_URL).trim();
+            if (!trimmed) return DEFAULT_KHQR_HOST_URL;
+            // Normalize accidental double slashes in path (e.g. /POS//POS-KHRQ.html -> /POS/POS-KHRQ.html) while keeping https://
+            return trimmed.replace(/([^:]\/)\/+/g, '$1').split('?')[0];
+        }, []);
 
         const triggerSecToast = useCallback((msg) => {
             setSecToast(msg);
@@ -28596,17 +28603,18 @@
                     setRegistryData({
                         devices: d.devices || {},
                         blockedDeviceIds: Array.isArray(d.blockedDeviceIds) ? d.blockedDeviceIds : [],
-                        revokedDevices: d.revokedDevices || {}
+                        revokedDevices: d.revokedDevices || {},
+                        displayHostUrl: d.displayHostUrl ? normalizeHostUrl(d.displayHostUrl) : DEFAULT_KHQR_HOST_URL
                     });
                 } else {
-                    setRegistryData({ devices: {}, blockedDeviceIds: [], revokedDevices: {} });
+                    setRegistryData({ devices: {}, blockedDeviceIds: [], revokedDevices: {}, displayHostUrl: DEFAULT_KHQR_HOST_URL });
                 }
                 setLoadingRegistry(false);
             }, () => {
                 setLoadingRegistry(false);
             });
             return () => unsub();
-        }, []);
+        }, [normalizeHostUrl]);
 
         // Real-time listeners for each available shop's `khqr_display_{shopId}` lock status
         useEffect(() => {
@@ -28622,19 +28630,32 @@
             return () => unsubs.forEach(u => { try { u(); } catch (e) {} });
         }, [availableShops]);
 
+        // Matches POS-KHRQ.html exact hardware ID pattern: SLR-DEV-XXXXXX (6 uppercase hex chars)
         const generateNewDeviceId = () => {
-            const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
-            return `SLR-DEV-${rand}`;
+            const hex = Array.from({ length: 6 }, () => '0123456789ABCDEF'[Math.floor(Math.random() * 16)]).join('');
+            return `SLR-DEV-${hex}`;
         };
 
-        const buildDeviceDisplayLink = useCallback((deviceId, shopId) => {
+        const buildDeviceDisplayLink = useCallback((deviceId, shopId, customHostUrl = '') => {
             const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
             const cleanShopId = String(shopId || '').trim();
             if (!cleanDeviceId || !cleanShopId) return '';
+            const baseUrl = normalizeHostUrl(customHostUrl || registryData.displayHostUrl || DEFAULT_KHQR_HOST_URL);
             const shopObj = (shops || []).find(s => s.id === cleanShopId);
             const shopName = shopObj?.brandingName || shopObj?.name || 'POS';
-            return `${KHQR_DISPLAY_BASE_URL}?shopId=${encodeURIComponent(cleanShopId)}&shopName=${encodeURIComponent(shopName)}&deviceId=${encodeURIComponent(cleanDeviceId)}`;
-        }, [shops]);
+            return `${baseUrl}?shopId=${encodeURIComponent(cleanShopId)}&shopName=${encodeURIComponent(shopName)}&deviceId=${encodeURIComponent(cleanDeviceId)}`;
+        }, [shops, registryData.displayHostUrl, normalizeHostUrl]);
+
+        const launchDisplayWindow = (link, shopId) => {
+            if (!link) return;
+            const win = window.open(link, '_blank');
+            if (win) {
+                try { win.focus(); } catch (e) {}
+                if (shopId && window.SolarisPayWayVerifier?.registerCustomerDisplayWindow) {
+                    window.SolarisPayWayVerifier.registerCustomerDisplayWindow(win, shopId);
+                }
+            }
+        };
 
         const copyTextToClipboard = (text, key = 'modal') => {
             if (!text) return;
@@ -28657,11 +28678,11 @@
         };
 
         const generatedModalDisplayLink = useMemo(
-            () => buildDeviceDisplayLink(deviceFormData.deviceId, deviceFormData.shopId),
-            [deviceFormData.deviceId, deviceFormData.shopId, buildDeviceDisplayLink]
+            () => buildDeviceDisplayLink(deviceFormData.deviceId, deviceFormData.shopId, deviceFormData.hostUrl),
+            [deviceFormData.deviceId, deviceFormData.shopId, deviceFormData.hostUrl, buildDeviceDisplayLink]
         );
 
-        // Enriched Device List filtered by shop permissions & selected shop
+        // Enriched Device List filtered by shop permissions & selected shop (aligned with POS-KHRQ.html `lastSeenAt` & `deviceModel`)
         const enrichedDevicesList = useMemo(() => {
             const devicesObj = registryData.devices || {};
             const blockedSet = new Set(registryData.blockedDeviceIds || []);
@@ -28678,17 +28699,18 @@
                 })
                 .map(dev => {
                     const shopObj = (shops || []).find(s => s.id === dev.shopId);
-                    const isRevoked = dev.status === 'REVOKED' || blockedSet.has(dev.deviceId) || !!revokedMap[dev.deviceId];
-                    const lastSeenMs = Number(dev.lastSeen || dev.lastHeartbeat || 0);
-                    const isOnline = !isRevoked && (dev.status === 'ONLINE' || (lastSeenMs > 0 && (now - lastSeenMs) < 120000));
+                    const isRevoked = dev.status === 'REVOKED' || dev.remoteLock === true || blockedSet.has(dev.deviceId) || !!revokedMap[dev.deviceId];
+                    const lastSeenMs = Number(dev.lastSeenAt || dev.lastSeen || dev.lastHeartbeat || 0);
+                    const isOnline = !isRevoked && ((lastSeenMs > 0 && (now - lastSeenMs) < 150000) || (dev.status === 'ONLINE' && lastSeenMs === 0));
                     return {
                         ...dev,
                         resolvedShopName: shopObj?.name || dev.shopName || 'Unassigned',
+                        lastSeenMs,
                         isRevoked,
                         isOnline
                     };
                 })
-                .sort((a, b) => (Number(b.registeredAt) || 0) - (Number(a.registeredAt) || 0));
+                .sort((a, b) => (Number(b.lastSeenMs || b.registeredAt) || 0) - (Number(a.lastSeenMs || a.registeredAt) || 0));
         }, [registryData, availableShops, isSuper, selectedShopId, shops]);
 
         // Device Registration Handlers
@@ -28696,13 +28718,24 @@
             const defaultShopId = selectedShopId !== 'All'
                 ? selectedShopId
                 : (availableShops[0]?.id || '');
-            setDeviceFormData({ deviceId: generateNewDeviceId(), shopId: defaultShopId, note: '' });
+            setDeviceFormData({
+                deviceId: generateNewDeviceId(),
+                shopId: defaultShopId,
+                note: '',
+                hostUrl: registryData.displayHostUrl || DEFAULT_KHQR_HOST_URL
+            });
             setEditingDeviceId(null);
             setShowRegisterModal(true);
         };
 
         const handleOpenEdit = (dev) => {
-            setDeviceFormData({ deviceId: dev.deviceId, shopId: dev.shopId || '', note: dev.note || '' });
+            const existingHost = dev.displayUrl ? normalizeHostUrl(dev.displayUrl) : (registryData.displayHostUrl || DEFAULT_KHQR_HOST_URL);
+            setDeviceFormData({
+                deviceId: dev.deviceId,
+                shopId: dev.shopId || '',
+                note: dev.note || '',
+                hostUrl: existingHost
+            });
             setEditingDeviceId(dev.deviceId);
             setShowRegisterModal(true);
         };
@@ -28716,7 +28749,8 @@
                 const targetId = deviceFormData.deviceId.trim().toUpperCase();
                 const existing = registryData.devices?.[targetId] || {};
                 const shopObj = (shops || []).find(s => s.id === deviceFormData.shopId);
-                const generatedDisplayUrl = buildDeviceDisplayLink(targetId, deviceFormData.shopId);
+                const cleanHostUrl = normalizeHostUrl(deviceFormData.hostUrl);
+                const generatedDisplayUrl = buildDeviceDisplayLink(targetId, deviceFormData.shopId, cleanHostUrl);
 
                 const updatedDev = {
                     ...existing,
@@ -28731,6 +28765,7 @@
                 };
 
                 await registryRef.set({
+                    displayHostUrl: cleanHostUrl,
                     devices: {
                         ...(registryData.devices || {}),
                         [targetId]: updatedDev
@@ -28738,7 +28773,7 @@
                     updatedAt: Date.now()
                 }, { merge: true });
 
-                triggerSecToast(`Device ${targetId} ${editingDeviceId ? 'updated' : 'registered'} & display link generated!`);
+                triggerSecToast(`Device ${targetId} ${editingDeviceId ? 'updated' : 'registered'} & KHQR Display link generated!`);
                 setShowRegisterModal(false);
                 if (!editingDeviceId) {
                     setShareLinkDevice({
@@ -28810,6 +28845,7 @@
                     nextBlocked.delete(id);
                     delete nextRevoked[id];
                     await registryRef.set({
+                        displayHostUrl: registryData.displayHostUrl || DEFAULT_KHQR_HOST_URL,
                         devices: nextDevices,
                         blockedDeviceIds: Array.from(nextBlocked),
                         revokedDevices: nextRevoked,
@@ -28869,7 +28905,7 @@
                             <span>KHQR Display Device Security &amp; Anti-Theft Manager</span>
                         </h2>
                         <p className="text-xs sm:text-sm text-slate-400 mt-1">
-                            Register customer display tablets, generate assigned KHQR Display links, and remotely lock or wipe stolen devices.
+                            Register customer display tablets, generate assigned <code className="font-mono text-sky-300">POS-KHRQ.html</code> links, and remotely lock or wipe stolen devices.
                         </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
@@ -28938,7 +28974,7 @@
                     </div>
                 )}
 
-                {/* Device Register Modal (With Live KHQR Display Device Link & Pairing QR) */}
+                {/* Device Register Modal (With Configurable Hosting Link, Live Generated Device URL & Pairing QR) */}
                 {showRegisterModal && (
                     <div className="fixed inset-0 bg-stone-950/75 backdrop-blur-sm z-[260] flex items-center justify-center p-4 animate-fade-in-up overflow-y-auto">
                         <form onSubmit={handleSaveDevice} className="bg-white rounded-3xl w-full max-w-lg p-6 shadow-2xl border border-stone-200 relative my-auto max-h-[92vh] overflow-y-auto">
@@ -28950,7 +28986,7 @@
                                 <i className="fa-solid fa-tablet-screen-button text-blue-600"></i>
                                 {editingDeviceId ? 'Edit Device & Display Link' : 'Register New Device'}
                             </h3>
-                            <p className="text-xs text-stone-500 mb-5">Register a device ID to authorize it and generate its dedicated KHQR Display link.</p>
+                            <p className="text-xs text-stone-500 mb-5">Register a device ID, assign it to a shop, and generate its functional KHQR Display link.</p>
 
                             <div className="space-y-4 mb-5">
                                 <div>
@@ -28970,7 +29006,7 @@
                                     <input
                                         type="text"
                                         required
-                                        placeholder="e.g. SLR-DEV-123456"
+                                        placeholder="e.g. SLR-DEV-A1B2C3"
                                         value={deviceFormData.deviceId}
                                         onChange={e => setDeviceFormData({ ...deviceFormData, deviceId: e.target.value.toUpperCase() })}
                                         className="w-full border border-stone-300 rounded-xl px-3.5 py-2.5 text-sm font-bold font-mono text-stone-800 bg-stone-50 outline-none focus:border-blue-600 focus:bg-white transition read-only:opacity-75"
@@ -28990,7 +29026,18 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">Notes (Optional)</label>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">KHQR Display Hosting URL *</label>
+                                    <input
+                                        type="url"
+                                        required
+                                        placeholder={DEFAULT_KHQR_HOST_URL}
+                                        value={deviceFormData.hostUrl}
+                                        onChange={e => setDeviceFormData({ ...deviceFormData, hostUrl: e.target.value })}
+                                        className="w-full border border-stone-300 rounded-xl px-3.5 py-2 text-xs font-mono font-bold text-stone-700 bg-stone-50 outline-none focus:border-blue-600 focus:bg-white transition"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-stone-600 mb-1">Device Label / Notes (Optional)</label>
                                     <input
                                         type="text"
                                         placeholder="e.g. Front Counter iPad"
@@ -29024,7 +29071,7 @@
                                                 {window.SolarisKHQREngine && (
                                                     <div className="bg-white p-2 rounded-xl border border-blue-200 shadow-sm shrink-0">
                                                         <img
-                                                            src={window.SolarisKHQREngine.renderInstantQRDataURL(generatedModalDisplayLink, 140, 1, 'M')}
+                                                            src={window.SolarisKHQREngine.renderInstantQRDataURL(generatedModalDisplayLink, 150, 1, 'M')}
                                                             alt="Device Pairing QR"
                                                             className="w-24 h-24 object-contain"
                                                         />
@@ -29032,7 +29079,7 @@
                                                 )}
                                                 <div className="flex-1 w-full space-y-2">
                                                     <p className="text-[11px] text-stone-600 leading-relaxed">
-                                                        Copy this link or scan the QR code on any iPad, Android tablet, or secondary monitor to bind it as this shop's KHQR Customer Display.
+                                                        Copy this link or scan the QR code on any iPad, Android tablet, or secondary display to pair it directly to this shop.
                                                     </p>
                                                     <div className="flex flex-wrap gap-2">
                                                         <button
@@ -29045,7 +29092,7 @@
                                                         </button>
                                                         <button
                                                             type="button"
-                                                            onClick={() => window.open(generatedModalDisplayLink, '_blank')}
+                                                            onClick={() => launchDisplayWindow(generatedModalDisplayLink, deviceFormData.shopId)}
                                                             className="py-2 px-3 rounded-xl bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
                                                             title="Open KHQR Display in New Tab"
                                                         >
@@ -29130,11 +29177,11 @@
                                     <button
                                         type="button"
                                         disabled={!deviceLink}
-                                        onClick={() => window.open(deviceLink, '_blank')}
+                                        onClick={() => launchDisplayWindow(deviceLink, shareLinkDevice.shopId)}
                                         className="py-2.5 px-4 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 disabled:opacity-50"
                                     >
                                         <i className="fa-solid fa-up-right-from-square"></i>
-                                        <span>Open</span>
+                                        <span>Launch</span>
                                     </button>
                                 </div>
                             </div>
@@ -29155,10 +29202,10 @@
                         <table className="w-full text-left border-collapse">
                             <thead className="bg-stone-50 border-b border-stone-200 text-[11px] font-black uppercase tracking-wider text-stone-500">
                                 <tr>
-                                    <th className="p-3.5">Device ID &amp; Note</th>
+                                    <th className="p-3.5">Device ID &amp; Hardware</th>
                                     <th className="p-3.5">Assigned Shop</th>
                                     <th className="p-3.5 text-center">Status</th>
-                                    <th className="p-3.5">Registered</th>
+                                    <th className="p-3.5">Last Seen / Registered</th>
                                     <th className="p-3.5 text-right">Actions &amp; Link</th>
                                 </tr>
                             </thead>
@@ -29166,11 +29213,13 @@
                                 {enrichedDevicesList.map(dev => {
                                     const isRevoked = dev.isRevoked;
                                     const isOnline = dev.isOnline;
+                                    const deviceLink = dev.displayUrl || buildDeviceDisplayLink(dev.deviceId, dev.shopId);
                                     return (
                                         <tr key={dev.deviceId} className={`hover:bg-stone-50 transition ${isRevoked ? 'bg-red-50/40' : ''}`}>
                                             <td className="p-3.5 align-middle">
                                                 <div className="font-mono font-black text-stone-900">{dev.deviceId}</div>
-                                                {dev.note && <div className="text-[11px] text-stone-500">{dev.note}</div>}
+                                                {dev.note && <div className="text-[11px] font-semibold text-stone-600">{dev.note}</div>}
+                                                {dev.deviceModel && <div className="text-[10px] text-stone-400">{dev.deviceModel}</div>}
                                             </td>
                                             <td className="p-3.5 align-middle font-bold text-stone-700 whitespace-nowrap">
                                                 <i className="fa-solid fa-store text-blue-500 mr-1.5 text-xs"></i>
@@ -29192,15 +29241,18 @@
                                                 )}
                                             </td>
                                             <td className="p-3.5 align-middle text-xs text-stone-500 whitespace-nowrap">
-                                                <div>{dev.registeredAt ? safeFormatDateTime(dev.registeredAt) : '-'}</div>
+                                                {dev.lastSeenMs > 0 ? (
+                                                    <div>Seen: <span className="font-mono font-semibold text-stone-700">{safeFormatDateTime(dev.lastSeenMs)}</span></div>
+                                                ) : (
+                                                    <div>Reg: {dev.registeredAt ? safeFormatDateTime(dev.registeredAt) : '-'}</div>
+                                                )}
                                                 {dev.registeredBy && <div className="text-[10px] text-stone-400">by {dev.registeredBy}</div>}
                                             </td>
                                             <td className="p-3.5 align-middle text-right whitespace-nowrap space-x-1.5">
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        const link = dev.displayUrl || buildDeviceDisplayLink(dev.deviceId, dev.shopId);
-                                                        if (link) copyTextToClipboard(link, dev.deviceId);
+                                                        if (deviceLink) copyTextToClipboard(deviceLink, dev.deviceId);
                                                         else triggerSecToast('Assign a shop to this device first.');
                                                     }}
                                                     className={`w-8 h-8 rounded-lg border transition ${
@@ -29219,6 +29271,17 @@
                                                     title="Show Pairing QR & Display Link"
                                                 >
                                                     <i className="fas fa-qrcode"></i>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (deviceLink) launchDisplayWindow(deviceLink, dev.shopId);
+                                                        else triggerSecToast('Assign a shop to this device first.');
+                                                    }}
+                                                    className="w-8 h-8 rounded-lg bg-emerald-50 hover:bg-emerald-600 text-emerald-600 hover:text-white border border-emerald-200 transition"
+                                                    title="Open KHQR Display in New Tab"
+                                                >
+                                                    <i className="fas fa-up-right-from-square"></i>
                                                 </button>
                                                 <button type="button" onClick={() => handleOpenEdit(dev)} className="w-8 h-8 rounded-lg bg-stone-100 hover:bg-blue-100 text-stone-600 hover:text-blue-600 border border-stone-200 transition" title="Edit Device">
                                                     <i className="fas fa-edit"></i>
