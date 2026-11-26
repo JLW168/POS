@@ -4918,11 +4918,10 @@
 
                 writePromise
                     .then(() => {
-                        // Clear the local optimistic override once Firestore confirms the write
-                        // so subsequent atomic updates (like PO Audit stock increments) are never overwritten by stale local copies
-                        if (collectionName === 'products') {
-                            this.clearOverride(collectionName, finalId);
-                        }
+                        // Clear the local/RAM optimistic override once Firestore confirms persistence
+                        // so subsequent updates (PO Audit, KHQR config, Receipt Template, etc.) are never masked by stale copies
+                        this.clearOverride(collectionName, finalId);
+                        this.notify(collectionName);
                     })
                     .catch(err => {
                         const msg = err?.message || '';
@@ -5142,6 +5141,31 @@
     const formatDateDDMMYYYY = (dateObj) => {
         if (!dateObj) return 'N/A';
         return safeFormatDateTime(dateObj, 'N/A');
+    };
+
+    // Parses an HTML <input type="date"> string ("YYYY-MM-DD") strictly in LOCAL time to prevent UTC offset day shifts
+    const parseLocalDateInput = (dateStr, endOfDay = false) => {
+        if (!dateStr) return new Date();
+        if (dateStr instanceof Date) {
+            const d = new Date(dateStr.getTime());
+            if (endOfDay) d.setHours(23, 59, 59, 999);
+            else d.setHours(0, 0, 0, 0);
+            return d;
+        }
+        const match = String(dateStr).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (match) {
+            const y = parseInt(match[1], 10);
+            const m = parseInt(match[2], 10) - 1;
+            const day = parseInt(match[3], 10);
+            return endOfDay
+                ? new Date(y, m, day, 23, 59, 59, 999)
+                : new Date(y, m, day, 0, 0, 0, 0);
+        }
+        const fallback = new Date(dateStr);
+        if (isNaN(fallback.getTime())) return new Date();
+        if (endOfDay) fallback.setHours(23, 59, 59, 999);
+        else fallback.setHours(0, 0, 0, 0);
+        return fallback;
     };
 
     // Generates a unique, non-duplicate product code.
@@ -7301,6 +7325,7 @@
         const [thankYouData, setThankYouData] = useState(null);
         const [isProcessing, setIsProcessing] = useState(false);
         const [posAlert, setPosAlert] = useState({ show: false, title: '', message: '', isError: false });
+        const paidDisplayCooldownUntilRef = useRef(0);
 
         const showPosAlert = useCallback((title, message, isError = false) => {
             setPosAlert({ show: true, title, message, isError });
@@ -7329,29 +7354,44 @@
 
             const unsub = query.onSnapshot(snap => {
                 const openShifts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                const matched = currentDeviceId
+                const matchedShift = currentDeviceId
                     ? (openShifts.find(s => s.deviceId === currentDeviceId) || openShifts[0] || null)
                     : (openShifts[0] || null);
-                if (matched) {
-                    handleShiftStateChange(matched);
+                if (matchedShift) {
+                    handleShiftStateChange(matchedShift);
                 } else {
-                    setCurrentShift(prev => {
-                        if (prev && prev.status === 'open') {
-                            try { localStorage.removeItem(shiftStorageKey); } catch (e) {}
-                            return null;
-                        }
-                        return prev;
-                    });
+                    handleShiftStateChange(null);
                 }
             }, () => {});
             return () => unsub();
         }, [selectedShopId, currentDeviceId, shiftStorageKey, handleShiftStateChange]);
 
-        // Listen for Today's Sales (shared by History, Daily Report & Close Shift)
+        // Listen for Today's Sales (shared by History, Daily Report & Close Shift) with automatic midnight rollover
+        const [todayDateKey, setTodayDateKey] = useState(() => new Date().toLocaleDateString('en-CA'));
+
+        useEffect(() => {
+            const syncTodayKey = () => {
+                const currentKey = new Date().toLocaleDateString('en-CA');
+                setTodayDateKey(prev => (prev === currentKey ? prev : currentKey));
+            };
+
+            const now = new Date();
+            const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2, 0);
+            const msUntilMidnight = Math.max(1000, nextMidnight.getTime() - now.getTime());
+            const midnightTimer = setTimeout(syncTodayKey, msUntilMidnight);
+
+            window.addEventListener('focus', syncTodayKey);
+            document.addEventListener('visibilitychange', syncTodayKey);
+            return () => {
+                clearTimeout(midnightTimer);
+                window.removeEventListener('focus', syncTodayKey);
+                document.removeEventListener('visibilitychange', syncTodayKey);
+            };
+        }, [todayDateKey]);
+
         useEffect(() => {
             if (!selectedShopId) return;
-            const startOfToday = new Date();
-            startOfToday.setHours(0, 0, 0, 0);
+            const startOfToday = parseLocalDateInput(todayDateKey, false);
 
             const mergeToday = (cloudDocs = []) => {
                 const map = new Map();
@@ -7384,7 +7424,7 @@
                     setTodaySalesLoading(false);
                 });
             return () => unsub();
-        }, [selectedShopId]);
+        }, [selectedShopId, todayDateKey]);
 
         // Listen for Held Tickets for this Shop
         useEffect(() => {
@@ -7460,8 +7500,9 @@
             if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
                 return Math.floor(cartTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints);
             }
-            return 0;
-        }, [selectedCustomerObj, cartTotal, activeLoyaltyRule]);
+            const legacyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
+            return legacyRate > 0 ? Math.floor(cartTotal * (legacyRate / 100)) : 0;
+        }, [selectedCustomerObj, cartTotal, activeLoyaltyRule, systemConfig?.loyaltyRate]);
 
         const filteredCustomers = useMemo(() => {
             if (!customers) return [];
@@ -7479,18 +7520,38 @@
         useEffect(() => {
             if (!selectedShopId || showPaymentModal || !window.SolarisPayWayVerifier) return;
             const rate = Math.max(100, Number(currentShopObj?.khqrConfig?.exchangeRate) || 4000);
+            const shopDisplayName = currentShopObj?.brandingName || currentShopObj?.name || systemConfig?.appName || 'POS Terminal';
+
             if (cart.length === 0) {
+                const remainingCooldownMs = paidDisplayCooldownUntilRef.current - Date.now();
+                if (remainingCooldownMs > 0) {
+                    // Hold IDLE broadcast so POS-KHRQ.html can finish its PAID Thank You screen & voice announcement
+                    const timer = setTimeout(() => {
+                        if (Date.now() >= paidDisplayCooldownUntilRef.current) {
+                            window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
+                                status: 'IDLE',
+                                shopId: selectedShopId,
+                                shopName: shopDisplayName,
+                                exchangeRate: rate
+                            });
+                        }
+                    }, remainingCooldownMs + 100);
+                    return () => clearTimeout(timer);
+                }
+
                 window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
                     status: 'IDLE',
                     shopId: selectedShopId,
-                    shopName: currentShopObj?.brandingName || currentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                    shopName: shopDisplayName,
                     exchangeRate: rate
                 });
             } else {
+                // Scanning or adding a new item for the next customer immediately exits any PAID cooldown
+                paidDisplayCooldownUntilRef.current = 0;
                 window.SolarisPayWayVerifier.broadcastCustomerDisplaySession(selectedShopId, {
                     status: 'CART',
                     shopId: selectedShopId,
-                    shopName: currentShopObj?.brandingName || currentShopObj?.name || systemConfig?.appName || 'POS Terminal',
+                    shopName: shopDisplayName,
                     exchangeRate: rate,
                     items: cart,
                     itemCount: cartItemCount,
@@ -7707,6 +7768,11 @@
                 if (selectedCustomerObj && grandTotal > 0) {
                     if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
                         pointsEarned = Math.floor(grandTotal / Number(activeLoyaltyRule.spendAmountKhr)) * Number(activeLoyaltyRule.earnPoints);
+                    } else {
+                        const legacyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
+                        if (legacyRate > 0) {
+                            pointsEarned = Math.floor(grandTotal * (legacyRate / 100));
+                        }
                     }
                 }
                 const pointsRedeemed = Number(paymentInfo.pointsRedeemed) || 0;
@@ -7774,10 +7840,12 @@
                         if (!item.productId) return;
                         const qty = Number(item.quantity) || 1;
                         const prodRef = db.collection('products').doc(item.productId);
-                        batch.update(prodRef, {
-                            [`stockByShop.${selectedShopId}`]: firebase.firestore.FieldValue.increment(-qty),
+                        batch.set(prodRef, {
+                            stockByShop: {
+                                [selectedShopId]: firebase.firestore.FieldValue.increment(-qty)
+                            },
                             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                        });
+                        }, { merge: true });
                         if (window.SolarisSmartProductEngine) {
                             window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, selectedShopId, -qty);
                         }
@@ -7824,6 +7892,11 @@
                         setPendingSyncCount(c => Math.max(0, c - 1));
                         setIsSyncing(false);
                     });
+
+                // Preserve Customer Display PAID Thank You screen & voice announcement for 6.5s before sending IDLE
+                if (verifiedAba || !isCash) {
+                    paidDisplayCooldownUntilRef.current = Date.now() + 6500;
+                }
 
                 setShowPaymentModal(false);
                 setCart([]);
@@ -7913,6 +7986,17 @@
                         onReprint={(sale) => { setShowSalesHistory(false); setCompletedSaleForReceipt(sale); }}
                         onSaleVoided={(voidedSale) => {
                             setTodaySales(prev => prev.map(s => s.id === voidedSale.id ? { ...s, status: 'void' } : s));
+                            if (currentShift && voidedSale && (!voidedSale.shiftId || voidedSale.shiftId === currentShift.id)) {
+                                const voidAmt = Number(voidedSale.grandTotal) || 0;
+                                const wasCash = voidedSale.paymentMethod === 'Cash';
+                                handleShiftStateChange({
+                                    ...currentShift,
+                                    totalSales: Math.max(0, (Number(currentShift.totalSales) || 0) - voidAmt),
+                                    transactionCount: Math.max(0, (Number(currentShift.transactionCount) || 0) - 1),
+                                    totalCashSales: Math.max(0, (Number(currentShift.totalCashSales) || 0) - (wasCash ? voidAmt : 0)),
+                                    totalKHQRSales: Math.max(0, (Number(currentShift.totalKHQRSales) || 0) - (!wasCash ? voidAmt : 0))
+                                });
+                            }
                         }}
                         onClose={() => setShowSalesHistory(false)}
                     />
@@ -12397,20 +12481,15 @@
                                                         {new Intl.NumberFormat('en-US').format(lineTotal)} ៛
                                                     </div>
                                                 </div>
-                                                {item.note && (
-                                                    <div className="text-[10px] italic text-gray-600 pl-2">
-                                                        * {item.note}
-                                                    </div>
-                                                )}
                                             </div>
                                         );
                                     })}
 
-                                    {/* Loyalty Reward Claim Row (if points were redeemed) */}
-                                    {redemptionVal > 0 && (
+                                    {/* Loyalty Reward Claim Row (only if claimed reward item is not already listed in saleData.items) */}
+                                    {redemptionVal > 0 && saleData.rewardProductClaimed && !(saleData.items || []).some(it => it.name === saleData.rewardProductClaimed) && (
                                         <div className="flex justify-between items-baseline font-bold text-[#e11d48]">
                                             <span className="pr-2">
-                                                1x {saleData.rewardProductClaimed ? `${saleData.rewardProductClaimed}` : 'Loyalty Reward'}{' '}
+                                                1x {saleData.rewardProductClaimed}{' '}
                                                 <span className="text-[10px] uppercase">(FREE CLAIM)</span>
                                             </span>
                                             <span className="whitespace-nowrap">0 ៛</span>
@@ -12420,7 +12499,7 @@
 
                                 <div className="border-b border-dashed border-gray-400 my-2.5"></div>
 
-                                {/* Discount & Grand Total */}
+                                {/* Discount, Loyalty Redemption & Grand Total */}
                                 <div className="space-y-1">
                                     {manualDiscountVal > 0 && (
                                         <div className="flex justify-between items-baseline font-semibold text-[#e11d48] text-[12px]">
@@ -12428,6 +12507,17 @@
                                                 Discount{discountPct > 0 ? ` (${discountPct}%)` : ''}
                                             </span>
                                             <span>-{new Intl.NumberFormat('en-US').format(manualDiscountVal)} ៛</span>
+                                        </div>
+                                    )}
+
+                                    {redemptionVal > 0 && (
+                                        <div className="flex justify-between items-baseline font-semibold text-[#e11d48] text-[12px]">
+                                            <span className="pr-2 truncate">
+                                                {saleData.rewardProductClaimed
+                                                    ? `Loyalty Reward (${saleData.rewardProductClaimed})`
+                                                    : `Loyalty Redeem (${saleData.pointsRedeemed || redemptionVal} Pts)`}
+                                            </span>
+                                            <span className="whitespace-nowrap">-{new Intl.NumberFormat('en-US').format(redemptionVal)} ៛</span>
                                         </div>
                                     )}
 
@@ -12591,21 +12681,24 @@
                 
                 // 1. Update Sale Status
                 const saleRef = db.collection('sales').doc(sale.id);
-                batch.update(saleRef, { 
+                batch.set(saleRef, { 
                     status: 'void', 
                     voidedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     voidedBy: userProfile?.name || 'Unknown',
                     voidReason: reason
-                });
+                }, { merge: true });
 
-                // 2. Restore Stock
+                // 2. Restore Stock (merge-safe so missing stockByShop maps never abort the void batch)
                 const targetShopId = sale.shopId || shopId;
                 sale.items.forEach(item => {
+                    if (!item.productId) return;
                     const productRef = db.collection('products').doc(item.productId);
-                    batch.update(productRef, {
-                        [`stockByShop.${targetShopId}`]: firebase.firestore.FieldValue.increment(item.quantity),
+                    batch.set(productRef, {
+                        stockByShop: {
+                            [targetShopId]: firebase.firestore.FieldValue.increment(item.quantity)
+                        },
                         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                    });
+                    }, { merge: true });
                     if (window.SolarisSmartProductEngine) {
                         window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, targetShopId, item.quantity);
                     }
@@ -12643,7 +12736,7 @@
                         custUpdate.points = firebase.firestore.FieldValue.increment(netPointsReversal);
                     }
 
-                    batch.update(custRef, custUpdate);
+                    batch.set(custRef, custUpdate, { merge: true });
                 }
 
                 // 5. Reverse Shift Totals (if shiftId is recorded on the sale)
@@ -14605,16 +14698,17 @@
                 const now = new Date();
                 
                 if (lossReportId) {
-                    // --- UPDATE EXISTING LOSS REPORT ---
                     const reportRef = db.collection('lossReports').doc(lossReportId);
-                    
-                    // 1. Revert original stock
+                    // 1. Revert original stock (merge-safe)
                     originalLossItems.forEach(item => {
+                        if (!item.productId) return;
                         const prodRef = db.collection('products').doc(item.productId);
-                        batch.update(prodRef, {
-                            [`stockByShop.${oldLossShopInfo.id}`]: firebase.firestore.FieldValue.increment(item.quantity),
+                        batch.set(prodRef, {
+                            stockByShop: {
+                                [oldLossShopInfo.id]: firebase.firestore.FieldValue.increment(item.quantity)
+                            },
                             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                        });
+                        }, { merge: true });
                         if (window.SolarisSmartProductEngine) {
                             window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, oldLossShopInfo.id, item.quantity);
                         }
@@ -14635,13 +14729,16 @@
                         });
                     });
 
-                    // 2. Apply new stock
+                    // 2. Apply new stock (merge-safe)
                     items.forEach(item => {
+                        if (!item.productId) return;
                         const prodRef = db.collection('products').doc(item.productId);
-                        batch.update(prodRef, {
-                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                        batch.set(prodRef, {
+                            stockByShop: {
+                                [shopId]: firebase.firestore.FieldValue.increment(-item.quantity)
+                            },
                             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                        });
+                        }, { merge: true });
                         if (window.SolarisSmartProductEngine) {
                             window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, shopId, -item.quantity);
                         }
@@ -14693,11 +14790,14 @@
                     });
 
                     items.forEach(item => {
+                        if (!item.productId) return;
                         const prodRef = db.collection('products').doc(item.productId);
-                        batch.update(prodRef, {
-                            [`stockByShop.${shopId}`]: firebase.firestore.FieldValue.increment(-item.quantity),
+                        batch.set(prodRef, {
+                            stockByShop: {
+                                [shopId]: firebase.firestore.FieldValue.increment(-item.quantity)
+                            },
                             updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                        });
+                        }, { merge: true });
                         if (window.SolarisSmartProductEngine) {
                             window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, shopId, -item.quantity);
                         }
@@ -15182,10 +15282,8 @@
                         break;
                     case 'custom':
                         if (customStartDate && customEndDate) {
-                            startDate = new Date(customStartDate);
-                            startDate.setHours(0, 0, 0, 0);
-                            endDate = new Date(customEndDate);
-                            endDate.setHours(23, 59, 59, 999);
+                            startDate = parseLocalDateInput(customStartDate, false);
+                            endDate = parseLocalDateInput(customEndDate, true);
                         }
                         break;
                 }
@@ -16415,18 +16513,9 @@
                 }
 
                 if (window.SolarisCollectionMutator) {
-                    window.SolarisCollectionMutator.upsertDoc("purchaseOrders", poDataToAudit.id, {
-                        status: 'audited',
-                        items: itemsToSave,
-                        totalAuditedAmount: totalAuditedAmountKHR,
-                        exchangeRate: parseFloat(exchangeRate),
-                        auditedBy: auditedByName,
-                        approvedBy: userProfile?.name || auditedByName,
-                        approvedByRole: userProfile?.role || 'Admin',
-                        approvedAt: new Date().toISOString(),
-                        auditedAt: new Date().toISOString(),
-                        updatedAt: new Date().toISOString()
-                    }, false);
+                    // batch.commit() already persisted the audited PO to Firestore; clear any stale local override instead of re-writing
+                    window.SolarisCollectionMutator.clearOverride("purchaseOrders", poDataToAudit.id);
+                    window.SolarisCollectionMutator.notify("purchaseOrders");
                 }
 
                 setModalInfo({
@@ -16860,9 +16949,12 @@
 
     // --- Loss & Breakage Log Page ---
     const LossBreakagePage = ({ userProfile, setPage }) => {
+        const { shops } = useData();
         const [reports, setReports] = useState([]);
         const [loading, setLoading] = useState(true);
         const [deleteTarget, setDeleteTarget] = useState(null);
+        const [isDeleting, setIsDeleting] = useState(false);
+        const [modalInfo, setModalInfo] = useState({ show: false, title: '', message: '', isError: false });
 
         useEffect(() => {
             const unsub = db.collection('lossReports').orderBy('createdAt', 'desc').limit(100).onSnapshot(snap => {
@@ -16878,19 +16970,95 @@
         }, [userProfile]);
 
         const handleDeleteLoss = async () => {
-            if (!deleteTarget) return;
-            try {
-                await db.collection('lossReports').doc(deleteTarget.id).delete();
-            } catch (e) {}
+            if (!deleteTarget || isDeleting) return;
+            const target = deleteTarget;
+            setIsDeleting(true);
             setDeleteTarget(null);
+
+            try {
+                const batch = db.batch();
+                batch.delete(db.collection('lossReports').doc(target.id));
+
+                const targetShop = (shops || []).find(s => s.id === target.shopId);
+                const shouldRestoreStock = !!target.shopId && (!targetShop || targetShop.manageStock !== false);
+                const restoredDeltas = [];
+
+                if (shouldRestoreStock && Array.isArray(target.items)) {
+                    target.items.forEach(item => {
+                        const qty = Number(item.quantity) || 0;
+                        if (!item.productId || qty <= 0) return;
+
+                        // Restore written-off stock merge-safely
+                        const prodRef = db.collection('products').doc(item.productId);
+                        batch.set(prodRef, {
+                            stockByShop: {
+                                [target.shopId]: firebase.firestore.FieldValue.increment(qty)
+                            },
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        }, { merge: true });
+                        restoredDeltas.push({ productId: item.productId, qty });
+
+                        // Record audit reversal in productMovement
+                        const moveRef = db.collection('productMovement').doc();
+                        batch.set(moveRef, {
+                            productId: item.productId,
+                            productCode: item.code || '',
+                            productName: item.name || '',
+                            type: 'Loss Delete Reversal',
+                            reason: 'Loss Report Deleted — Stock Restored',
+                            quantityChange: qty,
+                            from: 'Written Off',
+                            to: target.shopName || targetShop?.name || 'Shop',
+                            referenceNo: `${target.reportNo || target.id} (DEL)`,
+                            performedBy: userProfile?.name || 'Admin',
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                    });
+                }
+
+                await batch.commit();
+
+                // Sync restored stock into IndexedDB & RAM product cache immediately
+                if (window.SolarisSmartProductEngine) {
+                    restoredDeltas.forEach(({ productId, qty }) => {
+                        window.SolarisSmartProductEngine.applyLocalStockDelta(productId, target.shopId, qty);
+                    });
+                }
+
+                setModalInfo({
+                    show: true,
+                    title: 'Loss Report Deleted',
+                    message: restoredDeltas.length > 0
+                        ? `Deleted ${target.reportNo || 'loss report'} and restored stock for ${restoredDeltas.length} item(s).`
+                        : `Deleted ${target.reportNo || 'loss report'} successfully.`,
+                    isError: false
+                });
+            } catch (err) {
+                console.error('Failed to delete loss report:', err);
+                setModalInfo({
+                    show: true,
+                    title: 'Delete Error',
+                    message: err?.message || 'Failed to delete loss report and restore stock.',
+                    isError: true
+                });
+            } finally {
+                setIsDeleting(false);
+            }
         };
 
         return (
             <div className="space-y-4">
+                <MessageModal
+                    show={modalInfo.show}
+                    title={modalInfo.title}
+                    message={modalInfo.message}
+                    isError={modalInfo.isError}
+                    onClose={() => setModalInfo({ show: false, title: '', message: '', isError: false })}
+                />
                 <ConfirmationModal
                     show={!!deleteTarget}
-                    title="Delete Loss Report"
-                    message={`Delete loss report ${deleteTarget?.reportNo || ''}?`}
+                    title="Delete Loss Report & Restore Stock"
+                    message={`Delete loss report ${deleteTarget?.reportNo || ''}? Written-off quantities will be restored to ${deleteTarget?.shopName || 'the shop'}'s stock and logged as a reversal.`}
                     onConfirm={handleDeleteLoss}
                     onCancel={() => setDeleteTarget(null)}
                 />
@@ -17312,10 +17480,8 @@
 
         useEffect(() => {
             setLoading(true);
-            const start = new Date(startDate);
-            start.setHours(0, 0, 0, 0);
-            const end = new Date(endDate);
-            end.setHours(23, 59, 59, 999);
+            const start = parseLocalDateInput(startDate, false);
+            const end = parseLocalDateInput(endDate, true);
 
             const unsubscribe = db.collection('productMovement')
                 .where('timestamp', '>=', start)
@@ -18300,14 +18466,14 @@
 
                 const newTotalAmount = sanitizedItems.reduce((sum, item) => sum + ((item.receivedQty || 0) * (item.cost || 0)), 0);
 
-                // 1. Update the transfer document's status and final item quantities
-                batch.update(transferRef, {
+                // 1. Update the transfer document's status and final item quantities (merge-safe)
+                batch.set(transferRef, {
                     status: 'done',
                     items: sanitizedItems,
                     totalAmount: newTotalAmount,
                     completedAt: firebase.firestore.FieldValue.serverTimestamp(),
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                });
+                }, { merge: true });
 
                 const fromShop = shops.find(s => s.id === transferData.fromShopId);
                 const toShop = shops.find(s => s.id === transferData.toShopId);
@@ -18361,13 +18527,9 @@
                 // 3. Commit all database changes at once
                 await batch.commit();
                 if (window.SolarisCollectionMutator) {
-                    window.SolarisCollectionMutator.upsertDoc("internalTransfers", transferData.id, {
-                        status: 'done',
-                        items: sanitizedItems,
-                        totalAmount: newTotalAmount,
-                        completedAt: new Date().toISOString(),
-                        updatedAt: new Date().toISOString()
-                    }, false);
+                    // batch.commit() already persisted the completed transfer; clear any stale local override instead of re-writing
+                    window.SolarisCollectionMutator.clearOverride("internalTransfers", transferData.id);
+                    window.SolarisCollectionMutator.notify("internalTransfers");
                 }
                 
                 onClose(); // Close the modal on success
@@ -19204,10 +19366,8 @@
         useEffect(() => {
             if (activeTab === 'shifts' || activeTab === 'cash-drop' || activeTab === 'cleared-carts') return;
 
-            const start = new Date(startDate);
-            start.setHours(0, 0, 0, 0);
-            const end = new Date(endDate);
-            end.setHours(23, 59, 59, 999);
+            const start = parseLocalDateInput(startDate, false);
+            const end = parseLocalDateInput(endDate, true);
 
             // Ensure Firestore network is enabled in case an earlier session paused it
             if (db && typeof db.enableNetwork === 'function' && !window.SolarisQuotaGuard?.isTripped) {
@@ -19329,10 +19489,8 @@
 
         useEffect(() => {
             if (activeTab === 'shifts' || activeTab === 'cash-drop') {
-                const start = new Date(startDate);
-                start.setHours(0, 0, 0, 0);
-                const end = new Date(endDate);
-                end.setHours(23, 59, 59, 999);
+                const start = parseLocalDateInput(startDate, false);
+                const end = parseLocalDateInput(endDate, true);
 
                 // Hydrate immediately from local cache in 0ms
                 const initialShifts = applyLocalShiftOverrides([], start, end);
@@ -19697,8 +19855,8 @@
                 setBankStateLoading(true);
             }
 
-            const startMs = new Date(startDate).setHours(0, 0, 0, 0);
-            const endMs = new Date(endDate).setHours(23, 59, 59, 999);
+            const startMs = parseLocalDateInput(startDate, false).getTime();
+            const endMs = parseLocalDateInput(endDate, true).getTime();
             const shopObj = (selectedShopId && selectedShopId !== 'All')
                 ? shops.find(s => s.id === selectedShopId)
                 : null;
@@ -19938,10 +20096,8 @@
         // --- FIXED: Fetch Cleared Carts Log (Merges Local Store + Firestore IndexedDB Cache) ---
         useEffect(() => {
             if (activeTab === 'cleared-carts') {
-                const start = new Date(startDate);
-                start.setHours(0, 0, 0, 0);
-                const end = new Date(endDate);
-                end.setHours(23, 59, 59, 999);
+                const start = parseLocalDateInput(startDate, false);
+                const end = parseLocalDateInput(endDate, true);
 
                 const mergeClearedCarts = (cloudList = []) => {
                     const map = new Map();
@@ -20541,10 +20697,10 @@
 
         // Active Period Length in Days (for Daily Velocity calculations)
         const activePeriodDays = useMemo(() => {
-            const s = new Date(startDate);
-            const e = new Date(endDate);
+            const s = parseLocalDateInput(startDate, false);
+            const e = parseLocalDateInput(endDate, false);
             if (isNaN(s.getTime()) || isNaN(e.getTime())) return 1;
-            const diffDays = Math.floor((e.setHours(0, 0, 0, 0) - s.setHours(0, 0, 0, 0)) / (1000 * 60 * 60 * 24)) + 1;
+            const diffDays = Math.floor((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
             return Math.max(1, diffDays);
         }, [startDate, endDate]);
 
@@ -21295,10 +21451,12 @@
                     Object.entries(qtyDiffByProduct).forEach(([prodId, stockDelta]) => {
                         if (stockDelta !== 0) {
                             const prodRef = db.collection('products').doc(prodId);
-                            batch.update(prodRef, {
-                                [`stockByShop.${origSale.shopId}`]: firebase.firestore.FieldValue.increment(stockDelta),
+                            batch.set(prodRef, {
+                                stockByShop: {
+                                    [origSale.shopId]: firebase.firestore.FieldValue.increment(stockDelta)
+                                },
                                 updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                            });
+                            }, { merge: true });
                             if (window.SolarisSmartProductEngine) {
                                 window.SolarisSmartProductEngine.applyLocalStockDelta(prodId, origSale.shopId, stockDelta);
                             }
@@ -21376,10 +21534,12 @@
                             const qty = Number(item.quantity) || 0;
                             if (qty > 0) {
                                 const prodRef = db.collection('products').doc(item.productId);
-                                batch.update(prodRef, {
-                                    [`stockByShop.${targetSale.shopId}`]: firebase.firestore.FieldValue.increment(qty),
+                                batch.set(prodRef, {
+                                    stockByShop: {
+                                        [targetSale.shopId]: firebase.firestore.FieldValue.increment(qty)
+                                    },
                                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                                });
+                                }, { merge: true });
                                 if (window.SolarisSmartProductEngine) {
                                     window.SolarisSmartProductEngine.applyLocalStockDelta(item.productId, targetSale.shopId, qty);
                                 }
@@ -21411,7 +21571,7 @@
                         if (netReversal !== 0) {
                             custUpdate.points = firebase.firestore.FieldValue.increment(netReversal);
                         }
-                        batch.update(custRef, custUpdate);
+                        batch.set(custRef, custUpdate, { merge: true });
                     }
                 }
 
@@ -24620,10 +24780,12 @@
                     quantityChange = qty - currentStock; // Difference
                 }
 
-                batch.update(productRef, {
-                    [`stockByShop.${shopId}`]: newStockValue,
+                batch.set(productRef, {
+                    stockByShop: {
+                        [shopId]: newStockValue
+                    },
                     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-                });
+                }, { merge: true });
                 if (window.SolarisSmartProductEngine) {
                     window.SolarisSmartProductEngine.applyLocalStockDelta(product.id, shopId, quantityChange);
                 }
@@ -26670,7 +26832,29 @@
 
         const handleSubmit = (e) => { 
             e.preventDefault(); 
-            // 3. Stock, Per-Shop Min Stock & Multi-Shop Price Sanitation (preserves unassigned shops)
+
+            // 1. Validate & auto-resolve Vendor selection so typing without clicking dropdown never saves a blank vendorId
+            let resolvedVendorId = formData.vendorId || '';
+            const trimmedVendorSearch = String(vendorSearch || '').trim();
+            if (!resolvedVendorId && trimmedVendorSearch) {
+                const exactVendor = (vendors || []).find(
+                    v => String(v.name || '').trim().toLowerCase() === trimmedVendorSearch.toLowerCase()
+                );
+                if (exactVendor) {
+                    resolvedVendorId = exactVendor.id;
+                }
+            }
+            if (!resolvedVendorId) {
+                setModalInfo({
+                    show: true,
+                    title: "Valid Vendor Required",
+                    message: "Please select a valid Vendor from the search dropdown before saving this product.",
+                    isError: true
+                });
+                return;
+            }
+
+            // 2. Stock, Per-Shop Min Stock & Multi-Shop Price Sanitation (preserves unassigned shops)
             const sanitizedStock = { ...(formData.stockByShop || {}) };
             const sanitizedMinStockByShop = { ...(formData.minStockByShop || {}) };
             const sanitizedPrices = { ...(formData.priceByShop || {}) };
@@ -26701,9 +26885,10 @@
                 return;
             }
 
-            // 4. Final Save call
+            // 3. Final Save call
             const finalData = {
                 ...formData,
+                vendorId: resolvedVendorId,
                 minStock: fallbackBaseMin,
                 minStockByShop: sanitizedMinStockByShop,
                 stockByShop: sanitizedStock,
@@ -34125,16 +34310,17 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                         const fallbackProfile = {
                             id: firebaseUser.uid,
                             uid: firebaseUser.uid,
-                            name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Admin'),
+                            name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Staff'),
                             email: firebaseUser.email || '',
                             role: 'Admin',
+                            status: 'Active',
+                            assignedShops: [],
                             permissions: ['pos-terminal', 'sales-report', 'customer-management', 'inventory', 'settings']
                         };
                         localStorage.setItem(AUTH_LAST_ACTIVE_TS_KEY, String(Date.now()));
                         setAuthState({ loading: false, userProfile: fallbackProfile });
                     }
                 } else {
-                    sessionStorage.removeItem(AUTH_SESSION_ACTIVE_KEY);
                     if (window.SolarisKHQREngine?.clearRamSettings) {
                         window.SolarisKHQREngine.clearRamSettings();
                     }
@@ -34150,7 +34336,8 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             return () => unsubscribe();
         }, []);
 
-        // Real-time Account Status Guard: Immediately revoke & sign out active session if Admin sets user to Disactive
+        // Real-time Account Status & Live Profile Sync Guard:
+        // Immediately revokes session if Disactive, and syncs live photo/name/role/permissions/shops with 0 extra reads
         useEffect(() => {
             const userDocId = authState.userProfile?.id || authState.userProfile?.uid;
             if (!userDocId) return;
@@ -34160,7 +34347,35 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                 if (liveData.status === 'Disactive' || liveData.status === 'Inactive') {
                     setAuthBlockedMsg('Session Terminated: Your account has been marked Disactive (Resigned / Terminated).');
                     window.safeSignOut();
+                    return;
                 }
+                setAuthState(prev => {
+                    if (!prev.userProfile) return prev;
+                    const updatedProfile = {
+                        ...prev.userProfile,
+                        ...liveData,
+                        id: docSnap.id,
+                        uid: prev.userProfile.uid
+                    };
+                    const prevSig = JSON.stringify({
+                        name: prev.userProfile.name,
+                        role: prev.userProfile.role,
+                        status: prev.userProfile.status,
+                        photoUrl: prev.userProfile.photoUrl,
+                        assignedShops: prev.userProfile.assignedShops,
+                        permissions: prev.userProfile.permissions
+                    });
+                    const nextSig = JSON.stringify({
+                        name: updatedProfile.name,
+                        role: updatedProfile.role,
+                        status: updatedProfile.status,
+                        photoUrl: updatedProfile.photoUrl,
+                        assignedShops: updatedProfile.assignedShops,
+                        permissions: updatedProfile.permissions
+                    });
+                    if (prevSig === nextSig) return prev;
+                    return { ...prev, userProfile: updatedProfile };
+                });
             }, () => {});
             return () => unsubProfile();
         }, [authState.userProfile?.id, authState.userProfile?.uid]);
