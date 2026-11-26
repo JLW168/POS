@@ -5240,6 +5240,24 @@
         return baseMin;
     };
 
+    // Resolves whether a product is assigned / available for a specific shop.
+    // Defaults to true for legacy products where availableByShop[shopId] has not been explicitly set to false.
+    const isProductAvailableForShop = (product, shopId) => {
+        if (!shopId || shopId === 'ALL' || shopId === 'All') return true;
+        return product?.availableByShop?.[shopId] !== false;
+    };
+
+    // Parses Excel/CSV availability cell values into a boolean (Yes/True/1/Assigned -> true, No/False/0/Unassigned -> false)
+    const parseExcelAvailabilityValue = (rawVal) => {
+        if (rawVal === undefined || rawVal === null || rawVal === '') return null;
+        if (typeof rawVal === 'boolean') return rawVal;
+        if (typeof rawVal === 'number') return rawVal !== 0;
+        const clean = String(rawVal).trim().toLowerCase();
+        if (['no', 'n', 'false', '0', 'off', 'unassigned', 'unavailable', 'disabled', 'inactive'].includes(clean)) return false;
+        if (['yes', 'y', 'true', '1', 'on', 'assigned', 'available', 'enabled', 'active'].includes(clean)) return true;
+        return null;
+    };
+
     // --- NEW: Loyalty Program Expiration & Eligibility Helper Engine ---
     const getLoyaltyExpirationMonths = (periodStr) => {
         const clean = String(periodStr || 'Never').trim();
@@ -7443,18 +7461,29 @@
 
         const heldTicketsCount = heldTickets.length;
 
-        // Derived Catalog & Filter Lists
+        // Phase 2: Only expose products assigned / available for the active POS shop
+        const shopAvailableProducts = useMemo(() => {
+            return (products || []).filter(p => isProductAvailableForShop(p, selectedShopId));
+        }, [products, selectedShopId]);
+
+        // Derived Catalog & Filter Lists (Scoped strictly to products available at this shop)
         const filterTabs = useMemo(() => {
             const set = new Set();
-            (products || []).forEach(p => {
+            shopAvailableProducts.forEach(p => {
                 const v = p.vendorName ? p.vendorName.trim() : 'Uncategorized';
                 set.add(v || 'Uncategorized');
             });
             return ['All', ...Array.from(set).sort()];
-        }, [products]);
+        }, [shopAvailableProducts]);
+
+        useEffect(() => {
+            if (selectedTab !== 'All' && !filterTabs.includes(selectedTab)) {
+                setSelectedTab('All');
+            }
+        }, [filterTabs, selectedTab]);
 
         const filteredProducts = useMemo(() => {
-            let list = products || [];
+            let list = shopAvailableProducts;
             if (activeQuickGroupId) {
                 const grp = quickGroups.find(g => g.id === activeQuickGroupId);
                 if (grp && Array.isArray(grp.productIds)) {
@@ -7474,7 +7503,7 @@
                 );
             }
             return list;
-        }, [products, activeQuickGroupId, quickGroups, selectedTab, searchTerm]);
+        }, [shopAvailableProducts, activeQuickGroupId, quickGroups, selectedTab, searchTerm]);
 
         const cartQtyMap = useMemo(() => {
             const map = new Map();
@@ -7602,6 +7631,10 @@
             if (!currentShift) {
                 showPosAlert('Shift Required', 'Please open a shift first before adding products to the cart.', true);
                 setShowShiftModal(true);
+                return;
+            }
+            if (!isProductAvailableForShop(prod, selectedShopId)) {
+                showPosAlert('Product Not Available', `"${prod.name}" is unassigned for this shop.`, true);
                 return;
             }
             const unitPrice = getEffectiveShopPrice(prod, selectedShopId);
@@ -7935,13 +7968,25 @@
                 e.preventDefault();
                 const q = searchTerm.trim().toLowerCase();
                 if (!q) return;
-                const exact = (products || []).find(p =>
+                const exactAvailable = shopAvailableProducts.find(p =>
                     String(p.barcode || '').toLowerCase() === q ||
                     String(p.code || '').toLowerCase() === q
                 );
-                if (exact) {
-                    addToCart(exact);
-                } else if (filteredProducts[highlightedIndex]) {
+                if (exactAvailable) {
+                    addToCart(exactAvailable);
+                    return;
+                }
+                const exactUnassigned = (products || []).find(p =>
+                    String(p.barcode || '').toLowerCase() === q ||
+                    String(p.code || '').toLowerCase() === q
+                );
+                if (exactUnassigned && !isProductAvailableForShop(exactUnassigned, selectedShopId)) {
+                    showPosAlert('Product Not Available', `"${exactUnassigned.name}" is unassigned for this shop.`, true);
+                    setSearchTerm('');
+                    refocusSearchInput();
+                    return;
+                }
+                if (filteredProducts[highlightedIndex]) {
                     addToCart(filteredProducts[highlightedIndex]);
                 }
             }
@@ -8027,7 +8072,7 @@
 
                 {showQuickGroupModal && (
                     <QuickAccessGroupModal
-                        products={products}
+                        products={shopAvailableProducts}
                         selectedShopId={selectedShopId}
                         existingGroup={editingQuickGroup}
                         onSave={saveQuickGroup}
@@ -8073,7 +8118,7 @@
                     <PaymentModal
                         total={cartTotal}
                         cart={cart}
-                        products={products}
+                        products={shopAvailableProducts}
                         loyaltyRule={activeLoyaltyRule}
                         customer={selectedCustomerObj}
                         shop={currentShopObj}
@@ -24914,6 +24959,741 @@
         );
     };
 
+    // --- NEW COMPONENT: Dedicated Batch Stock Update (Stock Take) Modal ---
+    const BatchStockUpdateModal = ({ initialShopId = '', onClose, userProfile }) => {
+        const { shops, products, vendors, categories } = useData();
+        const managedShops = useMemo(() => {
+            const stockShops = (shops || []).filter(s => s.manageStock !== false);
+            if (!userProfile || userProfile.role === 'Admin') return stockShops;
+            const assigned = userProfile.assignedShops || [];
+            return stockShops.filter(s => assigned.includes(s.id));
+        }, [shops, userProfile]);
+
+        const [shopId, setShopId] = useState(() => {
+            if (initialShopId && managedShops.some(s => s.id === initialShopId)) return initialShopId;
+            return managedShops[0]?.id || '';
+        });
+        const [actionType, setActionType] = useState('set'); // 'set' | 'add' | 'remove'
+        const [reason, setReason] = useState('Inventory Count');
+        const [batchNote, setBatchNote] = useState('');
+        const [inputTab, setInputTab] = useState('grid'); // 'grid' | 'excel'
+
+        // Bulk Grid Filter State
+        const [searchTerm, setSearchTerm] = useState('');
+        const [vendorFilter, setVendorFilter] = useState('');
+        const [categoryFilter, setCategoryFilter] = useState('');
+        const [onlyChanged, setOnlyChanged] = useState(false);
+        const [onlyAssignedToShop, setOnlyAssignedToShop] = useState(true);
+
+        // Pending quantity inputs: { [productId]: string } and optional per-item Excel notes
+        const [qtyInputs, setQtyInputs] = useState({});
+        const [itemNotes, setItemNotes] = useState({});
+        const [unmatchedRows, setUnmatchedRows] = useState([]);
+        const [isSubmitting, setIsSubmitting] = useState(false);
+        const [progressText, setProgressText] = useState('');
+        const [modalInfo, setModalInfo] = useState({ show: false, title: '', message: '', isError: false });
+        const excelInputRef = useRef(null);
+
+        useEffect(() => {
+            if (managedShops.length > 0 && (!shopId || !managedShops.some(s => s.id === shopId))) {
+                setShopId(managedShops[0].id);
+            }
+        }, [managedShops, shopId]);
+
+        const selectedShop = useMemo(
+            () => managedShops.find(s => s.id === shopId) || null,
+            [managedShops, shopId]
+        );
+
+        const uniqueCategories = useMemo(() => {
+            const set = new Set();
+            (categories || []).forEach(c => { if (c.name) set.add(c.name.trim()); });
+            (products || []).forEach(p => {
+                const c = (p.category || p.categoryName || '').trim();
+                if (c) set.add(c);
+            });
+            return Array.from(set).sort();
+        }, [categories, products]);
+
+        // Compute resulting stock & delta for a single product based on current actionType
+        const computeChangeForProduct = useCallback((prod, rawVal) => {
+            const currentStock = Number(prod?.stockByShop?.[shopId]) || 0;
+            if (rawVal === undefined || rawVal === null || String(rawVal).trim() === '') {
+                return { hasInput: false, currentStock, newStock: currentStock, delta: 0 };
+            }
+            const parsed = parseInt(rawVal, 10);
+            if (isNaN(parsed) || parsed < 0) {
+                return { hasInput: false, currentStock, newStock: currentStock, delta: 0 };
+            }
+            let newStock = currentStock;
+            if (actionType === 'set') newStock = parsed;
+            else if (actionType === 'add') newStock = currentStock + parsed;
+            else if (actionType === 'remove') newStock = Math.max(0, currentStock - parsed);
+            return {
+                hasInput: true,
+                currentStock,
+                newStock,
+                delta: newStock - currentStock
+            };
+        }, [shopId, actionType]);
+
+        // List of all products with actual non-zero stock changes ready to commit
+        const pendingChanges = useMemo(() => {
+            const list = [];
+            (products || []).forEach(prod => {
+                const rawVal = qtyInputs[prod.id];
+                const calc = computeChangeForProduct(prod, rawVal);
+                if (calc.hasInput && calc.delta !== 0) {
+                    list.push({
+                        product: prod,
+                        ...calc,
+                        note: itemNotes[prod.id] || ''
+                    });
+                }
+            });
+            return list;
+        }, [products, qtyInputs, itemNotes, computeChangeForProduct]);
+
+        // Filtered products for Bulk Grid Editor
+        const filteredGridProducts = useMemo(() => {
+            const q = searchTerm.trim().toLowerCase();
+            return (products || [])
+                .filter(p => {
+                    if (onlyAssignedToShop && shopId && !isProductAvailableForShop(p, shopId)) return false;
+                    if (vendorFilter && p.vendorId !== vendorFilter) return false;
+                    if (categoryFilter && (p.category || p.categoryName || '').trim() !== categoryFilter) return false;
+                    if (onlyChanged) {
+                        const calc = computeChangeForProduct(p, qtyInputs[p.id]);
+                        if (!calc.hasInput || calc.delta === 0) return false;
+                    }
+                    if (!q) return true;
+                    return (
+                        (p.name || '').toLowerCase().includes(q) ||
+                        (p.code || '').toLowerCase().includes(q) ||
+                        String(p.barcode || '').toLowerCase().includes(q)
+                    );
+                })
+                .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        }, [products, searchTerm, vendorFilter, categoryFilter, onlyChanged, onlyAssignedToShop, shopId, qtyInputs, computeChangeForProduct]);
+
+        const handleQtyInputChange = (productId, val) => {
+            if (val === '') {
+                setQtyInputs(prev => {
+                    const next = { ...prev };
+                    delete next[productId];
+                    return next;
+                });
+                return;
+            }
+            const clean = String(val).replace(/[^\d]/g, '');
+            setQtyInputs(prev => ({ ...prev, [productId]: clean }));
+        };
+
+        const handleDownloadBatchTemplate = () => {
+            if (typeof XLSX === 'undefined') {
+                setModalInfo({ show: true, title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true });
+                return;
+            }
+            const sampleRows = (products || []).slice(0, 3).map(p => ({
+                code: p.code || 'DF_10001',
+                quantity: Number(p.stockByShop?.[shopId]) || 0,
+                note: ''
+            }));
+            if (sampleRows.length === 0) {
+                sampleRows.push({ code: 'DF_10001', quantity: 10, note: 'Stock Take' });
+            }
+            const ws = XLSX.utils.json_to_sheet(sampleRows, { header: ['code', 'quantity', 'note'] });
+            ws['!cols'] = [{ wch: 18 }, { wch: 12 }, { wch: 25 }];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'BatchStock');
+            XLSX.writeFile(wb, `Batch_Stock_Template_${(selectedShop?.name || 'Shop').replace(/\s+/g, '_')}.xlsx`);
+        };
+
+        const handleExcelFileUpload = (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            if (typeof XLSX === 'undefined') {
+                setModalInfo({ show: true, title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true });
+                if (excelInputRef.current) excelInputRef.current.value = '';
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const wb = XLSX.read(evt.target.result, { type: 'array' });
+                    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+                    if (!rows || rows.length === 0) {
+                        throw new Error('The uploaded file is empty.');
+                    }
+
+                    // Build fast lookup maps by Code and Barcode (case-insensitive)
+                    const byCode = new Map();
+                    const byBarcode = new Map();
+                    (products || []).forEach(p => {
+                        if (p.code) byCode.set(String(p.code).trim().toLowerCase(), p);
+                        if (p.barcode) byBarcode.set(String(p.barcode).trim().toLowerCase(), p);
+                    });
+
+                    const nextQty = { ...qtyInputs };
+                    const nextNotes = { ...itemNotes };
+                    const unmatched = [];
+                    let matchedCount = 0;
+
+                    rows.forEach((rawRow, idx) => {
+                        const norm = {};
+                        Object.keys(rawRow).forEach(k => {
+                            norm[String(k).trim().toLowerCase()] = rawRow[k];
+                        });
+
+                        const rawKey = String(
+                            norm['code'] ?? norm['product code'] ?? norm['barcode'] ?? norm['sku'] ?? ''
+                        ).trim();
+                        if (!rawKey) return;
+
+                        const rawQtyVal = norm['quantity'] ?? norm['qty'] ?? norm['stock'] ?? norm['count'] ?? '';
+                        const parsedQty = parseInt(String(rawQtyVal).trim(), 10);
+                        if (isNaN(parsedQty) || parsedQty < 0) {
+                            unmatched.push({ row: idx + 2, key: rawKey, reason: 'Invalid quantity' });
+                            return;
+                        }
+
+                        const prod = byCode.get(rawKey.toLowerCase()) || byBarcode.get(rawKey.toLowerCase());
+                        if (!prod) {
+                            unmatched.push({ row: idx + 2, key: rawKey, reason: 'Product not found' });
+                            return;
+                        }
+
+                        nextQty[prod.id] = String(parsedQty);
+                        const rowNote = String(norm['note'] ?? norm['remark'] ?? '').trim();
+                        if (rowNote) nextNotes[prod.id] = rowNote;
+                        matchedCount++;
+                    });
+
+                    setQtyInputs(nextQty);
+                    setItemNotes(nextNotes);
+                    setUnmatchedRows(unmatched);
+
+                    setModalInfo({
+                        show: true,
+                        title: 'Sheet Loaded for Preview',
+                        message: `Matched ${matchedCount} product(s).${unmatched.length > 0 ? ` ${unmatched.length} row(s) could not be matched.` : ''} Review the preview below and click "Apply Batch Update" to commit.`,
+                        isError: matchedCount === 0
+                    });
+                } catch (err) {
+                    setModalInfo({ show: true, title: 'File Read Error', message: err?.message || 'Failed to parse Excel/CSV file.', isError: true });
+                } finally {
+                    if (excelInputRef.current) excelInputRef.current.value = '';
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        };
+
+        const handleCommitBatch = async () => {
+            if (!shopId || !selectedShop) {
+                setModalInfo({ show: true, title: 'Shop Required', message: 'Please select a target shop first.', isError: true });
+                return;
+            }
+            if (pendingChanges.length === 0) {
+                setModalInfo({ show: true, title: 'No Stock Changes', message: 'Enter at least one quantity that changes the current stock before committing.', isError: true });
+                return;
+            }
+
+            setIsSubmitting(true);
+            const batchRefNo = `ADJ-BATCH-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+
+            try {
+                // Chunk by 200 items (400 writes per batch, safely under Firestore's 500-write batch limit)
+                const CHUNK_SIZE = 200;
+                const totalChunks = Math.ceil(pendingChanges.length / CHUNK_SIZE);
+
+                for (let c = 0; c < totalChunks; c++) {
+                    const chunk = pendingChanges.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+                    setProgressText(`Committing batch ${c + 1} of ${totalChunks} (${chunk.length} items)...`);
+
+                    const batch = db.batch();
+                    chunk.forEach(({ product, currentStock, newStock, delta, note }) => {
+                        const productRef = db.collection('products').doc(product.id);
+                        batch.set(productRef, {
+                            stockByShop: {
+                                [shopId]: newStock
+                            },
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        }, { merge: true });
+
+                        const movementRef = db.collection('productMovement').doc();
+                        batch.set(movementRef, {
+                            productId: product.id,
+                            productCode: product.code || '',
+                            productName: product.name || '',
+                            type: 'Adjustment',
+                            actionType,
+                            previousStock: currentStock,
+                            newStock,
+                            reason,
+                            quantityChange: delta,
+                            from: delta > 0 ? 'Adjustment' : selectedShop.name,
+                            to: delta > 0 ? selectedShop.name : 'Adjustment',
+                            referenceNo: batchRefNo,
+                            note: note || batchNote.trim() || '',
+                            performedBy: userProfile?.name || 'Staff',
+                            performedByUid: userProfile?.uid || '',
+                            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                        });
+                    });
+
+                    await batch.commit();
+
+                    // Sync immediately to IndexedDB & RAM so POS Terminal & Product List update in 0ms
+                    if (window.SolarisSmartProductEngine) {
+                        chunk.forEach(({ product, delta }) => {
+                            window.SolarisSmartProductEngine.applyLocalStockDelta(product.id, shopId, delta);
+                        });
+                    }
+                }
+
+                setProgressText('');
+                setIsSubmitting(false);
+                setModalInfo({
+                    show: true,
+                    title: 'Batch Stock Updated',
+                    message: `Successfully updated ${pendingChanges.length} product(s) for ${selectedShop.name} (Ref: ${batchRefNo}) and logged all entries in Adjust Stock Log.`,
+                    isError: false
+                });
+                setTimeout(() => onClose(), 1400);
+            } catch (err) {
+                console.error('Batch stock update error:', err);
+                setProgressText('');
+                setIsSubmitting(false);
+                setModalInfo({
+                    show: true,
+                    title: 'Batch Update Error',
+                    message: err?.message || 'Failed to commit batch stock update.',
+                    isError: true
+                });
+            }
+        };
+
+        const totalNetDelta = useMemo(
+            () => pendingChanges.reduce((sum, item) => sum + item.delta, 0),
+            [pendingChanges]
+        );
+
+        const GRID_DISPLAY_CAP = 100;
+
+        return (
+            <Modal show={true} onClose={isSubmitting ? null : onClose} maxWidth="max-w-5xl">
+                <MessageModal {...modalInfo} show={modalInfo.show} onClose={() => setModalInfo({ show: false, title: '', message: '', isError: false })} />
+                <ModalHeader title="Batch Stock Update (Stock Take)" onClose={isSubmitting ? null : onClose} />
+                <ModalBody>
+                    <div className="space-y-4">
+                        {/* Step 1: Target Shop, Action Mode, Reason & Batch Note */}
+                        <div className="bg-slate-900/70 p-4 rounded-xl border border-slate-700 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                            <div>
+                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-store text-cyan-400 mr-1.5"></i>Target Shop *
+                                </label>
+                                <select
+                                    value={shopId}
+                                    onChange={(e) => setShopId(e.target.value)}
+                                    disabled={isSubmitting}
+                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs sm:text-sm font-bold"
+                                >
+                                    {managedShops.map(s => (
+                                        <option key={s.id} value={s.id}>{s.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-sliders-h text-amber-400 mr-1.5"></i>Action Mode
+                                </label>
+                                <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded-lg border border-slate-600">
+                                    {[
+                                        { id: 'set', label: '= Set', active: 'bg-blue-600 text-white' },
+                                        { id: 'add', label: '+ Add', active: 'bg-emerald-600 text-white' },
+                                        { id: 'remove', label: '- Sub', active: 'bg-rose-600 text-white' }
+                                    ].map(opt => (
+                                        <button
+                                            key={opt.id}
+                                            type="button"
+                                            disabled={isSubmitting}
+                                            onClick={() => setActionType(opt.id)}
+                                            className={`py-1.5 rounded text-xs font-black transition ${actionType === opt.id ? opt.active : 'text-slate-400 hover:text-white'}`}
+                                        >
+                                            {opt.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-clipboard-list text-purple-400 mr-1.5"></i>Reason
+                                </label>
+                                <select
+                                    value={reason}
+                                    onChange={(e) => setReason(e.target.value)}
+                                    disabled={isSubmitting}
+                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-purple-500 outline-none text-xs sm:text-sm"
+                                >
+                                    <option>Inventory Count</option>
+                                    <option>Opening Stock</option>
+                                    <option>Damaged / Broken</option>
+                                    <option>Expired</option>
+                                    <option>Theft / Loss</option>
+                                    <option>Internal Use</option>
+                                    <option>Return to Vendor</option>
+                                    <option>Other</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-sticky-note text-emerald-400 mr-1.5"></i>Batch Note (Optional)
+                                </label>
+                                <input
+                                    type="text"
+                                    value={batchNote}
+                                    onChange={(e) => setBatchNote(e.target.value)}
+                                    disabled={isSubmitting}
+                                    placeholder="e.g. Monthly Stock Take"
+                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-emerald-500 outline-none text-xs sm:text-sm"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Step 2: Mode Tabs (Bulk Grid Editor vs. Excel/CSV Upload) + Pending Changes Summary */}
+                        <div className="flex flex-wrap items-center justify-between gap-2.5">
+                            <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
+                                <button
+                                    type="button"
+                                    onClick={() => setInputTab('grid')}
+                                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                        inputTab === 'grid' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                                    }`}
+                                >
+                                    <i className="fas fa-table"></i>
+                                    <span>Bulk Grid Editor</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setInputTab('excel')}
+                                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                        inputTab === 'excel' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                                    }`}
+                                >
+                                    <i className="fas fa-file-excel"></i>
+                                    <span>Excel / CSV Upload</span>
+                                </button>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                                <span className={`px-2.5 py-1 rounded-lg font-mono font-bold border ${
+                                    pendingChanges.length > 0
+                                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                        : 'bg-slate-900 text-slate-400 border-slate-700'
+                                }`}>
+                                    Ready: {pendingChanges.length} item(s)
+                                    {pendingChanges.length > 0 && ` (${totalNetDelta > 0 ? '+' : ''}${totalNetDelta} net)`}
+                                </span>
+                                {Object.keys(qtyInputs).length > 0 && (
+                                    <button
+                                        type="button"
+                                        disabled={isSubmitting}
+                                        onClick={() => { setQtyInputs({}); setItemNotes({}); setUnmatchedRows([]); }}
+                                        className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 font-bold transition"
+                                    >
+                                        <i className="fas fa-eraser mr-1"></i>Clear Inputs
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+
+                        {inputTab === 'excel' ? (
+                            /* TAB 2: EXCEL / CSV UPLOAD & LIVE PREVIEW */
+                            <div className="space-y-3">
+                                <div className="bg-slate-900/60 p-4 rounded-xl border border-indigo-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                                    <div className="space-y-1">
+                                        <h4 className="text-sm font-bold text-indigo-300 flex items-center gap-2">
+                                            <i className="fas fa-upload"></i>
+                                            <span>Upload 2-Column Stock Sheet (.xlsx / .csv)</span>
+                                        </h4>
+                                        <p className="text-xs text-slate-400">
+                                            Columns: <code className="text-slate-200 font-mono">code</code> (or <code className="text-slate-200 font-mono">barcode</code>), <code className="text-slate-200 font-mono">quantity</code>, and optional <code className="text-slate-200 font-mono">note</code>. Applied using <strong className="text-white">{actionType === 'set' ? '= Set Exact Qty' : actionType === 'add' ? '+ Add Stock' : '- Remove Stock'}</strong>.
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={handleDownloadBatchTemplate}
+                                            className="px-3 py-2 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/40 text-xs font-bold transition flex items-center gap-1.5"
+                                        >
+                                            <i className="fas fa-download"></i> Template
+                                        </button>
+                                        <input
+                                            ref={excelInputRef}
+                                            type="file"
+                                            accept=".xlsx, .xls, .csv"
+                                            onChange={handleExcelFileUpload}
+                                            className="hidden"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => excelInputRef.current?.click()}
+                                            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow transition flex items-center gap-1.5"
+                                        >
+                                            <i className="fas fa-file-upload"></i> Choose File
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {unmatchedRows.length > 0 && (
+                                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1">
+                                        <div className="font-bold text-amber-300">
+                                            <i className="fas fa-exclamation-triangle mr-1.5"></i>
+                                            {unmatchedRows.length} Unmatched / Skipped Row(s):
+                                        </div>
+                                        <div className="max-h-24 overflow-y-auto font-mono text-[11px] space-y-0.5">
+                                            {unmatchedRows.slice(0, 20).map((u, idx) => (
+                                                <div key={idx}>Row {u.row}: "{u.key}" — {u.reason}</div>
+                                            ))}
+                                            {unmatchedRows.length > 20 && <div>...and {unmatchedRows.length - 20} more</div>}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Live Preview of Matched Changes */}
+                                <div className="border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
+                                    <div className="max-h-72 overflow-y-auto">
+                                        <table className="min-w-full divide-y divide-slate-700 text-xs sm:text-sm">
+                                            <thead className="bg-slate-900 sticky top-0 z-10 text-slate-400 text-[11px] uppercase">
+                                                <tr>
+                                                    <th className="px-3 py-2.5 text-left">Product</th>
+                                                    <th className="px-3 py-2.5 text-center">Current</th>
+                                                    <th className="px-3 py-2.5 text-center">Input ({actionType})</th>
+                                                    <th className="px-3 py-2.5 text-center">New Stock</th>
+                                                    <th className="px-3 py-2.5 text-center">Diff</th>
+                                                    <th className="px-3 py-2.5 text-center">Remove</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-800">
+                                                {pendingChanges.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="6" className="p-8 text-center text-slate-500 text-xs">
+                                                            Upload an Excel/CSV file or enter quantities in the Bulk Grid Editor to preview stock changes here.
+                                                        </td>
+                                                    </tr>
+                                                ) : pendingChanges.map(({ product, currentStock, newStock, delta, note }) => (
+                                                    <tr key={product.id} className="hover:bg-slate-800/50">
+                                                        <td className="px-3 py-2">
+                                                            <div className="font-bold text-slate-200">{product.name}</div>
+                                                            <div className="text-[10px] text-slate-400 font-mono">
+                                                                {product.code}{note ? ` • Note: ${note}` : ''}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-3 py-2 text-center font-mono text-slate-400">{currentStock}</td>
+                                                        <td className="px-3 py-2 text-center">
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                value={qtyInputs[product.id] ?? ''}
+                                                                onChange={(e) => handleQtyInputChange(product.id, e.target.value)}
+                                                                className="w-20 bg-slate-800 text-white text-center font-mono font-bold px-2 py-1 rounded border border-slate-600 focus:border-blue-500 outline-none"
+                                                            />
+                                                        </td>
+                                                        <td className="px-3 py-2 text-center font-mono font-black text-white">{newStock}</td>
+                                                        <td className="px-3 py-2 text-center">
+                                                            <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${
+                                                                delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                                                            }`}>
+                                                                {delta > 0 ? '+' : ''}{delta}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-3 py-2 text-center">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleQtyInputChange(product.id, '')}
+                                                                className="text-slate-400 hover:text-red-400 p-1"
+                                                                title="Remove from batch"
+                                                            >
+                                                                <i className="fas fa-times"></i>
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            /* TAB 1: BULK GRID EDITOR */
+                            <div className="space-y-3">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2 items-center">
+                                    <div className="lg:col-span-4 relative">
+                                        <input
+                                            type="text"
+                                            value={searchTerm}
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                            placeholder="Search product name, code, barcode..."
+                                            className="w-full bg-slate-900 text-white pl-8 pr-7 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs"
+                                        />
+                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                        {searchTerm && (
+                                            <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
+                                                <i className="fas fa-times-circle text-xs"></i>
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="lg:col-span-3">
+                                        <select
+                                            value={vendorFilter}
+                                            onChange={(e) => setVendorFilter(e.target.value)}
+                                            className="w-full bg-slate-900 text-slate-200 px-2.5 py-2 rounded-lg border border-slate-600 text-xs outline-none"
+                                        >
+                                            <option value="">All Vendors</option>
+                                            {(vendors || []).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="lg:col-span-2">
+                                        <select
+                                            value={categoryFilter}
+                                            onChange={(e) => setCategoryFilter(e.target.value)}
+                                            className="w-full bg-slate-900 text-slate-200 px-2.5 py-2 rounded-lg border border-slate-600 text-xs outline-none"
+                                        >
+                                            <option value="">All Categories</option>
+                                            {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="lg:col-span-3 flex items-center justify-end gap-3 text-[11px] text-slate-300">
+                                        <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input type="checkbox" checked={onlyAssignedToShop} onChange={(e) => setOnlyAssignedToShop(e.target.checked)} className="rounded accent-emerald-500" />
+                                            <span>Assigned</span>
+                                        </label>
+                                        <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input type="checkbox" checked={onlyChanged} onChange={(e) => setOnlyChanged(e.target.checked)} className="rounded accent-blue-500" />
+                                            <span>Changed ({pendingChanges.length})</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div className="border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
+                                    <div className="max-h-80 overflow-y-auto">
+                                        <table className="min-w-full divide-y divide-slate-700 text-xs sm:text-sm">
+                                            <thead className="bg-slate-900 sticky top-0 z-10 text-slate-400 text-[11px] uppercase">
+                                                <tr>
+                                                    <th className="px-3 py-2.5 text-left">Product &amp; Code</th>
+                                                    <th className="px-3 py-2.5 text-left hidden sm:table-cell">Vendor</th>
+                                                    <th className="px-3 py-2.5 text-center">Current</th>
+                                                    <th className="px-3 py-2.5 text-center">
+                                                        {actionType === 'set' ? 'New Qty (=)' : actionType === 'add' ? 'Add Qty (+)' : 'Remove Qty (-)'}
+                                                    </th>
+                                                    <th className="px-3 py-2.5 text-center">Result</th>
+                                                    <th className="px-3 py-2.5 text-center">Diff</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-800">
+                                                {filteredGridProducts.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="6" className="p-8 text-center text-slate-500 text-xs">
+                                                            No matching products found.
+                                                        </td>
+                                                    </tr>
+                                                ) : filteredGridProducts.slice(0, GRID_DISPLAY_CAP).map(prod => {
+                                                    const rawVal = qtyInputs[prod.id] ?? '';
+                                                    const { hasInput, currentStock, newStock, delta } = computeChangeForProduct(prod, rawVal);
+                                                    const isModified = hasInput && delta !== 0;
+
+                                                    return (
+                                                        <tr key={prod.id} className={isModified ? 'bg-blue-950/25' : 'hover:bg-slate-800/40'}>
+                                                            <td className="px-3 py-2">
+                                                                <div className="font-bold text-slate-200 truncate max-w-[230px]" title={prod.name}>{prod.name}</div>
+                                                                <div className="text-[10px] text-slate-400 font-mono">
+                                                                    {prod.code}{prod.barcode ? ` • ${prod.barcode}` : ''}
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-3 py-2 text-xs text-slate-400 hidden sm:table-cell truncate max-w-[140px]">
+                                                                {prod.vendorName || '-'}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-center font-mono font-bold text-slate-300">
+                                                                {currentStock}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-center">
+                                                                <input
+                                                                    type="number"
+                                                                    min="0"
+                                                                    value={rawVal}
+                                                                    onChange={(e) => handleQtyInputChange(prod.id, e.target.value)}
+                                                                    placeholder={actionType === 'set' ? String(currentStock) : '0'}
+                                                                    className={`w-24 bg-slate-800 text-center font-mono font-bold px-2 py-1 rounded-lg border outline-none text-sm ${
+                                                                        isModified
+                                                                            ? 'border-blue-500 text-white'
+                                                                            : 'border-slate-600 text-slate-200 focus:border-blue-500'
+                                                                    }`}
+                                                                />
+                                                            </td>
+                                                            <td className={`px-3 py-2 text-center font-mono font-black ${isModified ? 'text-white' : 'text-slate-500'}`}>
+                                                                {newStock}
+                                                            </td>
+                                                            <td className="px-3 py-2 text-center">
+                                                                {isModified ? (
+                                                                    <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${
+                                                                        delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                                                                    }`}>
+                                                                        {delta > 0 ? '+' : ''}{delta}
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="text-slate-600 font-mono text-xs">—</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {filteredGridProducts.length > GRID_DISPLAY_CAP && (
+                                        <div className="px-3 py-2 bg-slate-900/90 border-t border-slate-700 text-[11px] text-slate-400 text-center">
+                                            Showing first {GRID_DISPLAY_CAP} of {filteredGridProducts.length} matching products. Use Search, Vendor, or Category filters (or Excel Upload) for larger updates.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </ModalBody>
+                <ModalFooter>
+                    <div className="w-full flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                        <div className="text-xs text-slate-400 font-mono">
+                            {progressText || (selectedShop ? `Target: ${selectedShop.name} • Logged in Adjust Stock Log` : '')}
+                        </div>
+                        <div className="flex items-center gap-2.5">
+                            <button
+                                type="button"
+                                disabled={isSubmitting}
+                                onClick={onClose}
+                                className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-5 rounded-xl text-xs sm:text-sm transition disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                disabled={isSubmitting || pendingChanges.length === 0 || !shopId}
+                                onClick={handleCommitBatch}
+                                className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black py-2.5 px-6 rounded-xl text-xs sm:text-sm shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                            >
+                                {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check-double"></i>}
+                                <span>{isSubmitting ? 'Updating...' : `Apply Batch Update (${pendingChanges.length})`}</span>
+                            </button>
+                        </div>
+                    </div>
+                </ModalFooter>
+            </Modal>
+        );
+    };
+
     // Component for handling product filters (2-Column Grid: Product Search + Merged Category/Vendor Search)
     const ProductFilters = memo(({ onFilterChange }) => {
         const { vendors, categories, products } = useData();
@@ -25092,7 +25872,7 @@
     });
 
     // Component for handling the main action buttons (Compact Icon-Only Toolbar + Shop View Droplist + Live Delta Sync Badge)
-    const ProductActions = memo(({ onAddNew, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView, productSyncStatus, onForceFullSync }) => {
+    const ProductActions = memo(({ onAddNew, onBatchStock, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView, productSyncStatus, onForceFullSync }) => {
         const [isImporting, setIsImporting] = useState(false);
         const [isSyncingCloud, setIsSyncingCloud] = useState(false);
         const fileInputRef = useRef(null);
@@ -25187,6 +25967,17 @@
                     >
                         {isGeneratingCode ? <div className="loader w-4 h-4"></div> : <i className="fas fa-plus text-sm"></i>}
                     </button>
+
+                    {(userProfile?.role === 'Admin' || userProfile?.role === 'Shop Manager' || userProfile?.role === 'Shop Supervisor') && onBatchStock && (
+                        <button
+                            type="button"
+                            onClick={onBatchStock}
+                            title="Batch Stock Update (Stock Take)"
+                            className="w-10 h-10 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 rounded-xl flex items-center justify-center transition active:scale-95"
+                        >
+                            <i className="fas fa-boxes-stacked text-sm"></i>
+                        </button>
+                    )}
 
                     <button
                         type="button"
@@ -25457,6 +26248,7 @@
                                                     /* FOCUSED SINGLE-SHOP VIEW */
                                                     (() => {
                                                         const qty = Number(p.stockByShop?.[focusedShopObj.id]) || 0;
+                                                        const isShopAvailable = isProductAvailableForShop(p, focusedShopObj.id);
                                                         const sf = focusedShopFifo || {
                                                             qty,
                                                             fifoUnitCost: baseCost,
@@ -25467,8 +26259,15 @@
                                                         };
                                                         const isBelowSug = sf.targetMarginPct > 0 && sf.suggestedPrice > currentPrice;
                                                         return (
-                                                            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/75 px-3 py-2 rounded-xl border border-cyan-500/30">
+                                                            <div className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl border ${isShopAvailable ? 'bg-slate-900/75 border-cyan-500/30' : 'bg-slate-950/70 border-slate-700/80 opacity-75'}`}>
                                                                 <div className="flex items-center gap-2.5">
+                                                                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-black uppercase border ${
+                                                                        isShopAvailable
+                                                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                                            : 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                                                                    }`}>
+                                                                        {isShopAvailable ? 'Assigned' : 'Unassigned'}
+                                                                    </span>
                                                                     <div className={`px-2.5 py-1 rounded-lg font-mono text-xs font-black border ${
                                                                         qty <= 0
                                                                             ? 'bg-red-500/15 text-red-400 border-red-500/30'
@@ -25536,6 +26335,7 @@
                                                             {managedShops.map(shop => {
                                                                 const qty = Number(p.stockByShop?.[shop.id]) || 0;
                                                                 const shopMin = getEffectiveShopMinStock(p, shop.id);
+                                                                const isShopAvailable = isProductAvailableForShop(p, shop.id);
                                                                 const sf = prodFifo?.byShop?.[shop.id];
                                                                 const shopEffectivePrice = getEffectiveShopPrice(p, shop.id);
                                                                 const isCustomShopPrice = Number(p.priceByShop?.[shop.id]) > 0;
@@ -25552,20 +26352,23 @@
                                                                             }
                                                                         }}
                                                                         className={`px-2 py-0.5 rounded-md text-[10px] font-mono flex items-center gap-1 border transition ${
-                                                                            qty <= 0
-                                                                                ? 'bg-slate-900/50 text-slate-500 border-slate-800 hover:border-slate-600'
-                                                                                : (shopMin > 0 && qty < shopMin)
-                                                                                    ? 'bg-red-950/40 text-red-300 border-red-500/40 hover:bg-red-900/50'
-                                                                                    : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-blue-400'
+                                                                            !isShopAvailable
+                                                                                ? 'bg-slate-950/60 text-slate-500 border-slate-800 line-through opacity-60 hover:opacity-90'
+                                                                                : qty <= 0
+                                                                                    ? 'bg-slate-900/50 text-slate-500 border-slate-800 hover:border-slate-600'
+                                                                                    : (shopMin > 0 && qty < shopMin)
+                                                                                        ? 'bg-red-950/40 text-red-300 border-red-500/40 hover:bg-red-900/50'
+                                                                                        : 'bg-slate-900/90 text-slate-200 border-slate-700 hover:border-blue-400'
                                                                         }`}
-                                                                        title={`${shop.name}: ${qty} qty | Min Alert: ${shopMin > 0 ? shopMin : 'Off'} | Price: ៛${khrFormatter.format(shopEffectivePrice)}${isCustomShopPrice ? ' (Custom)' : ' (Base)'} | FIFO Cost: ៛${khrFormatter.format(Math.round(sf?.fifoUnitCost || baseCost))} | Sug (${sf?.targetMarginPct || 0}%): ៛${khrFormatter.format(sf?.suggestedPrice || shopEffectivePrice)}${userProfile?.role === 'Admin' ? ' (Click to Adjust Stock)' : ''}`}
+                                                                        title={`${shop.name} [${isShopAvailable ? 'Assigned / Available' : 'Unassigned / Hidden'}]: ${qty} qty | Min Alert: ${shopMin > 0 ? shopMin : 'Off'} | Price: ៛${khrFormatter.format(shopEffectivePrice)}${isCustomShopPrice ? ' (Custom)' : ' (Base)'} | FIFO Cost: ៛${khrFormatter.format(Math.round(sf?.fifoUnitCost || baseCost))} | Sug (${sf?.targetMarginPct || 0}%): ៛${khrFormatter.format(sf?.suggestedPrice || shopEffectivePrice)}${userProfile?.role === 'Admin' ? ' (Click to Adjust Stock)' : ''}`}
                                                                     >
+                                                                        {!isShopAvailable && <i className="fas fa-ban text-[8px] text-rose-400"></i>}
                                                                         <span className="text-slate-400 font-sans font-semibold">{getShortShopCode(shop.name)}:</span>
-                                                                        <strong className={qty > 0 ? 'text-emerald-400' : 'text-slate-500'}>{qty}</strong>
-                                                                        {isCustomShopPrice && (
+                                                                        <strong className={qty > 0 && isShopAvailable ? 'text-emerald-400' : 'text-slate-500'}>{qty}</strong>
+                                                                        {isShopAvailable && isCustomShopPrice && (
                                                                             <span className="text-[9px] text-indigo-300 font-bold" title="Custom Shop Selling Price">• ៛{khrFormatter.format(shopEffectivePrice)}</span>
                                                                         )}
-                                                                        {hasSugDiff && (
+                                                                        {isShopAvailable && hasSugDiff && (
                                                                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" title="Current price is below shop target margin suggestion"></span>
                                                                         )}
                                                                     </button>
@@ -25630,6 +26433,7 @@
                                                             {managedShops.map(shop => {
                                                                 const qty = Number(p.stockByShop?.[shop.id]) || 0;
                                                                 const shopMin = getEffectiveShopMinStock(p, shop.id);
+                                                                const isShopAvailable = isProductAvailableForShop(p, shop.id);
                                                                 const shopSellingPrice = getEffectiveShopPrice(p, shop.id);
                                                                 const isCustomShopPrice = Number(p.priceByShop?.[shop.id]) > 0;
                                                                 const sf = prodFifo?.byShop?.[shop.id] || {
@@ -25648,21 +26452,26 @@
                                                                     <div
                                                                         key={shop.id}
                                                                         className={`p-3 rounded-xl border flex flex-col justify-between transition ${
-                                                                            qty > 0
-                                                                                ? 'bg-slate-900/90 border-slate-700/90 hover:border-slate-500'
-                                                                                : 'bg-slate-900/40 border-slate-800/80 opacity-75'
+                                                                            !isShopAvailable
+                                                                                ? 'bg-slate-950/60 border-rose-500/25 opacity-65'
+                                                                                : qty > 0
+                                                                                    ? 'bg-slate-900/90 border-slate-700/90 hover:border-slate-500'
+                                                                                    : 'bg-slate-900/40 border-slate-800/80 opacity-75'
                                                                         }`}
                                                                     >
                                                                         <div>
-                                                                            {/* Card Header: Shop Name + Quick Adjust Button */}
+                                                                            {/* Card Header: Shop Name + Availability Badge + Quick Adjust Button */}
                                                                             <div className="flex items-center justify-between gap-1.5 border-b border-slate-800 pb-2 mb-2">
                                                                                 <div className="min-w-0">
                                                                                     <div className="text-xs font-bold text-white truncate flex items-center gap-1.5" title={shop.name}>
-                                                                                        <i className="fas fa-store text-orange-400 text-[10px]"></i>
+                                                                                        <i className={`fas fa-store text-[10px] ${isShopAvailable ? 'text-orange-400' : 'text-slate-500'}`}></i>
                                                                                         <span className="truncate">{shop.name}</span>
                                                                                     </div>
-                                                                                    <div className="text-[10px] text-slate-400 font-mono">
-                                                                                        Target Margin: <strong className="text-cyan-400">{sf.targetMarginPct}%</strong> • Min: <strong className={shopMin > 0 && qty < shopMin ? 'text-red-400' : 'text-amber-300'}>{shopMin > 0 ? shopMin : 'Off'}</strong>
+                                                                                    <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 mt-0.5">
+                                                                                        <span className={`px-1 py-0.2 rounded text-[8px] font-black uppercase ${isShopAvailable ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/15 text-rose-300 border border-rose-500/40'}`}>
+                                                                                            {isShopAvailable ? 'Available' : 'Unassigned'}
+                                                                                        </span>
+                                                                                        <span>M:{sf.targetMarginPct}% • Min:{shopMin > 0 ? shopMin : 'Off'}</span>
                                                                                     </div>
                                                                                 </div>
                                                                                 {userProfile?.role === 'Admin' && (
@@ -25878,7 +26687,7 @@
         const [productModal, setProductModal] = useState({ show: false, product: null, mode: 'edit' });
         const [isGeneratingCode, setIsGeneratingCode] = useState(false);
         
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, minStockByShop: {}, imageUrl: '', stockByShop: {}, priceByShop: {} };
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, minStockByShop: {}, imageUrl: '', stockByShop: {}, priceByShop: {}, availableByShop: {} };
 
         // Identify managed shops scoped to user's assigned shops (Admins see all managed shops)
         const managedShops = useMemo(() => {
@@ -26200,6 +27009,7 @@
                 price: parseFloat(formData.price), 
                 minStock: parseInt(formData.minStock) || 0, // Default / legacy fallback minStock
                 minStockByShop: formData.minStockByShop || {}, // Per-shop Min Stock Alert Level
+                availableByShop: formData.availableByShop || {}, // Per-shop Assigned/Unassigned availability
                 vendorName: selectedVendor?.name || '',
                 category: resolvedCategoryName,
                 categoryName: resolvedCategoryName
@@ -26283,6 +27093,8 @@
                                     // If the Excel does not have a column for a shop, keep the existing stock.
                                     let newStockByShop = { ...(existingData.stockByShop || {}) };
                                     let hasStockUpdate = false;
+                                    let newAvailableByShop = { ...(existingData.availableByShop || {}) };
+                                    let hasAvailableUpdate = false;
 
                                     managedShops.forEach(shop => {
                                         // Check if the shop name exists as a column in the row
@@ -26290,12 +27102,22 @@
                                             newStockByShop[shop.id] = parseInt(row[shop.name]) || 0;
                                             hasStockUpdate = true;
                                         }
+                                        // Check if the shop availability column (`${shop.name} (Available)`) exists in the row
+                                        const availColKey = `${shop.name} (Available)`;
+                                        const parsedAvail = parseExcelAvailabilityValue(row[availColKey]);
+                                        if (parsedAvail !== null) {
+                                            newAvailableByShop[shop.id] = parsedAvail;
+                                            hasAvailableUpdate = true;
+                                        }
                                     });
 
-                                    // Only include stockByShop in the update if we actually found stock columns to update.
-                                    // Otherwise, we leave the existing stockByShop field entirely alone.
+                                    // Only include stockByShop / availableByShop in the update if we actually found columns to update.
+                                    // Otherwise, we leave the existing fields entirely alone.
                                     if (hasStockUpdate) {
                                         updateData.stockByShop = newStockByShop;
+                                    }
+                                    if (hasAvailableUpdate) {
+                                        updateData.availableByShop = newAvailableByShop;
                                     }
                                     updateData.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
 
@@ -26317,10 +27139,13 @@
                                     }
 
                                     const initialStock = {};
+                                    const initialAvailable = {};
                                     managedShops.forEach(shop => {
                                         if (row[shop.name] !== undefined) {
                                             initialStock[shop.id] = parseInt(row[shop.name]) || 0;
                                         }
+                                        const parsedAvail = parseExcelAvailabilityValue(row[`${shop.name} (Available)`]);
+                                        initialAvailable[shop.id] = parsedAvail !== null ? parsedAvail : true;
                                     });
 
                                     const productData = {
@@ -26334,6 +27159,7 @@
                                         minStock: parseInt(row.minStock) || 0, // <--- Added Min Stock for new products
                                         note: row.note || '', 
                                         stockByShop: initialStock,
+                                        availableByShop: initialAvailable,
                                         createdByName: userProfile.name,
                                         createdByUID: userProfile.uid,
                                         createdAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -26363,6 +27189,7 @@
         
         const handleExport = async () => {
             const shopColumns = managedShops.flatMap(s => [
+                `${s.name} (Available)`,
                 `${s.name} (Qty)`,
                 `${s.name} (Min Stock)`,
                 `${s.name} (Shop Price ៛)`,
@@ -26390,6 +27217,7 @@
                     const sf = prodFifo?.byShop?.[shop.id];
                     const qty = p.stockByShop?.[shop.id] || 0;
                     const shopSellPrice = getEffectiveShopPrice(p, shop.id);
+                    row[`${shop.name} (Available)`] = isProductAvailableForShop(p, shop.id) ? 'Yes' : 'No';
                     row[`${shop.name} (Qty)`] = qty;
                     row[`${shop.name} (Min Stock)`] = getEffectiveShopMinStock(p, shop.id);
                     row[`${shop.name} (Shop Price ៛)`] = shopSellPrice;
@@ -26423,9 +27251,10 @@
                 note: 'Sample' 
             };
 
-            // Dynamically add a column for each managed shop with a sample value of 0
+            // Dynamically add a stock column and an Available (Yes/No) column for each managed shop
             managedShops.forEach(shop => {
                 sampleRow[shop.name] = 0;
+                sampleRow[`${shop.name} (Available)`] = 'Yes';
             });
 
             const ws = XLSX.utils.json_to_sheet([sampleRow]);
@@ -26441,8 +27270,11 @@
                 {wch: 10}, // Price
                 {wch: 20}  // Note
             ];
-            // Add width for each shop column
-            managedShops.forEach(() => wscols.push({wch: 15}));
+            // Add widths for each shop's stock & Available columns
+            managedShops.forEach(() => {
+                wscols.push({wch: 15});
+                wscols.push({wch: 22});
+            });
             
             ws['!cols'] = wscols;
 
@@ -26511,6 +27343,14 @@
                     />
                 )}
 
+                {modal.type === 'batch-stock-adjust' && (
+                    <BatchStockUpdateModal
+                        initialShopId={modal.data}
+                        userProfile={userProfile}
+                        onClose={() => setModal({ type: null })}
+                    />
+                )}
+
                 {productModal.show && <ProductModal 
                     show={true} 
                     productToEdit={productModal.product} 
@@ -26534,6 +27374,7 @@
                         <ProductFilters onFilterChange={handleFilterChange} />
                         <ProductActions 
                             onAddNew={handleAddNew}
+                            onBatchStock={() => setModal({ type: 'batch-stock-adjust', data: focusedShopId !== 'ALL' ? focusedShopId : '' })}
                             onImport={handleImport}
                             onExport={handleExport}
                             onTemplate={handleDownloadTemplate}
@@ -26587,8 +27428,8 @@
 
     const ProductModal = ({ show, onClose, productToEdit, onSave, mode = 'edit', fifoInfo = null, userProfile = null }) => {
         const { vendors, categories, products, shops } = useData(); 
-        // PHASE 1: Added categoryId, category, optional 1:1 imageUrl, per-shop minStockByShop, and multi-shop priceByShop fields
-        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, minStockByShop: {}, imageUrl: '', stockByShop: {}, priceByShop: {} };
+        // PHASE 1: Added categoryId, category, optional 1:1 imageUrl, per-shop minStockByShop, multi-shop priceByShop, and per-shop availableByShop fields
+        const initialFormState = { code: '', barcode: '', name: '', categoryId: '', category: '', vendorId: '', cost: 0, price: 0, note: '', minStock: 0, minStockByShop: {}, imageUrl: '', stockByShop: {}, priceByShop: {}, availableByShop: {} };
         const [formData, setFormData] = useState(initialFormState);
         const [isProcessingImage, setIsProcessingImage] = useState(false);
         const photoFileInputRef = useRef(null);
@@ -26700,17 +27541,27 @@
                 const resolvedCatName = initialCatObj ? initialCatObj.name : (productToEdit.category || productToEdit.categoryName || '');
                 setCategorySearch(resolvedCatName);
 
+                const initialAvailMap = { ...(productToEdit.availableByShop || {}) };
+                managedShops.forEach(s => {
+                    if (initialAvailMap[s.id] === undefined) {
+                        initialAvailMap[s.id] = true;
+                    }
+                });
+
                 setFormData({
                     ...initialFormState,
                     ...productToEdit,
                     minStockByShop: { ...(productToEdit.minStockByShop || {}) },
+                    availableByShop: initialAvailMap,
                     categoryId: initialCatObj?.id || productToEdit.categoryId || '',
                     category: resolvedCatName
                 });
                 // When editing, the initial barcode is considered valid.
                 setBarcodeValidation({ status: 'idle', message: '' }); 
             } else {
-                setFormData(initialFormState);
+                const defaultAvailMap = {};
+                managedShops.forEach(s => { defaultAvailMap[s.id] = true; });
+                setFormData({ ...initialFormState, availableByShop: defaultAvailMap });
                 setVendorSearch('');
                 setCategorySearch('');
                 setBarcodeValidation({ status: 'idle', message: '' });
@@ -26830,6 +27681,33 @@
             }
         };
 
+        const handleToggleShopAvailability = (shopId) => {
+            if (isViewMode) return;
+            setFormData(prev => {
+                const currentVal = prev.availableByShop?.[shopId] !== false;
+                return {
+                    ...prev,
+                    availableByShop: {
+                        ...(prev.availableByShop || {}),
+                        [shopId]: !currentVal
+                    }
+                };
+            });
+        };
+
+        const handleSetAllShopsAvailability = (isAvailable) => {
+            if (isViewMode) return;
+            setFormData(prev => {
+                const nextMap = { ...(prev.availableByShop || {}) };
+                managedShops.forEach(s => { nextMap[s.id] = !!isAvailable; });
+                return { ...prev, availableByShop: nextMap };
+            });
+        };
+
+        const assignedShopsCount = useMemo(() => {
+            return managedShops.filter(s => formData.availableByShop?.[s.id] !== false).length;
+        }, [managedShops, formData.availableByShop]);
+
         const handleSubmit = (e) => { 
             e.preventDefault(); 
 
@@ -26854,13 +27732,17 @@
                 return;
             }
 
-            // 2. Stock, Per-Shop Min Stock & Multi-Shop Price Sanitation (preserves unassigned shops)
+            // 2. Stock, Per-Shop Min Stock, Availability & Multi-Shop Price Sanitation (preserves unassigned shops)
             const sanitizedStock = { ...(formData.stockByShop || {}) };
             const sanitizedMinStockByShop = { ...(formData.minStockByShop || {}) };
             const sanitizedPrices = { ...(formData.priceByShop || {}) };
+            const sanitizedAvailableByShop = { ...(formData.availableByShop || {}) };
             const fallbackBaseMin = Math.max(0, parseInt(formData.minStock, 10) || 0);
             const missingPriceShops = [];
             managedShops.forEach(shop => {
+                const isShopAvailable = sanitizedAvailableByShop[shop.id] !== false;
+                sanitizedAvailableByShop[shop.id] = isShopAvailable;
+
                 // Convert any empty strings in the state to numeric 0 for the database
                 sanitizedStock[shop.id] = Number(sanitizedStock[shop.id]) || 0;
                 const rawMin = sanitizedMinStockByShop[shop.id];
@@ -26868,10 +27750,14 @@
                     ? Math.max(0, parseInt(rawMin, 10) || 0)
                     : fallbackBaseMin;
                 const rawShopPrice = Number(sanitizedPrices[shop.id]);
-                if (!rawShopPrice || rawShopPrice <= 0) {
-                    missingPriceShops.push(shop.name);
+                if (isShopAvailable) {
+                    if (!rawShopPrice || rawShopPrice <= 0) {
+                        missingPriceShops.push(shop.name);
+                    } else {
+                        sanitizedPrices[shop.id] = rawShopPrice;
+                    }
                 } else {
-                    sanitizedPrices[shop.id] = rawShopPrice;
+                    sanitizedPrices[shop.id] = rawShopPrice > 0 ? rawShopPrice : 0;
                 }
             });
 
@@ -26879,7 +27765,7 @@
                 setModalInfo({
                     show: true,
                     title: "Shop Selling Price Required",
-                    message: `Please enter a selling price (> 0) for: ${missingPriceShops.join(', ')}. You can also click "Copy Base to All" to fill all shops quickly.`,
+                    message: `Please enter a selling price (> 0) for assigned shop(s): ${missingPriceShops.join(', ')}. You can also click "Copy Base to All" to fill all assigned shops quickly.`,
                     isError: true
                 });
                 return;
@@ -26891,6 +27777,7 @@
                 vendorId: resolvedVendorId,
                 minStock: fallbackBaseMin,
                 minStockByShop: sanitizedMinStockByShop,
+                availableByShop: sanitizedAvailableByShop,
                 stockByShop: sanitizedStock,
                 priceByShop: sanitizedPrices
             };
@@ -27068,43 +27955,35 @@
                                     <input 
                                         type="text" 
                                         value={categorySearch} 
-                                        onFocus={() => {
-                                            if (!isViewMode) {
-                                                setIsCategoryFocused(true);
-                                                if (!categorySearch) setCategorySearchResults(availableCategories.slice(0, 15));
-                                            }
-                                        }}
+                                        onFocus={() => setIsCategoryFocused(true)}
                                         onBlur={() => setTimeout(() => setIsCategoryFocused(false), 180)}
                                         onChange={(e) => {
-                                            const val = e.target.value;
-                                            setCategorySearch(val);
-                                            setFormData(prev => ({ ...prev, categoryId: '', category: val }));
-                                        }} 
-                                        onKeyDown={handleInputKeyDown} 
+                                            setCategorySearch(e.target.value);
+                                            setFormData(prev => ({ ...prev, categoryId: '', category: e.target.value }));
+                                            setIsCategoryFocused(true);
+                                        }}
+                                        onKeyDown={handleInputKeyDown}
+                                        placeholder="Search or type category..."
                                         className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md read-only:bg-slate-800 read-only:text-slate-400" 
                                         readOnly={isViewMode} 
-                                        placeholder="Search or select category..."
                                         autoComplete="off"
                                     />
                                     {!isViewMode && categorySearchResults.length > 0 && (
                                         <div className="absolute z-20 w-full bg-slate-800 border border-slate-600 rounded-md mt-1 shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-700/60">
-                                            {categorySearchResults.map(cat => (
-                                                <div
-                                                    key={cat.id}
-                                                    onMouseDown={() => selectCategory(cat)}
-                                                    className="p-2 cursor-pointer hover:bg-slate-700 text-sm text-slate-200 flex items-center justify-between"
-                                                >
-                                                    <span>{cat.name}</span>
+                                            {categorySearchResults.map(c => (
+                                                <div key={c.id} onMouseDown={() => selectCategory(c)} className="px-3 py-2 cursor-pointer hover:bg-slate-700 text-sm text-slate-200 flex items-center justify-between">
+                                                    <span>{c.name}</span>
+                                                    <i className="fas fa-tag text-[10px] text-emerald-400"></i>
                                                 </div>
                                             ))}
                                         </div>
                                     )}
                                 </div>
 
-                                {/* Search & Select Vendor Input */}
+                                {/* Vendor Search & Select Input */}
                                 <div className="relative">
                                     <label className="block text-sm font-medium text-slate-300 mb-1">
-                                        <i className="fas fa-truck text-orange-400 mr-1.5"></i>Vendor
+                                        <i className="fas fa-truck text-orange-400 mr-1.5"></i>Vendor <span className="text-red-400">*</span>
                                     </label>
                                     <input
                                         type="text"
@@ -27114,20 +27993,16 @@
                                             setFormData(prev => ({ ...prev, vendorId: '' }));
                                         }}
                                         onKeyDown={handleInputKeyDown}
+                                        placeholder="Search and select vendor..."
                                         className="w-full bg-slate-700 text-slate-100 px-3 py-2 border border-slate-600 rounded-md read-only:bg-slate-800 read-only:text-slate-400"
-                                        readOnly={isViewMode}
-                                        placeholder="Search vendor..."
-                                        autoComplete="off"
                                         required
+                                        readOnly={isViewMode}
+                                        autoComplete="off"
                                     />
                                     {!isViewMode && vendorSearchResults.length > 0 && (
                                         <div className="absolute z-20 w-full bg-slate-800 border border-slate-600 rounded-md mt-1 shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-700/60">
                                             {vendorSearchResults.map(v => (
-                                                <div
-                                                    key={v.id}
-                                                    onMouseDown={() => selectVendor(v)}
-                                                    className="p-2 cursor-pointer hover:bg-slate-700 text-sm text-slate-200"
-                                                >
+                                                <div key={v.id} onMouseDown={() => selectVendor(v)} className="px-3 py-2 cursor-pointer hover:bg-slate-700 text-sm text-slate-200">
                                                     {v.name}
                                                 </div>
                                             ))}
@@ -27147,63 +28022,194 @@
                                                     type="number"
                                                     name="minStock"
                                                     min="0"
-                                                    value={formData.minStock ?? 0}
+                                                    value={formData.minStock}
                                                     onChange={handleInputChange}
-                                                    className="w-16 bg-slate-800 text-amber-300 font-mono font-bold text-xs px-2 py-1 border border-slate-600 rounded-lg text-center outline-none focus:border-amber-400"
-                                                    title="Default Min Stock value to copy to all shops"
-                                                    placeholder="0"
+                                                    placeholder="Default"
+                                                    className="w-20 bg-slate-800 text-amber-300 px-2 py-1 text-xs font-mono border border-slate-600 rounded-lg text-center outline-none focus:border-amber-400"
+                                                    title="Default Min Stock Alert Level"
                                                 />
                                                 <button
                                                     type="button"
                                                     onClick={() => {
-                                                        const baseMin = Math.max(0, parseInt(formData.minStock, 10) || 0);
+                                                        const bulkVal = Math.max(0, parseInt(formData.minStock, 10) || 0);
                                                         const nextMap = { ...(formData.minStockByShop || {}) };
-                                                        managedShops.forEach(s => { nextMap[s.id] = baseMin; });
+                                                        managedShops.forEach(s => { nextMap[s.id] = bulkVal; });
                                                         setFormData(prev => ({ ...prev, minStockByShop: nextMap }));
                                                     }}
-                                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-[11px] font-bold transition flex items-center gap-1"
-                                                    title="Apply default Min Stock to all shops"
+                                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/40 text-[11px] font-bold transition"
+                                                    title="Apply default Min Stock Alert Level to all shops"
                                                 >
-                                                    <i className="fas fa-copy text-[10px]"></i>
-                                                    <span>Apply to All</span>
+                                                    Apply to All
                                                 </button>
                                             </div>
                                         )}
                                     </div>
                                     <p className="text-[11px] text-slate-400">
-                                        Set an individual low-stock threshold for each shop based on its marketplace demand (enter <strong className="text-slate-200">0</strong> to disable alert for that shop).
+                                        Set an individual low-stock alert threshold for each shop (enter <strong className="text-slate-200">0</strong> to disable alerts for a shop).
                                     </p>
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-2.5">
                                         {managedShops.length === 0 ? (
-                                            <p className="text-xs text-slate-400 col-span-full">No shops are set to manage stock.</p>
+                                            <p className="text-xs text-slate-400 col-span-full">No managed shops assigned.</p>
                                         ) : managedShops.map(shop => {
-                                            const rawVal = formData.minStockByShop?.[shop.id];
-                                            const displayVal = (rawVal !== undefined && rawVal !== null)
-                                                ? rawVal
+                                            const rawShopMin = formData.minStockByShop?.[shop.id];
+                                            const displayVal = (rawShopMin !== undefined && rawShopMin !== null)
+                                                ? rawShopMin
                                                 : (formData.minStock ?? 0);
-                                            const numericVal = parseInt(displayVal, 10) || 0;
                                             return (
-                                                <div key={shop.id} className="bg-slate-800/70 p-2 rounded-lg border border-slate-700/80">
-                                                    <div className="flex items-center justify-between gap-1 mb-1">
-                                                        <label className="block text-[11px] font-semibold text-slate-300 truncate" title={shop.name}>
-                                                            {shop.name}
-                                                        </label>
-                                                        <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${
-                                                            numericVal > 0
-                                                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                                                                : 'bg-slate-700 text-slate-400 border border-slate-600'
-                                                        }`}>
-                                                            {numericVal > 0 ? `Alert < ${numericVal}` : 'Off'}
-                                                        </span>
-                                                    </div>
+                                                <div key={shop.id}>
+                                                    <label className="block text-[11px] font-medium text-slate-300 mb-1 truncate" title={shop.name}>
+                                                        {shop.name}
+                                                    </label>
                                                     <input
                                                         type="number"
                                                         min="0"
                                                         value={displayVal}
                                                         onChange={(e) => handleShopMinStockChange(e, shop.id)}
-                                                        placeholder="0"
-                                                        className="w-full bg-slate-700 text-slate-100 px-2.5 py-1.5 text-sm font-mono font-bold border border-slate-600 rounded-md focus:border-amber-400 outline-none read-only:bg-slate-800 read-only:text-slate-400"
+                                                        className="w-full bg-slate-700 text-amber-300 font-mono font-bold px-2.5 py-1.5 text-sm border border-slate-600 rounded-md focus:border-amber-400 outline-none read-only:bg-slate-800 read-only:text-slate-400"
                                                         readOnly={isViewMode}
+                                                    />
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* --- Available by Shop (Assign / Unassign Product per Shop) --- */}
+                                <div className="bg-slate-900/50 p-3.5 rounded-xl border border-emerald-500/30 space-y-2.5">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <label className="block text-sm font-medium text-slate-200 flex items-center gap-1.5">
+                                            <i className="fas fa-store-alt text-emerald-400"></i>
+                                            <span>Available by Shop (Assign / Unassign)</span>
+                                            <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono">
+                                                {assignedShopsCount} / {managedShops.length}
+                                            </span>
+                                        </label>
+                                        {!isViewMode && managedShops.length > 0 && (
+                                            <div className="flex items-center gap-1.5">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSetAllShopsAvailability(true)}
+                                                    className="px-2 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 text-[10px] font-bold transition"
+                                                    title="Assign product to all shops"
+                                                >
+                                                    Assign All
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSetAllShopsAvailability(false)}
+                                                    className="px-2 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-[10px] font-bold transition"
+                                                    title="Unassign product from all shops"
+                                                >
+                                                    Unassign All
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <p className="text-[11px] text-slate-400">
+                                        Toggle which branches can sell this product. Unassigned shops do not require a shop selling price and automatically hide this item from their POS Terminal.
+                                    </p>
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+                                        {managedShops.length === 0 ? (
+                                            <p className="text-xs text-slate-400 col-span-full">No managed shops assigned.</p>
+                                        ) : managedShops.map(shop => {
+                                            const isAssigned = formData.availableByShop?.[shop.id] !== false;
+                                            return (
+                                                <button
+                                                    key={shop.id}
+                                                    type="button"
+                                                    disabled={isViewMode}
+                                                    onClick={() => handleToggleShopAvailability(shop.id)}
+                                                    className={`p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-all ${
+                                                        isAssigned
+                                                            ? 'bg-emerald-950/35 border-emerald-500/50 text-slate-100 hover:border-emerald-400'
+                                                            : 'bg-slate-900/70 border-slate-700 text-slate-400 hover:border-slate-500'
+                                                    } ${isViewMode ? 'cursor-default' : 'cursor-pointer active:scale-[0.98]'}`}
+                                                >
+                                                    <div className="min-w-0">
+                                                        <div className="text-xs font-bold truncate" title={shop.name}>{shop.name}</div>
+                                                        <div className={`text-[10px] font-black uppercase mt-0.5 ${isAssigned ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                                            {isAssigned ? 'Assigned' : 'Unassigned'}
+                                                        </div>
+                                                    </div>
+                                                    <div className={`w-9 h-5 rounded-full p-0.5 transition-colors shrink-0 flex items-center ${isAssigned ? 'bg-emerald-500 justify-end' : 'bg-slate-700 justify-start'}`}>
+                                                        <span className="w-4 h-4 rounded-full bg-white shadow"></span>
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* --- Multi-Shop Selling Price (Required for Assigned Shops & Strictly Applied to POS Terminal) --- */}
+                                <div>
+                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                                        <label className="block text-sm font-medium text-slate-300">
+                                            <i className="fas fa-tags text-indigo-400 mr-1.5"></i>Multi-Shop Selling Price <span className="text-red-400 font-bold">*</span>
+                                        </label>
+                                        <div className="flex items-center gap-2">
+                                            {!isViewMode && managedShops.length > 0 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const baseVal = Number(formData.price) || 0;
+                                                        const nextPrices = { ...(formData.priceByShop || {}) };
+                                                        managedShops.forEach(s => { nextPrices[s.id] = baseVal; });
+                                                        setFormData(prev => ({ ...prev, priceByShop: nextPrices }));
+                                                    }}
+                                                    className="px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 text-[11px] font-bold transition flex items-center gap-1"
+                                                    title="Copy Base Sale Price to all shops"
+                                                >
+                                                    <i className="fas fa-copy text-[10px]"></i>
+                                                    <span>Copy Base to All</span>
+                                                </button>
+                                            )}
+                                            <span className="text-[11px] text-slate-400 font-mono">
+                                                Base: <strong className="text-emerald-400">៛{khrFormatter.format(Number(formData.price) || 0)}</strong>
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400 mb-2">
+                                        Strictly applied to each assigned shop's <strong className="text-indigo-300">POS Terminal</strong>. Every assigned shop requires a selling price (&gt; 0).
+                                    </p>
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 p-3.5 border border-indigo-500/30 rounded-md bg-slate-900/30">
+                                        {managedShops.length === 0 && (
+                                            <p className="text-sm text-slate-400 col-span-full">No managed shops assigned.</p>
+                                        )}
+                                        {managedShops.map(shop => {
+                                            const rawVal = formData.priceByShop?.[shop.id];
+                                            const hasValidPrice = Number(rawVal) > 0;
+                                            const isShopAvailable = formData.availableByShop?.[shop.id] !== false;
+                                            return (
+                                                <div key={shop.id} className={!isShopAvailable ? 'opacity-50' : ''}>
+                                                    <div className="flex items-center justify-between gap-1 mb-1">
+                                                        <label className="block text-xs font-medium text-slate-300 truncate" title={shop.name}>
+                                                            {shop.name} {isShopAvailable && <span className="text-red-400">*</span>}
+                                                        </label>
+                                                        {!isShopAvailable ? (
+                                                            <span className="px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 bg-slate-800 text-slate-400 border border-slate-700">
+                                                                Unassigned
+                                                            </span>
+                                                        ) : (
+                                                            <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${hasValidPrice ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-red-500/20 text-red-300 border border-red-500/40'}`}>
+                                                                {hasValidPrice ? 'POS Active' : 'Required'}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <input
+                                                        type="number"
+                                                        min={isShopAvailable ? "1" : "0"}
+                                                        required={!isViewMode && isShopAvailable}
+                                                        value={rawVal === 0 || rawVal === undefined || rawVal === null ? '' : rawVal}
+                                                        placeholder={isShopAvailable ? "Enter shop price" : "Unassigned"}
+                                                        onChange={(e) => handleShopPriceChange(e, shop.id)}
+                                                        className={`w-full bg-slate-700 text-slate-100 px-3 py-2 border rounded-md text-sm font-mono read-only:bg-slate-800 read-only:text-slate-400 ${
+                                                            !isShopAvailable
+                                                                ? 'border-slate-700 text-slate-500'
+                                                                : hasValidPrice
+                                                                    ? 'border-emerald-500/60 text-emerald-300 font-bold'
+                                                                    : 'border-red-500/60'
+                                                        }`}
+                                                        readOnly={isViewMode || !isShopAvailable}
                                                     />
                                                 </div>
                                             );
@@ -27304,68 +28310,6 @@
                                         </div>
                                     </div>
                                 )}
-
-                                {/* --- Multi-Shop Selling Price (Required & Strictly Applied to POS Terminal) --- */}
-                                <div>
-                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                                        <label className="block text-sm font-medium text-slate-300">
-                                            <i className="fas fa-tags text-indigo-400 mr-1.5"></i>Multi-Shop Selling Price <span className="text-red-400 font-bold">*</span>
-                                        </label>
-                                        <div className="flex items-center gap-2">
-                                            {!isViewMode && managedShops.length > 0 && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        const baseVal = Number(formData.price) || 0;
-                                                        const nextPrices = { ...(formData.priceByShop || {}) };
-                                                        managedShops.forEach(s => { nextPrices[s.id] = baseVal; });
-                                                        setFormData(prev => ({ ...prev, priceByShop: nextPrices }));
-                                                    }}
-                                                    className="px-2.5 py-1 rounded-lg bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/40 text-[11px] font-bold transition flex items-center gap-1"
-                                                    title="Copy Base Sale Price to all shops"
-                                                >
-                                                    <i className="fas fa-copy text-[10px]"></i>
-                                                    <span>Copy Base to All</span>
-                                                </button>
-                                            )}
-                                            <span className="text-[11px] text-slate-400 font-mono">
-                                                Base: <strong className="text-emerald-400">៛{khrFormatter.format(Number(formData.price) || 0)}</strong>
-                                            </span>
-                                        </div>
-                                    </div>
-                                    <p className="text-[11px] text-slate-400 mb-2">
-                                        Strictly applied to each shop's <strong className="text-indigo-300">POS Terminal</strong>. Every assigned shop requires a selling price (&gt; 0).
-                                    </p>
-                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 p-3.5 border border-indigo-500/30 rounded-md bg-slate-900/30">
-                                        {managedShops.length === 0 && (
-                                            <p className="text-sm text-slate-400 col-span-full">No managed shops assigned.</p>
-                                        )}
-                                        {managedShops.map(shop => {
-                                            const rawVal = formData.priceByShop?.[shop.id];
-                                            const hasValidPrice = Number(rawVal) > 0;
-                                            return (
-                                                <div key={shop.id}>
-                                                    <div className="flex items-center justify-between gap-1 mb-1">
-                                                        <label className="block text-xs font-medium text-slate-300 truncate" title={shop.name}>{shop.name} <span className="text-red-400">*</span></label>
-                                                        <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold uppercase shrink-0 ${hasValidPrice ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'bg-red-500/20 text-red-300 border border-red-500/40'}`}>
-                                                            {hasValidPrice ? 'POS Active' : 'Required'}
-                                                        </span>
-                                                    </div>
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        required={!isViewMode}
-                                                        value={rawVal === 0 || rawVal === undefined || rawVal === null ? '' : rawVal}
-                                                        placeholder="Enter shop price"
-                                                        onChange={(e) => handleShopPriceChange(e, shop.id)}
-                                                        className={`w-full bg-slate-700 text-slate-100 px-3 py-2 border rounded-md text-sm font-mono read-only:bg-slate-800 read-only:text-slate-400 ${hasValidPrice ? 'border-emerald-500/60 text-emerald-300 font-bold' : 'border-red-500/60'}`}
-                                                        readOnly={isViewMode}
-                                                    />
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
 
                                 {/* --- Stock by Shop Section --- */}
                                 <div>
