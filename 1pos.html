@@ -1532,6 +1532,7 @@
 
     const DataProvider = ({ children }) => {
         const [products, setProducts] = useState([]);
+        const [vendors, setVendors] = useState([]);
         const [shops, setShops] = useState(() => {
             try { return JSON.parse(localStorage.getItem('solaris_cached_shops_list') || '[]'); } catch (e) { return []; }
         });
@@ -1546,6 +1547,18 @@
         useEffect(() => {
             const unsubProd = window.SolarisSmartProductEngine.subscribeProducts(setProducts);
             window.SolarisSmartProductEngine.init();
+
+            window.SolarisCatalogDB.getAll('vendors').then(cachedVendors => {
+                if (Array.isArray(cachedVendors) && cachedVendors.length > 0) {
+                    setVendors(prev => prev.length > 0 ? prev : cachedVendors);
+                }
+            }).catch(() => {});
+
+            const unsubVendors = db.collection('vendors').onSnapshot(snap => {
+                const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                setVendors(list);
+                window.SolarisCatalogDB.putBatch('vendors', list, true);
+            }, () => {});
 
             const unsubShops = db.collection('shops').onSnapshot(snap => {
                 const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -1578,15 +1591,15 @@
                 }
             }, () => {});
 
-            return () => { unsubProd(); unsubShops(); unsubDevices(); unsubCust(); unsubLoyalty(); unsubCfg(); };
+            return () => { unsubProd(); unsubVendors(); unsubShops(); unsubDevices(); unsubCust(); unsubLoyalty(); unsubCfg(); };
         }, []);
 
         const value = useMemo(() => ({
-            products, shops, devices, customers, loyaltyRules, systemConfig,
+            products, vendors, shops, devices, customers, loyaltyRules, systemConfig,
             currentDeviceId,
             setLocalDevice: (id) => { localStorage.setItem('pos_deviceId', id); setCurrentDeviceId(id); },
             forceFullProductSync: () => window.SolarisSmartProductEngine.runFullSync()
-        }), [products, shops, devices, customers, loyaltyRules, systemConfig, currentDeviceId]);
+        }), [products, vendors, shops, devices, customers, loyaltyRules, systemConfig, currentDeviceId]);
 
         return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
     };
@@ -1618,9 +1631,9 @@
         <Modal show={show} onClose={onClose} maxWidth="max-w-sm">
             <ModalHeader title={title || 'Notice'} onClose={onClose} />
             <ModalBody>
-                <div className="flex items-center gap-3.5">
-                    <i className={`fas ${isError ? 'fa-exclamation-circle text-red-500' : 'fa-info-circle text-blue-400'} text-3xl shrink-0`}></i>
-                    <p className="text-sm text-slate-200">{message}</p>
+                <div className="flex items-start gap-3.5">
+                    <i className={`fas ${isError ? 'fa-exclamation-circle text-red-500' : 'fa-info-circle text-blue-400'} text-3xl shrink-0 mt-0.5`}></i>
+                    <p className="text-sm text-slate-200 whitespace-pre-line leading-relaxed">{message}</p>
                 </div>
             </ModalBody>
             <ModalFooter>
@@ -2162,6 +2175,355 @@
         );
     };
 
+    // --- Quick Access Group Presets & Modal (Phase 1) ---
+    const QUICK_GROUP_COLORS = [
+        { key: 'blue', label: 'Blue', dot: 'bg-blue-500', active: 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30', idle: 'bg-blue-500/10 text-blue-300 border-blue-500/30 hover:bg-blue-500/20' },
+        { key: 'emerald', label: 'Emerald', dot: 'bg-emerald-500', active: 'bg-emerald-600 text-white border-emerald-400 shadow-md shadow-emerald-900/30', idle: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20' },
+        { key: 'amber', label: 'Amber', dot: 'bg-amber-500', active: 'bg-amber-500 text-slate-950 border-amber-300 shadow-md shadow-amber-900/30', idle: 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20' },
+        { key: 'rose', label: 'Rose', dot: 'bg-rose-500', active: 'bg-rose-600 text-white border-rose-400 shadow-md shadow-rose-900/30', idle: 'bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/20' },
+        { key: 'purple', label: 'Purple', dot: 'bg-purple-500', active: 'bg-purple-600 text-white border-purple-400 shadow-md shadow-purple-900/30', idle: 'bg-purple-500/10 text-purple-300 border-purple-500/30 hover:bg-purple-500/20' },
+        { key: 'cyan', label: 'Cyan', dot: 'bg-cyan-500', active: 'bg-cyan-600 text-white border-cyan-400 shadow-md shadow-cyan-900/30', idle: 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30 hover:bg-cyan-500/20' },
+        { key: 'orange', label: 'Orange', dot: 'bg-orange-500', active: 'bg-orange-600 text-white border-orange-400 shadow-md shadow-orange-900/30', idle: 'bg-orange-500/10 text-orange-300 border-orange-500/30 hover:bg-orange-500/20' },
+        { key: 'indigo', label: 'Indigo', dot: 'bg-indigo-500', active: 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-900/30', idle: 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/20' }
+    ];
+
+    const QUICK_GROUP_ICONS = [
+        'fa-bolt', 'fa-star', 'fa-fire', 'fa-mug-hot', 'fa-utensils', 'fa-wine-bottle',
+        'fa-ice-cream', 'fa-cookie-bite', 'fa-tags', 'fa-box', 'fa-gift', 'fa-crown'
+    ];
+
+    const getQuickGroupColorMeta = (colorKey) => {
+        return QUICK_GROUP_COLORS.find(c => c.key === colorKey) || QUICK_GROUP_COLORS[0];
+    };
+
+    const getProductVendorLabel = (product, vendorsList = []) => {
+        if (!product) return '';
+        const direct = String(product.vendorName || product.vendor || product.supplierName || product.supplier || product.brand || '').trim();
+        if (direct) return direct;
+        if (product.vendorId && Array.isArray(vendorsList) && vendorsList.length > 0) {
+            const matched = vendorsList.find(v => v.id === product.vendorId);
+            if (matched?.name) return String(matched.name).trim();
+        }
+        return '';
+    };
+
+    const QuickAccessGroupModal = ({ show, onClose, group = null, products = [], vendors = [], activeShopId = '', onSave, onDelete }) => {
+        const [name, setName] = useState('');
+        const [color, setColor] = useState('blue');
+        const [icon, setIcon] = useState('fa-bolt');
+        const [selectedIds, setSelectedIds] = useState([]);
+        const [productSearch, setProductSearch] = useState('');
+        const [vendorFilter, setVendorFilter] = useState('All');
+        const [showSelectedOnly, setShowSelectedOnly] = useState(false);
+        const [confirmDelete, setConfirmDelete] = useState(false);
+
+        useEffect(() => {
+            if (!show) return;
+            setName(group?.name || '');
+            setColor(group?.color || 'blue');
+            setIcon(group?.icon || 'fa-bolt');
+            setSelectedIds(Array.isArray(group?.productIds) ? [...group.productIds] : []);
+            setProductSearch('');
+            setVendorFilter('All');
+            setShowSelectedOnly(false);
+            setConfirmDelete(false);
+        }, [show, group]);
+
+        const vendorOptions = useMemo(() => {
+            const set = new Set();
+            (vendors || []).forEach(v => {
+                const n = String(v?.name || v?.vendorName || '').trim();
+                if (n) set.add(n);
+            });
+            (products || []).forEach(p => {
+                const label = getProductVendorLabel(p, vendors);
+                if (label) set.add(label);
+            });
+            return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+        }, [vendors, products]);
+
+        const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+        const filteredPickerProducts = useMemo(() => {
+            const q = productSearch.trim().toLowerCase();
+            return (products || []).filter(p => {
+                if (showSelectedOnly && !selectedSet.has(p.id)) return false;
+                if (vendorFilter !== 'All') {
+                    if (getProductVendorLabel(p, vendors) !== vendorFilter) return false;
+                }
+                if (!q) return true;
+                return (
+                    (p.name || '').toLowerCase().includes(q) ||
+                    String(p.code || '').toLowerCase().includes(q) ||
+                    String(p.barcode || '').toLowerCase().includes(q)
+                );
+            }).slice(0, 150);
+        }, [products, vendors, productSearch, vendorFilter, showSelectedOnly, selectedSet]);
+
+        const toggleProduct = (productId) => {
+            setSelectedIds(prev => prev.includes(productId) ? prev.filter(id => id !== productId) : [...prev, productId]);
+        };
+
+        const handleSelectFiltered = () => {
+            setSelectedIds(prev => {
+                const next = new Set(prev);
+                filteredPickerProducts.forEach(p => next.add(p.id));
+                return Array.from(next);
+            });
+        };
+
+        const handleSubmit = (e) => {
+            e.preventDefault();
+            const trimmedName = name.trim();
+            if (!trimmedName) return;
+            onSave({
+                id: group?.id || `qg_${Date.now()}`,
+                name: trimmedName,
+                color,
+                icon,
+                productIds: selectedIds
+            });
+        };
+
+        if (!show) return null;
+        const previewColor = getQuickGroupColorMeta(color);
+
+        return (
+            <Modal show={show} onClose={onClose} maxWidth="max-w-2xl">
+                <ModalHeader title={group ? `Edit Quick Group — ${group.name}` : 'Create Quick Access Group'} onClose={onClose} />
+                <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+                    <ModalBody>
+                        <div className="space-y-4">
+                            {/* Group Name & Live Pill Preview */}
+                            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                                <div className="sm:col-span-7">
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        Quick Group Name *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        required
+                                        maxLength={32}
+                                        value={name}
+                                        onChange={e => setName(e.target.value)}
+                                        placeholder="e.g. Best Sellers, Morning Coffee, Promo..."
+                                        className="w-full bg-slate-900 text-white px-3.5 py-2.5 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-sm font-semibold"
+                                        autoFocus
+                                    />
+                                </div>
+                                <div className="sm:col-span-5">
+                                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                                        Live Pill Preview
+                                    </label>
+                                    <div className="h-[42px] bg-slate-900/70 border border-slate-700 rounded-xl px-3 flex items-center justify-center">
+                                        <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold border ${previewColor.active}`}>
+                                            <i className={`fas ${icon} text-[11px]`}></i>
+                                            <span className="truncate max-w-[120px]">{name.trim() || 'Quick Group'}</span>
+                                            <span className="px-1.5 py-0.5 rounded-md bg-black/20 text-[10px] font-mono">{selectedIds.length}</span>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Pill Color & Icon Selectors */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-900/60 p-3 rounded-xl border border-slate-700/80">
+                                <div>
+                                    <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">Pill Color</span>
+                                    <div className="flex flex-wrap gap-2">
+                                        {QUICK_GROUP_COLORS.map(c => (
+                                            <button
+                                                key={c.key}
+                                                type="button"
+                                                onClick={() => setColor(c.key)}
+                                                className={`w-7 h-7 rounded-full ${c.dot} flex items-center justify-center transition ${
+                                                    color === c.key ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-110' : 'opacity-70 hover:opacity-100'
+                                                }`}
+                                                title={c.label}
+                                            >
+                                                {color === c.key && <i className="fas fa-check text-[10px] text-white"></i>}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div>
+                                    <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">Pill Icon</span>
+                                    <div className="grid grid-cols-6 gap-1.5">
+                                        {QUICK_GROUP_ICONS.map(ic => (
+                                            <button
+                                                key={ic}
+                                                type="button"
+                                                onClick={() => setIcon(ic)}
+                                                className={`h-8 rounded-lg border flex items-center justify-center text-xs transition ${
+                                                    icon === ic
+                                                        ? 'bg-blue-600 text-white border-blue-400'
+                                                        : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                                                }`}
+                                            >
+                                                <i className={`fas ${ic}`}></i>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Product Picker Toolbar */}
+                            <div className="space-y-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <label className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                                        <i className="fas fa-boxes text-blue-400"></i>
+                                        <span>Select Products ({selectedIds.length} selected)</span>
+                                    </label>
+                                    <div className="flex items-center gap-1.5 text-[11px]">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowSelectedOnly(prev => !prev)}
+                                            className={`px-2.5 py-1 rounded-lg font-bold border transition ${
+                                                showSelectedOnly
+                                                    ? 'bg-blue-600 text-white border-blue-400'
+                                                    : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white'
+                                            }`}
+                                        >
+                                            Selected Only
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleSelectFiltered}
+                                            className="px-2.5 py-1 rounded-lg font-bold bg-slate-900 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition"
+                                        >
+                                            Select Shown
+                                        </button>
+                                        {selectedIds.length > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setSelectedIds([])}
+                                                className="px-2.5 py-1 rounded-lg font-bold bg-slate-900 hover:bg-red-600/20 text-rose-400 border border-slate-700 transition"
+                                            >
+                                                Clear All
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col sm:flex-row gap-2">
+                                    <div className="relative flex-1">
+                                        <input
+                                            type="text"
+                                            value={productSearch}
+                                            onChange={e => setProductSearch(e.target.value)}
+                                            placeholder="Search product name, code, or barcode..."
+                                            className="w-full h-9 bg-slate-900 text-white pl-8 pr-3 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-xs"
+                                        />
+                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                    </div>
+                                    <select
+                                        value={vendorFilter}
+                                        onChange={e => setVendorFilter(e.target.value)}
+                                        className="h-9 bg-slate-900 text-slate-200 px-3 rounded-xl border border-slate-600 focus:border-blue-500 outline-none text-xs font-semibold sm:max-w-[200px]"
+                                    >
+                                        {vendorOptions.map(v => (
+                                            <option key={v} value={v}>
+                                                {v === 'All' ? 'All Vendors' : v}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Multi-Select Product List */}
+                                <div className="bg-slate-900/70 border border-slate-700 rounded-xl max-h-60 overflow-y-auto divide-y divide-slate-800">
+                                    {filteredPickerProducts.length === 0 ? (
+                                        <div className="p-6 text-center text-slate-500 text-xs">
+                                            No matching products found.
+                                        </div>
+                                    ) : (
+                                        filteredPickerProducts.map(p => {
+                                            const isPicked = selectedSet.has(p.id);
+                                            const vendorLabel = getProductVendorLabel(p, vendors);
+                                            const price = getEffectiveShopPrice(p, activeShopId);
+                                            return (
+                                                <button
+                                                    key={p.id}
+                                                    type="button"
+                                                    onClick={() => toggleProduct(p.id)}
+                                                    className={`w-full px-3 py-2 flex items-center justify-between gap-2.5 text-left transition ${
+                                                        isPicked ? 'bg-blue-600/15 hover:bg-blue-600/25' : 'hover:bg-slate-800/70'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                                        <span className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 text-[10px] ${
+                                                            isPicked
+                                                                ? 'bg-blue-600 border-blue-400 text-white'
+                                                                : 'bg-slate-800 border-slate-600 text-transparent'
+                                                        }`}>
+                                                            <i className="fas fa-check"></i>
+                                                        </span>
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="text-xs font-bold text-white truncate">{p.name}</div>
+                                                            <div className="text-[10px] font-mono text-slate-400 truncate">
+                                                                {p.code || '-'}
+                                                                {p.barcode ? ` • ${p.barcode}` : ''}
+                                                                {vendorLabel ? ` • ${vendorLabel}` : ''}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <span className="text-xs font-mono font-bold text-emerald-400 shrink-0">
+                                                        ៛{khrFormatter.format(price)}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </ModalBody>
+                    <ModalFooter>
+                        {group && typeof onDelete === 'function' && (
+                            <div className="mr-auto">
+                                {!confirmDelete ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => setConfirmDelete(true)}
+                                        className="bg-red-600/15 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 font-bold py-2 px-4 rounded-xl text-xs transition"
+                                    >
+                                        <i className="fas fa-trash-alt mr-1.5"></i>Delete Group
+                                    </button>
+                                ) : (
+                                    <div className="flex items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => onDelete(group.id)}
+                                            className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-3.5 rounded-xl text-xs transition"
+                                        >
+                                            Confirm Delete
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmDelete(false)}
+                                            className="bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold py-2 px-3 rounded-xl text-xs transition"
+                                        >
+                                            Keep
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        <button type="button" onClick={onClose} className="bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold py-2 px-5 rounded-xl text-xs transition">
+                            Cancel
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={!name.trim()}
+                            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-bold py-2 px-6 rounded-xl text-xs flex items-center gap-1.5 transition shadow-lg shadow-blue-900/30"
+                        >
+                            <i className="fas fa-save"></i>
+                            <span>{group ? 'Update Group' : 'Save Quick Group'}</span>
+                        </button>
+                    </ModalFooter>
+                </form>
+            </Modal>
+        );
+    };
+
     // ========================================================================
     // 6. FAST LOGIN PAGE
     // ========================================================================
@@ -2215,7 +2577,7 @@
                     </form>
                     <div className="text-center pt-3 border-t border-slate-800">
                         <a
-                            href="https://jlw168.github.io/POS/B-index.html"
+                            href="https://jlw168.github.io/POS/"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="group inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-800/80 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-700 hover:border-blue-500 text-xs font-bold transition shadow-sm"
@@ -2325,17 +2687,6 @@
                     <button type="button" disabled={syncing} onClick={async () => { setSyncing(true); await forceFullProductSync(); setSyncing(false); }} className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 flex items-center justify-center transition" title="Sync Products from Cloud">
                         <i className={`fas fa-sync-alt text-xs ${syncing ? 'fa-spin text-amber-400' : ''}`}></i>
                     </button>
-
-                    <a
-                        href="https://jlw168.github.io/POS/B-index.html"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition"
-                        title="Open Back-Office (Reports, Inventory, Settings)"
-                        aria-label="Open Back-Office"
-                    >
-                        <i className="fas fa-chart-line text-xs"></i>
-                    </a>
 
                     <button type="button" onClick={() => isFs ? window.SolarisPWAManager.exitKioskFullscreen() : window.SolarisPWAManager.enterKioskFullscreen()} className="hidden sm:flex w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 items-center justify-center" title="Toggle Fullscreen">
                         <i className={`fas ${isFs ? 'fa-compress' : 'fa-expand'} text-xs`}></i>
@@ -6194,9 +6545,14 @@
     // 10. STANDALONE POS TERMINAL WORKSPACE
     // ========================================================================
     const POSTerminal = ({ userProfile, activeShopId, setActiveShopId, activeShift, setActiveShift, showShiftModal, setShowShiftModal, showHistoryModal, setShowHistoryModal, showDailyReportModal, setShowDailyReportModal, showBankAutoSumModal, setShowBankAutoSumModal, showKhqrSimulatorModal, setShowKhqrSimulatorModal }) => {
-        const { products, shops, devices, customers, loyaltyRules, systemConfig, currentDeviceId } = useData();
+        const { products, vendors, shops, devices, customers, loyaltyRules, systemConfig, currentDeviceId } = useData();
         const [searchTerm, setSearchTerm] = useState('');
         const [selectedCategory, setSelectedCategory] = useState('All');
+        const [selectedVendor, setSelectedVendor] = useState('All');
+        const [quickGroups, setQuickGroups] = useState([]);
+        const [selectedQuickGroupId, setSelectedQuickGroupId] = useState('');
+        const [showQuickGroupModal, setShowQuickGroupModal] = useState(false);
+        const [editingQuickGroup, setEditingQuickGroup] = useState(null);
         const [viewMode, setViewMode] = useState('list'); // 'list' (Default inline Code • Barcode • QTY) | 'grid' (1:1 photo grid)
         const [activeMobileTab, setActiveMobileTab] = useState('products');
         const [cart, setCart] = useState([]);
@@ -6225,6 +6581,8 @@
         const [completedReceipt, setCompletedReceipt] = useState(null);
         const [thankYouModalData, setThankYouModalData] = useState(null);
         const [modalMsg, setModalMsg] = useState({ show: false, title: '', message: '', isError: false });
+        const [scanFeedback, setScanFeedback] = useState(null);
+        const scanFeedbackTimerRef = useRef(null);
         const [todaySales, setTodaySales] = useState([]);
         const [todaySalesLoading, setTodaySalesLoading] = useState(false);
 
@@ -6233,6 +6591,7 @@
         const [isVirtualKeyboardEnabled, setIsVirtualKeyboardEnabled] = useState(false);
 
         const isAnyModalOpen = Boolean(
+            modalMsg.show ||
             showPaymentModal ||
             showAddCustomerModal ||
             showSaveTicketModal ||
@@ -6246,7 +6605,8 @@
             showHistoryModal ||
             showDailyReportModal ||
             showBankAutoSumModal ||
-            showKhqrSimulatorModal
+            showKhqrSimulatorModal ||
+            showQuickGroupModal
         );
 
         const isAnyModalOpenRef = useRef(isAnyModalOpen);
@@ -6277,7 +6637,7 @@
             if (!isAnyModalOpen) {
                 refocusSearchInput(true);
             }
-        }, [isAnyModalOpen, activeMobileTab, selectedCategory, viewMode, refocusSearchInput]);
+        }, [isAnyModalOpen, activeMobileTab, selectedCategory, selectedVendor, selectedQuickGroupId, viewMode, refocusSearchInput]);
 
         useEffect(() => {
             const handleGlobalReclaimFocus = (e) => {
@@ -6340,6 +6700,78 @@
             return prod.stockByShop?.[activeShop?.id] || 0;
         }, [products, activeShop?.id]);
 
+        // Per-Shop Quick Access Groups: 0ms localStorage cache + live Firestore sync
+        useEffect(() => {
+            if (!activeShop?.id) {
+                setQuickGroups([]);
+                setSelectedQuickGroupId('');
+                return;
+            }
+            const cacheKey = `solaris_pos_quick_groups_${activeShop.id}`;
+            setSelectedQuickGroupId('');
+            try {
+                const cached = JSON.parse(localStorage.getItem(cacheKey) || '[]');
+                setQuickGroups(Array.isArray(cached) ? cached : []);
+            } catch (e) {
+                setQuickGroups([]);
+            }
+
+            const unsubQuick = db.collection('system_settings')
+                .doc(`pos_quick_groups_${activeShop.id}`)
+                .onSnapshot(snap => {
+                    if (snap.exists) {
+                        const cloudGroups = Array.isArray(snap.data()?.groups) ? snap.data().groups : [];
+                        setQuickGroups(cloudGroups);
+                        try { localStorage.setItem(cacheKey, JSON.stringify(cloudGroups)); } catch (e) {}
+                    }
+                }, () => {});
+            return () => unsubQuick();
+        }, [activeShop?.id]);
+
+        const persistQuickGroups = useCallback((nextGroups) => {
+            if (!activeShop?.id) return;
+            const cacheKey = `solaris_pos_quick_groups_${activeShop.id}`;
+            setQuickGroups(nextGroups);
+            try { localStorage.setItem(cacheKey, JSON.stringify(nextGroups)); } catch (e) {}
+            db.collection('system_settings')
+                .doc(`pos_quick_groups_${activeShop.id}`)
+                .set({
+                    shopId: activeShop.id,
+                    shopName: activeShop.name || '',
+                    groups: nextGroups,
+                    updatedBy: userProfile?.name || 'Cashier',
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                }, { merge: true })
+                .catch(() => {});
+        }, [activeShop?.id, activeShop?.name, userProfile?.name]);
+
+        const handleSaveQuickGroup = useCallback((groupData) => {
+            const exists = quickGroups.some(g => g.id === groupData.id);
+            const nextGroups = exists
+                ? quickGroups.map(g => g.id === groupData.id ? { ...g, ...groupData, updatedAt: Date.now() } : g)
+                : [...quickGroups, { ...groupData, updatedAt: Date.now() }];
+            persistQuickGroups(nextGroups);
+            setSelectedQuickGroupId(groupData.id);
+            setSelectedVendor('All');
+            setSelectedCategory('All');
+            setShowQuickGroupModal(false);
+            setEditingQuickGroup(null);
+            setIsVirtualKeyboardEnabled(false);
+            isAnyModalOpenRef.current = false;
+            refocusSearchInput(true);
+        }, [quickGroups, persistQuickGroups, refocusSearchInput]);
+
+        const handleDeleteQuickGroup = useCallback((groupId) => {
+            const nextGroups = quickGroups.filter(g => g.id !== groupId);
+            persistQuickGroups(nextGroups);
+            if (selectedQuickGroupId === groupId) setSelectedQuickGroupId('');
+            setShowQuickGroupModal(false);
+            setEditingQuickGroup(null);
+            setIsVirtualKeyboardEnabled(false);
+            isAnyModalOpenRef.current = false;
+            refocusSearchInput(true);
+        }, [quickGroups, persistQuickGroups, selectedQuickGroupId, refocusSearchInput]);
+
         // Held Tickets Real-Time Listener (100% Copycat from index.html)
         useEffect(() => {
             if (!activeShop?.id) {
@@ -6393,14 +6825,39 @@
             const set = new Set(['All']);
             products.forEach(p => {
                 const cat = (p.category || p.categoryName || '').trim();
-                if (cat) set.add(cat);
+                if (cat && cat.toLowerCase() !== 'general') set.add(cat);
             });
             return Array.from(set);
         }, [products]);
 
-        const filteredProducts = useMemo(() => {
+        const vendorOptions = useMemo(() => {
+            const set = new Set();
+            (vendors || []).forEach(v => {
+                const n = String(v?.name || v?.vendorName || '').trim();
+                if (n) set.add(n);
+            });
+            (products || []).forEach(p => {
+                const label = getProductVendorLabel(p, vendors);
+                if (label) set.add(label);
+            });
+            return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+        }, [vendors, products]);
+
+        const activeQuickGroup = useMemo(
+            () => quickGroups.find(g => g.id === selectedQuickGroupId) || null,
+            [quickGroups, selectedQuickGroupId]
+        );
+
+        const productIdSet = useMemo(() => new Set(products.map(p => p.id)), [products]);
+
+        const matchingProducts = useMemo(() => {
             const q = debouncedSearch.trim().toLowerCase();
+            const qgSet = activeQuickGroup ? new Set(activeQuickGroup.productIds || []) : null;
             return products.filter(p => {
+                if (qgSet && !qgSet.has(p.id)) return false;
+                if (selectedVendor !== 'All') {
+                    if (getProductVendorLabel(p, vendors) !== selectedVendor) return false;
+                }
                 if (selectedCategory !== 'All') {
                     const cat = (p.category || p.categoryName || '').trim();
                     if (cat !== selectedCategory) return false;
@@ -6411,14 +6868,22 @@
                     (p.code || '').toLowerCase().includes(q) ||
                     String(p.barcode || '').toLowerCase().includes(q)
                 );
-            }).slice(0, 120);
-        }, [products, selectedCategory, debouncedSearch]);
+            });
+        }, [products, vendors, activeQuickGroup, selectedVendor, selectedCategory, debouncedSearch]);
 
-        const cartTotal = useMemo(() => cart.reduce((sum, item) => sum + ((Number(item.price) || 0) * (Number(item.quantity) || 0)), 0), [cart]);
-        const cartItemCount = useMemo(() => cart.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0), [cart]);
+        const filteredProducts = useMemo(() => matchingProducts.slice(0, 120), [matchingProducts]);
+
+        const cartTotal = useMemo(
+            () => cart.reduce((sum, i) => sum + ((Number(i.price) || 0) * (Number(i.quantity) || 1)), 0),
+            [cart]
+        );
+        const cartItemCount = useMemo(
+            () => cart.reduce((sum, i) => sum + (Number(i.quantity) || 1), 0),
+            [cart]
+        );
         const exchangeRate = Math.max(100, Number(activeShop?.khqrConfig?.exchangeRate) || 4000);
-
         const loyaltyRate = parseFloat(systemConfig?.loyaltyRate) || 0;
+
         const estimatedPoints = useMemo(() => {
             if (!selectedCustomerId || cartTotal <= 0) return 0;
             if (activeLoyaltyRule && Number(activeLoyaltyRule.spendAmountKhr) > 0 && Number(activeLoyaltyRule.earnPoints) > 0) {
@@ -6667,14 +7132,109 @@
             setCustomerSearchTerm('');
         };
 
+        const showScanToast = useCallback((message, type = 'error') => {
+            if (scanFeedbackTimerRef.current) clearTimeout(scanFeedbackTimerRef.current);
+            setScanFeedback({ message, type });
+            scanFeedbackTimerRef.current = setTimeout(() => setScanFeedback(null), 2600);
+        }, []);
+
+        useEffect(() => {
+            return () => {
+                if (scanFeedbackTimerRef.current) clearTimeout(scanFeedbackTimerRef.current);
+            };
+        }, []);
+
         const handleSearchKeyDown = (e) => {
-            if (e.key === 'Enter' && searchTerm.trim()) {
-                const q = searchTerm.trim().toLowerCase();
-                const exact = products.find(p => String(p.barcode || '').toLowerCase() === q || String(p.code || '').toLowerCase() === q) || filteredProducts[0];
-                if (exact) {
-                    addToCart(exact);
-                    setSearchTerm('');
+            if (e.key !== 'Enter') return;
+            const rawVal = String(e.currentTarget.value ?? searchTerm ?? '').trim();
+            if (!rawVal) return;
+
+            e.preventDefault();
+
+            const q = rawVal.toLowerCase();
+            const qCompact = q.replace(/[\s\-]/g, '');
+            const isLongNumeric = /^\d{8,}$/.test(qCompact);
+            const qNoLeadingZero = isLongNumeric ? qCompact.replace(/^0+/, '') : '';
+
+            const getProductBarcodes = (p) => {
+                const list = [];
+                if (p?.barcode !== undefined && p?.barcode !== null && String(p.barcode).trim() !== '') {
+                    String(p.barcode)
+                        .split(/[,;|\n]+/)
+                        .map(s => s.trim())
+                        .filter(Boolean)
+                        .forEach(b => list.push(b));
                 }
+                if (Array.isArray(p?.barcodes)) {
+                    p.barcodes.forEach(b => {
+                        const s = String(b || '').trim();
+                        if (s) list.push(s);
+                    });
+                }
+                return list;
+            };
+
+            // 1. Exact trimmed match on barcode or product code across ALL products (ignores category filter & debounce)
+            let matchedProduct = products.find(p => {
+                const code = String(p.code || '').trim().toLowerCase();
+                if (code && code === q) return true;
+                return getProductBarcodes(p).some(b => b.toLowerCase() === q);
+            });
+
+            // 2. Normalized barcode/code match (handles stray spaces/hyphens or EAN-13/UPC-A leading-zero differences)
+            if (!matchedProduct) {
+                matchedProduct = products.find(p => {
+                    const codeCompact = String(p.code || '').trim().toLowerCase().replace(/[\s\-]/g, '');
+                    if (codeCompact && codeCompact === qCompact) return true;
+                    return getProductBarcodes(p).some(b => {
+                        const bCompact = b.toLowerCase().replace(/[\s\-]/g, '');
+                        if (bCompact === qCompact) return true;
+                        if (qNoLeadingZero && /^\d{8,}$/.test(bCompact) && bCompact.replace(/^0+/, '') === qNoLeadingZero) {
+                            return true;
+                        }
+                        return false;
+                    });
+                });
+            }
+
+            // 3. Synchronous single-match fallback for manual typing (NEVER uses stale debounced filteredProducts[0])
+            if (!matchedProduct) {
+                const liveMatches = products.filter(p => {
+                    if (selectedCategory !== 'All') {
+                        const cat = (p.category || p.categoryName || '').trim();
+                        if (cat !== selectedCategory) return false;
+                    }
+                    return (
+                        (p.name || '').toLowerCase().includes(q) ||
+                        String(p.code || '').trim().toLowerCase().includes(q) ||
+                        getProductBarcodes(p).some(b => b.toLowerCase().includes(q))
+                    );
+                });
+
+                if (liveMatches.length === 1) {
+                    matchedProduct = liveMatches[0];
+                } else if (liveMatches.length > 1) {
+                    showScanToast(`Multiple matches (${liveMatches.length}) for "${rawVal}" — tap item below`, 'info');
+                    return;
+                }
+            }
+
+            if (matchedProduct) {
+                addToCart(matchedProduct);
+                setSearchTerm('');
+                e.currentTarget.value = '';
+                setScanFeedback(null);
+            } else {
+                setScanFeedback(null);
+                setSearchTerm('');
+                e.currentTarget.value = '';
+                e.currentTarget.blur();
+                setModalMsg({
+                    show: true,
+                    title: 'No Found Product Barcode',
+                    message: `No Found Product Barcode\nScanned: ${rawVal}\n\nContact Shop Manager or Your Supervisor.`,
+                    isError: true
+                });
             }
         };
 
@@ -6884,15 +7444,13 @@
 
         return (
             <div className="flex-1 flex flex-col overflow-hidden bg-slate-950 text-slate-200 min-h-0 p-2 sm:p-3 select-none">
-                <MessageModal {...modalMsg} onClose={() => setModalMsg({ show: false })} />
-                <ConfirmationModal
-                    show={!!pendingRestoreTicket}
-                    title="Overwrite Current Cart?"
-                    message="Current cart is not empty. Do you want to overwrite it with the saved bill?"
-                    onConfirm={() => executeRestoreTicket(pendingRestoreTicket)}
-                    onCancel={() => {
-                        setPendingRestoreTicket(null);
-                        refocusSearchInput();
+                <MessageModal
+                    {...modalMsg}
+                    onClose={() => {
+                        setModalMsg({ show: false, title: '', message: '', isError: false });
+                        setIsVirtualKeyboardEnabled(false);
+                        isAnyModalOpenRef.current = false;
+                        refocusSearchInput(true);
                     }}
                 />
                 <ConfirmationModal
@@ -6946,6 +7504,22 @@
                     }}
                     shop={activeShop}
                     systemConfig={systemConfig}
+                />
+                <QuickAccessGroupModal
+                    show={showQuickGroupModal}
+                    onClose={() => {
+                        setShowQuickGroupModal(false);
+                        setEditingQuickGroup(null);
+                        setIsVirtualKeyboardEnabled(false);
+                        isAnyModalOpenRef.current = false;
+                        refocusSearchInput(true);
+                    }}
+                    group={editingQuickGroup}
+                    products={products}
+                    vendors={vendors}
+                    activeShopId={activeShop?.id || ''}
+                    onSave={handleSaveQuickGroup}
+                    onDelete={handleDeleteQuickGroup}
                 />
                 {showPaymentModal && (
                     <PaymentModal
@@ -7094,79 +7668,222 @@
                                                     setIsVirtualKeyboardEnabled(false);
                                                     refocusSearchInput(false);
                                                 }
-                                            }, 120);
+                                            }, 20);
                                         }
                                     }}
-                                    placeholder={isVirtualKeyboardEnabled ? "Type product name, code, or barcode..." : "Ready to scan barcode (or tap keyboard icon to type)..."}
-                                    className="w-full h-10 bg-slate-900 text-white pl-9 pr-16 rounded-xl border border-slate-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 outline-none text-sm transition"
+                                    placeholder={isVirtualKeyboardEnabled ? 'Type product name, code, or barcode...' : 'Ready for Barcode Scan (or tap keyboard icon)...'}
+                                    className="w-full h-10 bg-slate-900 text-white pl-9 pr-16 rounded-xl border border-slate-700 focus:border-blue-500 outline-none text-xs sm:text-sm font-medium"
                                 />
-                                <i className="fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-emerald-400"></i>
+                                <i className={`fas ${isVirtualKeyboardEnabled ? 'fa-search text-blue-400' : 'fa-barcode text-emerald-400'} absolute left-3 top-1/2 -translate-y-1/2 text-sm`}></i>
                                 <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
                                     {searchTerm && (
                                         <button
                                             type="button"
-                                            onClick={() => {
-                                                setSearchTerm('');
-                                                refocusSearchInput(true);
-                                            }}
-                                            className="w-6 h-6 rounded-lg text-slate-400 hover:text-white flex items-center justify-center"
+                                            onClick={() => { setSearchTerm(''); refocusSearchInput(true); }}
+                                            className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center text-xs"
                                             title="Clear search"
                                         >
-                                            <i className="fas fa-times-circle text-xs"></i>
+                                            <i className="fas fa-times"></i>
                                         </button>
                                     )}
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            setIsVirtualKeyboardEnabled(prev => {
-                                                const next = !prev;
-                                                setTimeout(() => {
-                                                    if (searchInputRef.current) {
-                                                        searchInputRef.current.blur();
-                                                        searchInputRef.current.focus({ preventScroll: true });
-                                                    }
-                                                }, 10);
-                                                return next;
-                                            });
+                                            setIsVirtualKeyboardEnabled(prev => !prev);
+                                            setTimeout(() => searchInputRef.current?.focus(), 20);
                                         }}
-                                        className={`w-7 h-7 rounded-lg flex items-center justify-center border text-xs transition ${
+                                        className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs border transition ${
                                             isVirtualKeyboardEnabled
-                                                ? 'bg-blue-600 text-white border-blue-400 shadow'
-                                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-600'
+                                                ? 'bg-blue-600 text-white border-blue-400'
+                                                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
                                         }`}
-                                        title={isVirtualKeyboardEnabled ? "Hide On-Screen Keyboard (Scanner Only Mode)" : "Show On-Screen Keyboard to Type"}
+                                        title={isVirtualKeyboardEnabled ? 'Switch back to Scanner-Ready Mode' : 'Open On-Screen Keyboard'}
                                     >
                                         <i className="fas fa-keyboard"></i>
                                     </button>
                                 </div>
                             </div>
-                            <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700 shrink-0">
-                                <button type="button" onClick={() => setViewMode('list')} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${viewMode === 'list' ? 'bg-blue-600 text-white' : 'text-slate-400'}`} title="List View">
+                        </div>
+
+                        {/* Unified Toolbar: All Reset Pill + Vendor Droplist + Quick Group Pills + (+ Quick Group) + List / Grid Switcher */}
+                        <div className="flex items-center gap-2 shrink-0 min-w-0">
+                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1 min-w-0 py-0.5">
+                                {/* All Reset Pill */}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSelectedVendor('All');
+                                        setSelectedQuickGroupId('');
+                                        setSelectedCategory('All');
+                                        refocusSearchInput(true);
+                                    }}
+                                    className={`h-9 px-3.5 rounded-xl text-xs font-bold whitespace-nowrap border transition shrink-0 flex items-center gap-1.5 ${
+                                        selectedVendor === 'All' && !selectedQuickGroupId && selectedCategory === 'All'
+                                            ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30'
+                                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white hover:border-slate-500'
+                                    }`}
+                                >
+                                    <i className="fas fa-layer-group text-[11px]"></i>
+                                    <span>All</span>
+                                </button>
+
+                                {/* Vendor Droplist */}
+                                <div className="relative shrink-0">
+                                    <i className="fas fa-store text-[11px] text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
+                                    <select
+                                        value={selectedVendor}
+                                        onChange={e => {
+                                            const val = e.target.value;
+                                            setSelectedVendor(val);
+                                            if (val !== 'All') setSelectedQuickGroupId('');
+                                            refocusSearchInput(true);
+                                        }}
+                                        aria-label="Filter by Vendor"
+                                        className={`h-9 pl-7 pr-7 rounded-xl text-xs font-bold border outline-none transition cursor-pointer max-w-[165px] sm:max-w-[190px] truncate ${
+                                            selectedVendor !== 'All'
+                                                ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/50'
+                                                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-slate-500'
+                                        }`}
+                                    >
+                                        {vendorOptions.map(v => (
+                                            <option key={v} value={v} className="bg-slate-900 text-slate-100">
+                                                {v === 'All' ? 'All Vendors' : v}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Saved Quick Group Pills */}
+                                {quickGroups.map(group => {
+                                    const isActive = selectedQuickGroupId === group.id;
+                                    const colorMeta = getQuickGroupColorMeta(group.color);
+                                    const validCount = (group.productIds || []).filter(id => productIdSet.has(id)).length;
+                                    return (
+                                        <div
+                                            key={group.id}
+                                            className={`h-9 inline-flex items-center rounded-xl border text-xs font-bold whitespace-nowrap transition shrink-0 overflow-hidden ${
+                                                isActive ? colorMeta.active : colorMeta.idle
+                                            }`}
+                                        >
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    if (isActive) {
+                                                        setSelectedQuickGroupId('');
+                                                    } else {
+                                                        setSelectedQuickGroupId(group.id);
+                                                        setSelectedVendor('All');
+                                                        setSelectedCategory('All');
+                                                    }
+                                                    refocusSearchInput(true);
+                                                }}
+                                                className="h-full pl-3 pr-2 flex items-center gap-1.5"
+                                            >
+                                                <i className={`fas ${group.icon || 'fa-bolt'} text-[11px]`}></i>
+                                                <span>{group.name}</span>
+                                                <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono ${isActive ? 'bg-black/20' : 'bg-slate-950/40'}`}>
+                                                    {validCount}
+                                                </span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setEditingQuickGroup(group);
+                                                    setShowQuickGroupModal(true);
+                                                }}
+                                                className={`h-full px-2 border-l transition flex items-center justify-center ${
+                                                    isActive
+                                                        ? 'border-white/20 hover:bg-black/15'
+                                                        : 'border-current/20 hover:bg-white/10'
+                                                }`}
+                                                title={`Edit ${group.name}`}
+                                            >
+                                                <i className="fas fa-pen text-[10px]"></i>
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+
+                                {/* + Quick Group Button */}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setEditingQuickGroup(null);
+                                        setShowQuickGroupModal(true);
+                                    }}
+                                    className="h-9 px-3 rounded-xl text-xs font-bold whitespace-nowrap border border-dashed border-slate-600 hover:border-blue-400 bg-slate-900/70 hover:bg-blue-600/20 text-slate-300 hover:text-blue-300 transition shrink-0 flex items-center gap-1.5"
+                                    title="Create a new Quick Access Group for this shop"
+                                >
+                                    <i className="fas fa-plus text-[10px]"></i>
+                                    <span>Quick Group</span>
+                                </button>
+                            </div>
+
+                            {/* List / Grid Switcher */}
+                            <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-700 shrink-0">
+                                <button
+                                    type="button"
+                                    onClick={() => { setViewMode('list'); refocusSearchInput(true); }}
+                                    className={`w-8 h-7 rounded-lg flex items-center justify-center text-xs transition ${
+                                        viewMode === 'list' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                                    }`}
+                                    title="List View"
+                                >
                                     <i className="fas fa-list"></i>
                                 </button>
-                                <button type="button" onClick={() => setViewMode('grid')} className={`px-3 py-1.5 rounded-lg text-xs font-bold ${viewMode === 'grid' ? 'bg-blue-600 text-white' : 'text-slate-400'}`} title="1:1 Photo Grid View">
+                                <button
+                                    type="button"
+                                    onClick={() => { setViewMode('grid'); refocusSearchInput(true); }}
+                                    className={`w-8 h-7 rounded-lg flex items-center justify-center text-xs transition ${
+                                        viewMode === 'grid' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                                    }`}
+                                    title="Grid View"
+                                >
                                     <i className="fas fa-th-large"></i>
                                 </button>
                             </div>
                         </div>
 
-                        {/* Category Filter Pills */}
-                        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0 pb-0.5">
-                            {categoriesList.map(cat => (
-                                <button
-                                    key={cat}
-                                    type="button"
-                                    onClick={() => setSelectedCategory(cat)}
-                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap border transition ${
-                                        selectedCategory === cat
-                                            ? 'bg-blue-600 text-white border-blue-400'
-                                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
-                                    }`}
-                                >
-                                    {cat}
+                        {/* Secondary Category Filter Pills (shown only if catalog has categories) */}
+                        {categoriesList.length > 1 && (
+                            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0 pb-0.5">
+                                {categoriesList.filter(cat => cat !== 'All').map(cat => (
+                                    <button
+                                        key={cat}
+                                        type="button"
+                                        onClick={() => {
+                                            setSelectedCategory(prev => prev === cat ? 'All' : cat);
+                                            setSelectedQuickGroupId('');
+                                            refocusSearchInput(true);
+                                        }}
+                                        className={`px-3 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap border transition ${
+                                            selectedCategory === cat && !selectedQuickGroupId
+                                                ? 'bg-blue-600 text-white border-blue-400'
+                                                : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:text-white'
+                                        }`}
+                                    >
+                                        {cat}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
+                        {scanFeedback && (
+                            <div className={`px-3 py-2 rounded-xl border text-xs font-bold flex items-center justify-between gap-2 shrink-0 animate-fade-in-up ${
+                                scanFeedback.type === 'error'
+                                    ? 'bg-red-500/15 border-red-500/40 text-red-300'
+                                    : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                            }`}>
+                                <span className="truncate flex items-center gap-2">
+                                    <i className={`fas ${scanFeedback.type === 'error' ? 'fa-exclamation-triangle text-red-400' : 'fa-info-circle text-amber-400'}`}></i>
+                                    <span>{scanFeedback.message}</span>
+                                </span>
+                                <button type="button" onClick={() => setScanFeedback(null)} className="text-slate-400 hover:text-white shrink-0">
+                                    <i className="fas fa-times"></i>
                                 </button>
-                            ))}
-                        </div>
+                            </div>
+                        )}
 
                         {/* Product Catalog List / Grid */}
                         <div className="flex-1 overflow-y-auto min-h-0 pr-0.5">
@@ -7182,13 +7899,35 @@
                                         const stockQty = Number(p.stockByShop?.[activeShop?.id]) || 0;
                                         const minStock = Number(p.minStock) || 0;
                                         const stockColor = stockQty <= 0 ? 'text-red-400' : (minStock > 0 && stockQty < minStock ? 'text-amber-400' : 'text-slate-300');
+                                        const photoSrc = p.imageUrl || p.image || p.photoUrl || '';
                                         return (
                                             <button
                                                 key={p.id}
                                                 type="button"
                                                 onClick={() => addToCart(p)}
-                                                className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-blue-500/50 rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-3 text-left transition active:scale-[0.99]"
+                                                className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-blue-500/50 rounded-xl px-3 py-2 flex items-center justify-between gap-3 text-left transition active:scale-[0.99]"
                                             >
+                                                <div className="w-11 h-11 rounded-xl bg-slate-800 border border-slate-700/80 overflow-hidden shrink-0 flex items-center justify-center relative">
+                                                    {photoSrc ? (
+                                                        <img
+                                                            src={photoSrc}
+                                                            alt={p.name}
+                                                            loading="lazy"
+                                                            onError={(e) => {
+                                                                e.currentTarget.style.display = 'none';
+                                                                const fallback = e.currentTarget.nextElementSibling;
+                                                                if (fallback) fallback.style.display = 'flex';
+                                                            }}
+                                                            className="w-full h-full object-cover"
+                                                        />
+                                                    ) : null}
+                                                    <div
+                                                        style={{ display: photoSrc ? 'none' : 'flex' }}
+                                                        className="w-full h-full items-center justify-center text-slate-500"
+                                                    >
+                                                        <i className="fas fa-box text-base"></i>
+                                                    </div>
+                                                </div>
                                                 <div className="min-w-0 flex-1">
                                                     <div className="text-sm font-bold text-white truncate">{p.name}</div>
                                                     <div className="text-xs font-mono text-slate-400 truncate mt-0.5">
@@ -7209,6 +7948,9 @@
                                     {filteredProducts.map(p => {
                                         const price = getEffectiveShopPrice(p, activeShop?.id);
                                         const stockQty = Number(p.stockByShop?.[activeShop?.id]) || 0;
+                                        const minStock = Number(p.minStock) || 0;
+                                        const stockBadgeColor = stockQty <= 0 ? 'text-red-400' : (minStock > 0 && stockQty < minStock ? 'text-amber-400' : 'text-emerald-300');
+                                        const photoSrc = p.imageUrl || p.image || p.photoUrl || '';
                                         return (
                                             <button
                                                 key={p.id}
@@ -7216,18 +7958,49 @@
                                                 onClick={() => addToCart(p)}
                                                 className="bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-blue-500/60 rounded-2xl p-2 flex flex-col text-left transition active:scale-95"
                                             >
-                                                <div className="w-full aspect-square rounded-xl bg-slate-800 overflow-hidden mb-2 flex items-center justify-center relative">
-                                                    {p.imageUrl ? (
-                                                        <img src={p.imageUrl} alt={p.name} className="w-full h-full object-cover" />
-                                                    ) : (
-                                                        <i className="fas fa-box text-2xl text-slate-600"></i>
-                                                    )}
-                                                    <span className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-mono font-black bg-slate-950/80 ${stockQty <= 0 ? 'text-red-400' : 'text-emerald-300'}`}>
+                                                {/* Product Photo */}
+                                                <div className="w-full aspect-square rounded-xl bg-slate-800 overflow-hidden mb-2 flex items-center justify-center relative border border-slate-700/60">
+                                                    {photoSrc ? (
+                                                        <img
+                                                            src={photoSrc}
+                                                            alt={p.name}
+                                                            loading="lazy"
+                                                            onError={(e) => {
+                                                                e.currentTarget.style.display = 'none';
+                                                                const fallback = e.currentTarget.nextElementSibling;
+                                                                if (fallback) fallback.style.display = 'flex';
+                                                            }}
+                                                            className="w-full h-full object-cover"
+                                                        />
+                                                    ) : null}
+                                                    <div
+                                                        style={{ display: photoSrc ? 'none' : 'flex' }}
+                                                        className="w-full h-full items-center justify-center text-slate-600"
+                                                    >
+                                                        <i className="fas fa-box text-2xl"></i>
+                                                    </div>
+                                                    <span className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-mono font-black bg-slate-950/85 border border-slate-700/70 ${stockBadgeColor}`}>
                                                         {stockQty}
                                                     </span>
                                                 </div>
-                                                <div className="text-xs font-bold text-white line-clamp-2 leading-snug flex-1">{p.name}</div>
-                                                <div className="text-xs font-black text-emerald-400 font-mono mt-1">៛{khrFormatter.format(price)}</div>
+
+                                                {/* Product Name */}
+                                                <div className="text-xs font-bold text-white truncate leading-snug" title={p.name}>
+                                                    {p.name}
+                                                </div>
+
+                                                {/* Code • Price */}
+                                                <div className="flex items-center gap-1 text-[11px] font-mono mt-1 min-w-0">
+                                                    <span className="text-slate-300 font-bold truncate">{p.code || '-'}</span>
+                                                    <span className="text-slate-500 shrink-0">•</span>
+                                                    <span className="text-emerald-400 font-black shrink-0">៛{khrFormatter.format(price)}</span>
+                                                </div>
+
+                                                {/* Barcode */}
+                                                <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5 flex items-center gap-1">
+                                                    <i className="fas fa-barcode text-[9px] text-slate-500 shrink-0"></i>
+                                                    <span className="truncate">{p.barcode || 'No Barcode'}</span>
+                                                </div>
                                             </button>
                                         );
                                     })}
