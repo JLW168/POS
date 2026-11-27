@@ -24647,23 +24647,45 @@
                         {/* NEW: Phase 7 - Bank Statement (Telegram Feed) */}
                         {activeTab === 'bank-state' && (
                             <Card className="p-3 sm:p-5">
-                                {/* Row 1: Title "Bank Statement - [N] Trx" + Feed Mode on the Same Line */}
-                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-700/80">
-                                    <h4 className="text-base sm:text-xl font-bold text-slate-100 flex items-center gap-2">
-                                        <i className="fas fa-university text-emerald-400"></i>
-                                        <span>Bank Statement - {filteredBankStateData.length} Trx</span>
+                                {/* Row 1: Title "Bank Statement - [N] Trx" + Feed Mode + Smart Live Refresh Icon on the Same Line */}
+                                <div className="flex items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-700/80">
+                                    <h4 className="text-sm sm:text-xl font-bold text-slate-100 flex items-center gap-2 min-w-0">
+                                        <i className="fas fa-university text-emerald-400 shrink-0"></i>
+                                        <span className="truncate">Bank Statement - {filteredBankStateData.length} Trx</span>
                                     </h4>
-                                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold border inline-flex items-center gap-1.5 ${
-                                        effectiveBankStateFeedMode === 'live'
-                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                            : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
-                                    }`}>
-                                        <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
-                                        <span>{effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
-                                    </span>
+                                    <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                                        <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold border inline-flex items-center gap-1.5 whitespace-nowrap ${
+                                            effectiveBankStateFeedMode === 'live'
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                                : 'bg-sky-500/15 text-sky-300 border-sky-500/40'
+                                        }`}>
+                                            <span className={`w-2 h-2 rounded-full ${effectiveBankStateFeedMode === 'live' ? 'bg-emerald-400 animate-ping' : 'bg-sky-400'}`}></span>
+                                            <span>{effectiveBankStateFeedMode === 'live' ? 'Live Feed' : 'On-Demand Fetch'}</span>
+                                        </span>
+                                        <button
+                                            type="button"
+                                            disabled={bankStateLoading || effectiveBankStateFeedMode !== 'live'}
+                                            onClick={handleSmartBankFeedRefresh}
+                                            className={`w-[34px] h-[34px] sm:w-[38px] sm:h-[38px] rounded-xl border transition flex items-center justify-center relative shrink-0 ${
+                                                effectiveBankStateFeedMode === 'live'
+                                                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/50 shadow-md shadow-emerald-900/30 active:scale-95 cursor-pointer'
+                                                    : 'bg-slate-800/70 text-slate-500 border-slate-700 opacity-50 cursor-not-allowed'
+                                            }`}
+                                            title={
+                                                effectiveBankStateFeedMode === 'live'
+                                                    ? 'Smart Live Refresh — Force Instant Sync from Telegram MTProto, Render Bridge & Cloud Feed'
+                                                    : 'Smart Refresh Disabled — Switch "Bank State Report Mode" to "Live Feed" in Settings → KHQR & ABA PayWay Configuration to enable'
+                                            }
+                                        >
+                                            <i className={`fas fa-sync-alt text-xs sm:text-sm ${bankStateLoading ? 'fa-spin' : ''}`}></i>
+                                            {effectiveBankStateFeedMode === 'live' && !bankStateLoading && (
+                                                <span className="w-2 h-2 rounded-full bg-amber-300 border border-emerald-800 absolute -top-0.5 -right-0.5"></span>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
 
-                                {/* Row 2: Search Box + Status Filter + Bypass (Icon) + Clean Stray IDs (Icon) + Smart Live Refresh (Icon) */}
+                                {/* Row 2: Search Box + Status Filter + Bypass (Icon) + Clean Stray IDs (Icon) */}
                                 <div className="mb-4 pb-4 border-b border-slate-700 flex flex-wrap sm:flex-nowrap items-center gap-1.5 sm:gap-2">
                                     {/* 1. Search Box */}
                                     <div className="relative flex-1 min-w-[160px]">
@@ -24732,28 +24754,6 @@
                                             <i className="fas fa-broom text-xs sm:text-sm"></i>
                                         </button>
                                     )}
-
-                                    {/* 4. Smart Live Refresh Icon Button */}
-                                    <button
-                                        type="button"
-                                        disabled={bankStateLoading || effectiveBankStateFeedMode !== 'live'}
-                                        onClick={handleSmartBankFeedRefresh}
-                                        className={`w-[38px] h-[38px] rounded-xl border transition flex items-center justify-center relative shrink-0 ${
-                                            effectiveBankStateFeedMode === 'live'
-                                                ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/50 shadow-md shadow-emerald-900/30 active:scale-95 cursor-pointer'
-                                                : 'bg-slate-800/70 text-slate-500 border-slate-700 opacity-50 cursor-not-allowed'
-                                        }`}
-                                        title={
-                                            effectiveBankStateFeedMode === 'live'
-                                                ? 'Smart Live Refresh — Force Instant Sync from Telegram MTProto, Render Bridge & Cloud Feed'
-                                                : 'Smart Refresh Disabled — Switch "Bank State Report Mode" to "Live Feed" in Settings → KHQR & ABA PayWay Configuration to enable'
-                                        }
-                                    >
-                                        <i className={`fas fa-sync-alt text-xs sm:text-sm ${bankStateLoading ? 'fa-spin' : ''}`}></i>
-                                        {effectiveBankStateFeedMode === 'live' && !bankStateLoading && (
-                                            <span className="w-2 h-2 rounded-full bg-amber-300 border border-emerald-800 absolute -top-0.5 -right-0.5"></span>
-                                        )}
-                                    </button>
                                 </div>
 
                                 {/* Summary by Shop Location - N Shops */}
@@ -28224,7 +28224,7 @@
         
         const [filters, setFilters] = useState({ searchTerm: '', vendorId: '', categoryName: '', catVendorQuery: '' });
         const [focusedShopId, setFocusedShopId] = useState('ALL');
-        const [marginFilter, setMarginFilter] = useState('ALL'); // 'ALL' | 'UPPER' | 'UNDER'
+        const [marginFilter, setMarginFilter] = useState('ALL'); // 'ALL' | 'UPPER' | 'UNDER' | 'NEGATIVE'
         const [currentPage, setCurrentPage] = useState(1);
         const [itemsPerPage] = useState(20);
         
@@ -28484,6 +28484,38 @@
             });
         }, [fifoValuationMap, focusedShopId, managedShops]);
 
+        // Evaluates whether a product has a Negative Margin (< 0%, selling below FIFO cost)
+        const isProductNegativeMargin = useCallback((product) => {
+            const prodFifo = fifoValuationMap?.get(product.id);
+            const baseCost = Number(product.cost) || 0;
+            const focusedShopObj = focusedShopId !== 'ALL'
+                ? managedShops.find(s => s.id === focusedShopId) || null
+                : null;
+
+            if (focusedShopObj) {
+                const shopPrice = getEffectiveShopPrice(product, focusedShopObj.id);
+                const shopCost = prodFifo?.byShop?.[focusedShopObj.id]?.fifoUnitCost ?? baseCost;
+                const actualMargin = shopPrice > 0 ? ((shopPrice - shopCost) / shopPrice) * 100 : (shopCost > 0 ? -Infinity : 0);
+                return actualMargin < 0;
+            }
+
+            const assignedShops = managedShops.filter(s => isProductAvailableForShop(product, s.id));
+            if (assignedShops.length === 0) {
+                const basePrice = Number(product.price) || 0;
+                const globalCost = prodFifo?.globalFifoUnitCost ?? baseCost;
+                const margin = basePrice > 0 ? ((basePrice - globalCost) / basePrice) * 100 : (globalCost > 0 ? -Infinity : 0);
+                return margin < 0;
+            }
+
+            // Negative Margin if at least one assigned shop has actual margin < 0%
+            return assignedShops.some(shop => {
+                const shopPrice = getEffectiveShopPrice(product, shop.id);
+                const shopCost = prodFifo?.byShop?.[shop.id]?.fifoUnitCost ?? baseCost;
+                const actualMargin = shopPrice > 0 ? ((shopPrice - shopCost) / shopPrice) * 100 : (shopCost > 0 ? -Infinity : 0);
+                return actualMargin < 0;
+            });
+        }, [fifoValuationMap, focusedShopId, managedShops]);
+
         const baseFilteredProducts = useMemo(() => {
             if (!allProducts) return [];
             const { searchTerm, vendorId, categoryName, catVendorQuery } = filters;
@@ -28522,20 +28554,25 @@
         const marginFilterCounts = useMemo(() => {
             let upper = 0;
             let under = 0;
+            let negative = 0;
             baseFilteredProducts.forEach(p => {
                 if (isProductUnderMarginTarget(p)) under += 1;
                 else upper += 1;
+                if (isProductNegativeMargin(p)) negative += 1;
             });
-            return { all: baseFilteredProducts.length, upper, under };
-        }, [baseFilteredProducts, isProductUnderMarginTarget]);
+            return { all: baseFilteredProducts.length, upper, under, negative };
+        }, [baseFilteredProducts, isProductUnderMarginTarget, isProductNegativeMargin]);
 
         const filteredProducts = useMemo(() => {
             if (marginFilter === 'ALL') return baseFilteredProducts;
+            if (marginFilter === 'NEGATIVE') {
+                return baseFilteredProducts.filter(p => isProductNegativeMargin(p));
+            }
             return baseFilteredProducts.filter(p => {
                 const isUnder = isProductUnderMarginTarget(p);
                 return marginFilter === 'UNDER' ? isUnder : !isUnder;
             });
-        }, [baseFilteredProducts, marginFilter, isProductUnderMarginTarget]);
+        }, [baseFilteredProducts, marginFilter, isProductUnderMarginTarget, isProductNegativeMargin]);
 
         const activeShopMarginLabel = useMemo(() => {
             const focusedShopObj = focusedShopId !== 'ALL'
@@ -29035,8 +29072,9 @@
                     </div>
 
                     {/* Sale Margin Filter Bar (Upper >= Shop Target vs Under < Shop Target) */}
-                    <div className="mb-4 pb-3 border-b border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 text-xs text-slate-300">
+                    {/* Sale Margin Droplist Filter Bar (All / Upper >= Target / Under < Target / Negative < 0%) */}
+                    <div className="mb-4 pb-3 border-b border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
                             <span className="font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                                 <i className="fas fa-percentage text-cyan-400"></i>
                                 <span>Sale Margin Filter</span>
@@ -29044,63 +29082,62 @@
                             <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300 font-bold">
                                 {activeShopMarginLabel.detail}: {activeShopMarginLabel.label}
                             </span>
+                            {marginFilterCounts.negative > 0 && marginFilter !== 'NEGATIVE' && (
+                                <button
+                                    type="button"
+                                    onClick={() => setMarginFilter('NEGATIVE')}
+                                    className="px-2 py-0.5 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/40 font-mono text-[11px] text-red-300 font-bold transition flex items-center gap-1"
+                                    title="Quick filter products with Negative Margin (< 0%)"
+                                >
+                                    <i className="fas fa-exclamation-triangle text-[10px]"></i>
+                                    <span>{marginFilterCounts.negative} Negative</span>
+                                </button>
+                            )}
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-1.5">
-                            <button
-                                type="button"
-                                onClick={() => setMarginFilter('ALL')}
-                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
-                                    marginFilter === 'ALL'
-                                        ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
-                                        : 'bg-slate-900/80 text-slate-300 border-slate-700 hover:text-white hover:border-slate-500'
-                                }`}
-                            >
-                                <span>All</span>
-                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
-                                    marginFilter === 'ALL' ? 'bg-blue-800/80 text-white' : 'bg-slate-800 text-slate-400'
-                                }`}>
-                                    {marginFilterCounts.all}
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => setMarginFilter('UPPER')}
-                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
+                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                            <div className="relative flex-1 sm:flex-initial sm:min-w-[270px]">
+                                <i className={`fas ${
                                     marginFilter === 'UPPER'
-                                        ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
-                                        : 'bg-slate-900/80 text-emerald-300 border-emerald-500/30 hover:bg-emerald-950/50 hover:border-emerald-400'
-                                }`}
-                                title={`Products meeting or exceeding the configured Shop Sale Margin (≥ ${activeShopMarginLabel.label})`}
-                            >
-                                <i className="fas fa-arrow-trend-up text-[11px]"></i>
-                                <span>Upper Margin (&ge; {activeShopMarginLabel.label})</span>
-                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
-                                    marginFilter === 'UPPER' ? 'bg-emerald-800/80 text-white' : 'bg-emerald-500/15 text-emerald-300'
-                                }`}>
-                                    {marginFilterCounts.upper}
-                                </span>
-                            </button>
+                                        ? 'fa-arrow-trend-up text-emerald-400'
+                                        : marginFilter === 'UNDER'
+                                            ? 'fa-arrow-trend-down text-amber-400'
+                                            : marginFilter === 'NEGATIVE'
+                                                ? 'fa-exclamation-circle text-red-400'
+                                                : 'fa-filter text-blue-400'
+                                } absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none`}></i>
+                                <select
+                                    value={marginFilter}
+                                    onChange={(e) => setMarginFilter(e.target.value)}
+                                    className={`w-full bg-slate-900 pl-8 pr-8 py-2 rounded-xl border text-xs font-bold appearance-none cursor-pointer outline-none h-[38px] transition ${
+                                        marginFilter === 'UPPER'
+                                            ? 'text-emerald-300 border-emerald-500/50 focus:ring-2 focus:ring-emerald-500'
+                                            : marginFilter === 'UNDER'
+                                                ? 'text-amber-300 border-amber-500/50 focus:ring-2 focus:ring-amber-500'
+                                                : marginFilter === 'NEGATIVE'
+                                                    ? 'text-red-300 border-red-500/50 focus:ring-2 focus:ring-red-500'
+                                                    : 'text-slate-100 border-slate-600 focus:ring-2 focus:ring-blue-500'
+                                    }`}
+                                    title="Filter products by Sale Margin against Shop Target"
+                                >
+                                    <option value="ALL">All Margins ({marginFilterCounts.all})</option>
+                                    <option value="UPPER">Upper Margin (&ge; {activeShopMarginLabel.label}) — {marginFilterCounts.upper}</option>
+                                    <option value="UNDER">Under Margin (&lt; {activeShopMarginLabel.label}) — {marginFilterCounts.under}</option>
+                                    <option value="NEGATIVE">Negative Margin (&lt; 0%) — {marginFilterCounts.negative}</option>
+                                </select>
+                                <i className="fas fa-chevron-down text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
+                            </div>
 
-                            <button
-                                type="button"
-                                onClick={() => setMarginFilter('UNDER')}
-                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
-                                    marginFilter === 'UNDER'
-                                        ? 'bg-amber-600 text-white border-amber-400 shadow-sm'
-                                        : 'bg-slate-900/80 text-amber-300 border-amber-500/30 hover:bg-amber-950/50 hover:border-amber-400'
-                                }`}
-                                title={`Products below the configured Shop Sale Margin (< ${activeShopMarginLabel.label})`}
-                            >
-                                <i className="fas fa-arrow-trend-down text-[11px]"></i>
-                                <span>Under Margin (&lt; {activeShopMarginLabel.label})</span>
-                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
-                                    marginFilter === 'UNDER' ? 'bg-amber-800/80 text-white' : 'bg-amber-500/15 text-amber-300'
-                                }`}>
-                                    {marginFilterCounts.under}
-                                </span>
-                            </button>
+                            {marginFilter !== 'ALL' && (
+                                <button
+                                    type="button"
+                                    onClick={() => setMarginFilter('ALL')}
+                                    className="h-[38px] px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-600 text-xs font-bold transition shrink-0"
+                                    title="Reset Sale Margin Filter"
+                                >
+                                    <i className="fas fa-times"></i>
+                                </button>
+                            )}
                         </div>
                     </div>
                     {dataLoading ? (
