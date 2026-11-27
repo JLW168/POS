@@ -508,8 +508,6 @@
                 overflow-x: hidden; /* Prevent horizontal scroll on the body */
                 overscroll-behavior-y: none; /* Prevent pull-to-refresh on installed homepad/tablet PWA */
                 -webkit-tap-highlight-color: transparent;
-                padding-top: env(safe-area-inset-top);
-                padding-bottom: env(safe-area-inset-bottom);
             }
             /* Custom utility to hide scrollbars */
             .no-scrollbar::-webkit-scrollbar {
@@ -6349,7 +6347,7 @@
         if (!visible) return null;
 
         return (
-            <div className={`fixed bottom-4 right-4 ${bgColor} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 transition-all duration-500 z-50`}>
+            <div className={`fixed bottom-20 md:bottom-4 right-4 ${bgColor} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 transition-all duration-500 z-50`}>
                 {icon}
                 <span className="font-medium text-sm">{statusText}</span>
             </div>
@@ -7147,7 +7145,7 @@
         };
 
         return (
-            <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-700/80 px-3 sm:px-5 flex items-center justify-between shrink-0 z-20 relative">
+            <header className="h-12 sm:h-16 bg-slate-900 border-b border-slate-700/80 px-2.5 sm:px-5 flex items-center justify-between shrink-0 z-20 relative">
                 {userProfile?.role === 'Admin' && (
                     <MasterClearCacheModal
                         show={showClearCacheModal}
@@ -7161,40 +7159,40 @@
                     />
                 )}
                 {syncToast && (
-                    <div className="fixed top-16 right-4 z-[120] bg-emerald-600 text-white px-4 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
+                    <div className="fixed top-14 sm:top-16 right-3 sm:right-4 z-[120] bg-emerald-600 text-white px-3.5 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
                         <i className="fas fa-check-circle"></i>
                         <span>{syncToast}</span>
                     </div>
                 )}
 
-                <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                     <button
                         type="button"
                         onClick={toggleSidebar}
-                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition shrink-0"
+                        className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition shrink-0"
                         title="Open Navigation Menu"
                     >
-                        <i className="fas fa-bars"></i>
+                        <i className="fas fa-bars text-xs sm:text-sm"></i>
                     </button>
-                    <h2 className="text-base sm:text-xl font-black text-white truncate tracking-tight">
+                    <h2 className="text-sm sm:text-xl font-black text-white truncate tracking-tight">
                         {pageTitle || systemConfig?.appName || 'POS Terminal'}
                     </h2>
                 </div>
 
-                <div className="flex items-center space-x-2 sm:space-x-2.5" ref={menuRef}>
+                <div className="flex items-center space-x-1.5 sm:space-x-2.5 shrink-0" ref={menuRef}>
                     {/* Always-On Keep-Awake Icon (POS Terminal Page Only) */}
                     {activePage === 'pos-terminal' && (
                         <button
                             type="button"
                             onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
-                            className={`w-9 h-9 rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 ${
+                            className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 ${
                                 keepAwakeState.isActive
                                     ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                                     : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
                             }`}
                             title={keepAwakeState.isActive ? `Always Awake Active (${keepAwakeState.mode}) — Screen stays awake on POS Terminal only` : 'Tap once to lock POS screen awake'}
                         >
-                            <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'} text-sm`}></i>
+                            <i className={`fas ${keepAwakeState.isActive ? 'fa-sun text-amber-300' : 'fa-moon text-amber-400'} text-xs sm:text-sm`}></i>
                         </button>
                     )}
 
@@ -7213,9 +7211,9 @@
                         <button
                             type="button"
                             onClick={() => setIsUserMenuOpen(prev => !prev)}
-                            className="flex items-center gap-2 pl-2 pr-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
+                            className="flex items-center gap-1.5 sm:gap-2 pl-1.5 sm:pl-2 pr-2 sm:pr-2.5 py-1 sm:py-1.5 rounded-lg sm:rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
                         >
-                            <div className="relative w-8 h-8 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-xs flex items-center justify-center uppercase shrink-0 ring-2 ring-slate-700/80">
+                            <div className="relative w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-[11px] sm:text-xs flex items-center justify-center uppercase shrink-0 ring-2 ring-slate-700/80">
                                 {activeProfilePhoto && !avatarImgError ? (
                                     <img
                                         src={activeProfilePhoto}
@@ -8574,8 +8572,8 @@
                     {/* LEFT: Product Catalog Panel */}
                     <div className={`flex-1 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Top Toolbar: Search Input + Locked Shop Selector + Action Buttons */}
-                        <div className="p-2.5 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <div className="p-2 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0">
+                            <div className="flex items-center gap-1.5 sm:gap-2 flex-1 min-w-0">
                                 <div className="relative flex-1 min-w-0">
                                     <input
                                         ref={searchInputRef}
@@ -8596,7 +8594,7 @@
                                                     ? "Type product name, code, or barcode..."
                                                     : "Scanner ready — scan barcode or tap keyboard..."
                                         }
-                                        className={`w-full bg-slate-800 text-white pl-9 pr-20 py-2 rounded-xl border outline-none text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+                                        className={`w-full bg-slate-800 text-white pl-8 sm:pl-9 pr-16 sm:pr-20 py-1.5 sm:py-2 rounded-lg sm:rounded-xl border outline-none text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
                                             !currentShift
                                                 ? 'border-slate-600/80'
                                                 : isManualKeyboardOpen
@@ -8605,7 +8603,7 @@
                                         }`}
                                     />
                                     <i
-                                        className={`fas fa-barcode absolute left-3 top-1/2 -translate-y-1/2 text-xs transition-colors ${
+                                        className={`fas fa-barcode absolute left-2.5 sm:left-3 top-1/2 -translate-y-1/2 text-xs transition-colors ${
                                             !currentShift
                                                 ? 'text-slate-500'
                                                 : isManualKeyboardOpen
@@ -8619,7 +8617,7 @@
                                             <button
                                                 type="button"
                                                 onClick={() => { updateSearchTerm(''); setHighlightedIndex(0); refocusSearchInput(); }}
-                                                className="w-7 h-7 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/80 flex items-center justify-center transition"
+                                                className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/80 flex items-center justify-center transition"
                                                 title="Clear Search"
                                             >
                                                 <i className="fas fa-times-circle text-xs"></i>
@@ -8629,14 +8627,14 @@
                                             type="button"
                                             disabled={!currentShift}
                                             onClick={handleToggleManualKeyboard}
-                                            className={`w-8 h-7 rounded-lg border flex items-center justify-center transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
+                                            className={`w-7 h-6 sm:w-8 sm:h-7 rounded-lg border flex items-center justify-center transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
                                                 isManualKeyboardOpen
                                                     ? 'bg-blue-600 hover:bg-blue-500 text-white border-blue-400 shadow-sm shadow-blue-900/40'
                                                     : 'bg-slate-700/80 hover:bg-slate-600 text-slate-300 hover:text-white border-slate-600'
                                             }`}
                                             title={isManualKeyboardOpen ? 'Dismiss On-Screen Keyboard & Return to Scanner Mode' : 'Open On-Screen Keyboard for Manual Search'}
                                         >
-                                            <i className="fas fa-keyboard text-xs"></i>
+                                            <i className="fas fa-keyboard text-[11px] sm:text-xs"></i>
                                         </button>
                                     </div>
                                 </div>
@@ -8647,13 +8645,13 @@
                                         value={selectedShopId} 
                                         onChange={(e) => { setSelectedShopId(e.target.value); refocusSearchInput(); }}
                                         disabled={!!currentDevice} // STRICT LOCK
-                                        className={`h-full bg-slate-800 text-white px-2.5 sm:px-3.5 py-2 rounded-xl border border-slate-600/80 text-xs sm:text-sm font-semibold max-w-[115px] sm:max-w-[160px] truncate appearance-none ${!!currentDevice ? 'opacity-80 cursor-not-allowed pr-7' : 'cursor-pointer'}`}
+                                        className={`h-full bg-slate-800 text-white px-2 sm:px-3.5 py-1.5 sm:py-2 rounded-lg sm:rounded-xl border border-slate-600/80 text-xs sm:text-sm font-semibold max-w-[105px] sm:max-w-[160px] truncate appearance-none ${!!currentDevice ? 'opacity-80 cursor-not-allowed pr-6 sm:pr-7' : 'cursor-pointer'}`}
                                     >
                                         {shops.filter(s => (userProfile.assignedShops || []).includes(s.id) || userProfile.role === 'Admin').map(s => (
                                             <option key={s.id} value={s.id}>{s.name}</option>
                                         ))}
                                     </select>
-                                    {currentDevice && <i className="fas fa-lock absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[10px] pointer-events-none"></i>}
+                                    {currentDevice && <i className="fas fa-lock absolute right-2 sm:right-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-[10px] pointer-events-none"></i>}
                                 </div>
                             </div>
 
@@ -8671,14 +8669,14 @@
                                             window.SolarisPayWayVerifier?.registerCustomerDisplayWindow(displayWin, selectedShopId);
                                         }
                                     }}
-                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-xl border border-indigo-500/40 flex items-center justify-center shrink-0 transition"
+                                    className="w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded-lg sm:rounded-xl border border-indigo-500/40 flex items-center justify-center shrink-0 transition"
                                     title="Open Customer-Facing Live Cart & KHQR Display in New Window (0ms Sync)"
                                 >
                                     <i className="fas fa-tv"></i>
                                 </button>
 
                                 <div 
-                                    className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center border transition-all shrink-0 ${
+                                    className={`w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm rounded-lg sm:rounded-xl flex items-center justify-center border transition-all shrink-0 ${
                                         !isOnline 
                                             ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 animate-pulse shadow-lg shadow-amber-900/20' 
                                             : (pendingSyncCount > 0 || isSyncing)
@@ -8711,7 +8709,7 @@
 
                                 <button 
                                     onClick={() => setShowShiftModal(true)}
-                                    className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center transition shrink-0 ${currentShift ? 'bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30' : 'bg-red-600 text-white animate-pulse shadow-lg shadow-red-900/20'}`}
+                                    className={`w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm rounded-lg sm:rounded-xl flex items-center justify-center transition shrink-0 ${currentShift ? 'bg-green-600/20 text-green-400 border border-green-500/50 hover:bg-green-600/30' : 'bg-red-600 text-white animate-pulse shadow-lg shadow-red-900/20'}`}
                                     title={currentShift ? `Shift Open (${currentDevice?.name})` : "Shift Closed - Click to Open"}
                                 >
                                     <i className="fas fa-clock"></i>
@@ -8719,14 +8717,14 @@
 
                                 <button 
                                     onClick={() => setShowSalesHistory(true)}
-                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
+                                    className="w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg sm:rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="View Today's Receipts & Void"
                                 >
                                     <i className="fas fa-history text-blue-400"></i>
                                 </button>
                                 <button 
                                     onClick={() => setShowDailyReport(true)}
-                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
+                                    className="w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg sm:rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="Daily Sales Summary"
                                 >
                                     <i className="fas fa-chart-pie text-emerald-400"></i>
@@ -8739,7 +8737,7 @@
                                             setShowBankAutoSum(true);
                                         }
                                     }}
-                                    className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
+                                    className="w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg sm:rounded-xl border border-slate-600/80 flex items-center justify-center shrink-0 transition"
                                     title="View Live Bank Payments for Current Shift"
                                 >
                                     <i className="fas fa-university text-amber-400"></i>
@@ -8747,17 +8745,17 @@
                                 <button
                                     type="button"
                                     onClick={() => setShowKhqrSimulator(true)}
-                                    className="relative w-9 h-9 sm:w-10 sm:h-10 bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white rounded-xl border border-rose-500/40 flex items-center justify-center shrink-0 transition"
+                                    className="relative w-8 h-8 sm:w-10 sm:h-10 text-xs sm:text-sm bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white rounded-lg sm:rounded-xl border border-rose-500/40 flex items-center justify-center shrink-0 transition"
                                     title="Live Dynamic KHQR Simulator (PIN Required)"
                                 >
                                     <i className="fas fa-qrcode"></i>
-                                    <i className="fas fa-lock text-[8px] absolute bottom-1 right-1 text-amber-300"></i>
+                                    <i className="fas fa-lock text-[7px] sm:text-[8px] absolute bottom-0.5 right-0.5 sm:bottom-1 sm:right-1 text-amber-300"></i>
                                 </button>
                             </div>
                         </div>
 
                         {/* Secondary Bar: Vendor Filter, Quick Access Groups & List/Grid View Switcher */}
-                        <div className="px-2.5 sm:px-3 py-2 bg-slate-900/40 border-b border-slate-700/70 flex flex-wrap items-center justify-between gap-2">
+                        <div className="px-2 sm:px-3 py-1.5 sm:py-2 bg-slate-900/40 border-b border-slate-700/70 flex flex-wrap items-center justify-between gap-1.5 sm:gap-2">
                             <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar flex-1 min-w-0">
                                 {/* Vendor Dropdown */}
                                 <select
@@ -9109,7 +9107,7 @@
                     </div>
 
                     {/* RIGHT: POS Cart / Current Ticket (Visible on Tablet/Desktop OR when Mobile Tab is 'cart') */}
-                    <div className={`w-full md:w-[340px] lg:w-[390px] xl:w-[420px] shrink-0 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
+                    <div className={`w-full md:w-[340px] lg:w-[390px] xl:w-[420px] flex-1 md:flex-none min-h-0 shrink-0 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Cart Header: Customer Selector + Quick Add Customer */}
                         <div className="p-2.5 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 space-y-2 shrink-0">
                             <div className="flex items-center justify-between">
@@ -9348,7 +9346,7 @@
                                 <button
                                     type="button"
                                     onClick={() => setShowShiftModal(true)}
-                                    className="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm shadow-lg shadow-amber-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                    className="hidden md:flex w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm shadow-lg shadow-amber-900/30 items-center justify-center gap-2 transition active:scale-95"
                                 >
                                     <i className="fas fa-play-circle text-base"></i>
                                     <span>Open Shift to Start Selling</span>
@@ -9358,7 +9356,7 @@
                                     type="button"
                                     disabled={cart.length === 0 || isProcessing}
                                     onClick={() => setShowPaymentModal(true)}
-                                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                    className="hidden md:flex w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-900/30 items-center justify-center gap-2 transition active:scale-95"
                                 >
                                     <i className="fas fa-cash-register"></i>
                                     <span>Checkout • ៛{khrFormatter.format(cartTotal)}</span>
@@ -9368,35 +9366,84 @@
                     </div>
                 </div>
 
-                {/* MOBILE BOTTOM NAVIGATION BAR (2-Tab Switcher: Catalog & Ticket) */}
-                <div className="md:hidden h-14 bg-slate-900 border-t border-slate-700 grid grid-cols-2 items-center px-3 shrink-0 mt-2 rounded-xl shadow-lg gap-2">
-                    <button 
-                        type="button"
-                        onClick={() => setActiveMobileTab('products')}
-                        className={`flex items-center justify-center gap-2 h-10 rounded-xl transition-all ${activeMobileTab === 'products' ? 'text-white bg-blue-600 font-bold shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-slate-200 bg-slate-800/60'}`}
-                    >
-                        <i className="fas fa-th-large text-sm"></i>
-                        <span className="text-xs font-bold">Catalog</span>
-                    </button>
+                {/* STICKY 3-ACTION MOBILE FOOTER (Catalog, Cart Ticket & Direct Checkout / Open Shift) */}
+                <footer className="md:hidden bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] -mx-1.5 -mb-1.5 mt-1.5 shrink-0 z-30 shadow-[0_-6px_20px_rgba(0,0,0,0.45)]">
+                    <div className="grid grid-cols-12 gap-1.5 items-stretch">
+                        {/* 1. Catalog Button */}
+                        <button
+                            type="button"
+                            onClick={() => setActiveMobileTab('products')}
+                            className={`col-span-3 flex flex-col items-center justify-center py-2 px-1 rounded-xl border transition-all active:scale-95 ${
+                                activeMobileTab === 'products'
+                                    ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
+                                    : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:text-white'
+                            }`}
+                        >
+                            <i className="fas fa-th-large text-sm mb-0.5"></i>
+                            <span className="text-[11px] font-bold leading-none">Catalog</span>
+                        </button>
 
-                    <button 
-                        type="button"
-                        onClick={() => setActiveMobileTab('cart')}
-                        className={`flex items-center justify-center gap-2 h-10 rounded-xl transition-all relative ${activeMobileTab === 'cart' ? 'text-white bg-blue-600 font-bold shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-slate-200 bg-slate-800/60'}`}
-                    >
-                        <div className="relative">
-                            <i className="fas fa-shopping-basket text-sm"></i>
-                            {cartItemCount > 0 && (
-                                <span className={`absolute -top-2 -right-3 text-[10px] font-black px-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center shadow ${activeMobileTab === 'cart' ? 'bg-amber-400 text-slate-950' : 'bg-red-500 text-white animate-bounce'}`}>
-                                    {cartItemCount}
+                        {/* 2. Cart Ticket Button (Live Item Count Badge + Formatted KHR Total) */}
+                        <button
+                            type="button"
+                            onClick={() => setActiveMobileTab('cart')}
+                            className={`col-span-4 flex flex-col items-center justify-center py-1.5 px-1.5 rounded-xl border transition-all active:scale-95 relative ${
+                                activeMobileTab === 'cart'
+                                    ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
+                                    : 'bg-slate-800/80 text-slate-200 border-slate-700 hover:text-white'
+                            }`}
+                        >
+                            <div className="flex items-center gap-1.5">
+                                <div className="relative">
+                                    <i className="fas fa-receipt text-sm"></i>
+                                    {cartItemCount > 0 && (
+                                        <span className={`absolute -top-2 -right-2.5 text-[9px] font-black px-1 min-w-[16px] h-[16px] rounded-full flex items-center justify-center shadow ${
+                                            activeMobileTab === 'cart' ? 'bg-amber-400 text-slate-950' : 'bg-rose-500 text-white'
+                                        }`}>
+                                            {cartItemCount}
+                                        </span>
+                                    )}
+                                </div>
+                                <span className="text-[11px] font-bold leading-none ml-1">Cart Ticket</span>
+                            </div>
+                            <span className={`text-[10px] font-mono font-black mt-1 truncate max-w-full ${
+                                activeMobileTab === 'cart' ? 'text-amber-300' : 'text-emerald-400'
+                            }`}>
+                                ៛{khrFormatter.format(cartTotal)}
+                            </span>
+                        </button>
+
+                        {/* 3. Direct Bill Payment (Checkout) or Open Shift Button */}
+                        {!currentShift ? (
+                            <button
+                                type="button"
+                                onClick={() => setShowShiftModal(true)}
+                                className="col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black shadow-lg shadow-amber-900/30 transition-all active:scale-95"
+                            >
+                                <div className="flex items-center gap-1.5">
+                                    <i className="fas fa-play-circle text-sm"></i>
+                                    <span className="text-xs font-black leading-none">Open Shift</span>
+                                </div>
+                                <span className="text-[10px] font-bold opacity-80 mt-0.5 leading-none">Start Selling</span>
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                disabled={cart.length === 0 || isProcessing}
+                                onClick={() => setShowPaymentModal(true)}
+                                className="col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white font-black shadow-lg shadow-emerald-900/30 transition-all active:scale-95"
+                            >
+                                <div className="flex items-center gap-1.5">
+                                    <i className="fas fa-cash-register text-sm"></i>
+                                    <span className="text-xs font-black leading-none">Checkout</span>
+                                </div>
+                                <span className="text-[10px] font-mono font-bold opacity-95 mt-0.5 leading-none truncate max-w-full">
+                                    {cart.length > 0 ? `៛${khrFormatter.format(cartTotal)}` : 'Empty Cart'}
                                 </span>
-                            )}
-                        </div>
-                        <span className="text-xs font-bold ml-1">
-                            Ticket {cartTotal > 0 ? `(៛${new Intl.NumberFormat('en-US', { notation: "compact" }).format(cartTotal)})` : ''}
-                        </span>
-                    </button>
-                </div>
+                            </button>
+                        )}
+                    </div>
+                </footer>
             </div>
         );
     };
@@ -25983,6 +26030,8 @@
         const [isSubmitting, setIsSubmitting] = useState(false);
         const [progressText, setProgressText] = useState('');
         const [modalInfo, setModalInfo] = useState({ show: false, title: '', message: '', isError: false });
+        const [showMobileOptions, setShowMobileOptions] = useState(false);
+        const [showMobileFilters, setShowMobileFilters] = useState(false);
         const excelInputRef = useRef(null);
 
         useEffect(() => {
@@ -26080,24 +26129,16 @@
             setQtyInputs(prev => ({ ...prev, [productId]: clean }));
         };
 
-        const handleDownloadBatchTemplate = () => {
-            if (typeof XLSX === 'undefined') {
-                setModalInfo({ show: true, title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true });
-                return;
-            }
-            const sampleRows = (products || []).slice(0, 3).map(p => ({
-                code: p.code || 'DF_10001',
-                quantity: Number(p.stockByShop?.[shopId]) || 0,
-                note: ''
-            }));
-            if (sampleRows.length === 0) {
-                sampleRows.push({ code: 'DF_10001', quantity: 10, note: 'Stock Take' });
-            }
-            const ws = XLSX.utils.json_to_sheet(sampleRows, { header: ['code', 'quantity', 'note'] });
-            ws['!cols'] = [{ wch: 18 }, { wch: 12 }, { wch: 25 }];
-            const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, 'BatchStock');
-            XLSX.writeFile(wb, `Batch_Stock_Template_${(selectedShop?.name || 'Shop').replace(/\s+/g, '_')}.xlsx`);
+        const handleStepQty = (prod, step) => {
+            if (!prod) return;
+            const currentStock = Number(prod?.stockByShop?.[shopId]) || 0;
+            const rawExisting = qtyInputs[prod.id];
+            const hasExisting = rawExisting !== undefined && rawExisting !== null && String(rawExisting).trim() !== '';
+            const baseVal = hasExisting
+                ? (parseInt(rawExisting, 10) || 0)
+                : (actionType === 'set' ? currentStock : 0);
+            const nextVal = Math.max(0, baseVal + step);
+            setQtyInputs(prev => ({ ...prev, [prod.id]: String(nextVal) }));
         };
 
         const handleExcelFileUpload = (e) => {
@@ -26270,6 +26311,7 @@
             [pendingChanges]
         );
 
+        const activeFilterCount = (vendorFilter ? 1 : 0) + (categoryFilter ? 1 : 0) + (!onlyAssignedToShop ? 1 : 0);
         const GRID_DISPLAY_CAP = 100;
 
         return (
@@ -26277,41 +26319,60 @@
                 <MessageModal {...modalInfo} show={modalInfo.show} onClose={() => setModalInfo({ show: false, title: '', message: '', isError: false })} />
                 <ModalHeader title="Batch Stock Update (Stock Take)" onClose={isSubmitting ? null : onClose} />
                 <ModalBody>
-                    <div className="space-y-4">
-                        {/* Step 1: Target Shop, Action Mode, Reason & Batch Note */}
-                        <div className="bg-slate-900/70 p-4 rounded-xl border border-slate-700 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                            <div>
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-store text-cyan-400 mr-1.5"></i>Target Shop *
-                                </label>
-                                <select
-                                    value={shopId}
-                                    onChange={(e) => setShopId(e.target.value)}
-                                    disabled={isSubmitting}
-                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs sm:text-sm font-bold"
-                                >
-                                    {managedShops.map(s => (
-                                        <option key={s.id} value={s.id}>{s.name}</option>
-                                    ))}
-                                </select>
+                    <div className="space-y-3 sm:space-y-4">
+                        {/* Step 1: Compact Mobile-First Controls (Shop + Action Mode always visible; Reason & Note collapsible on phones) */}
+                        <div className="bg-slate-900/75 p-2.5 sm:p-4 rounded-xl border border-slate-700 space-y-2.5 sm:space-y-0 sm:grid sm:grid-cols-2 lg:grid-cols-4 sm:gap-3">
+                            {/* Target Shop + Mobile Options Toggle */}
+                            <div className="grid grid-cols-12 gap-2 sm:block">
+                                <div className="col-span-9 sm:col-span-12">
+                                    <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                        <i className="fas fa-store text-cyan-400 mr-1"></i>Target Shop *
+                                    </label>
+                                    <select
+                                        value={shopId}
+                                        onChange={(e) => setShopId(e.target.value)}
+                                        disabled={isSubmitting}
+                                        className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs sm:text-sm font-bold h-[36px] sm:h-[38px]"
+                                    >
+                                        {managedShops.map(s => (
+                                            <option key={s.id} value={s.id}>{s.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="col-span-3 sm:hidden flex flex-col justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowMobileOptions(prev => !prev)}
+                                        className={`h-[36px] w-full rounded-lg border text-[11px] font-bold flex items-center justify-center gap-1 transition ${
+                                            showMobileOptions || batchNote.trim()
+                                                ? 'bg-purple-600/25 border-purple-500/60 text-purple-200'
+                                                : 'bg-slate-800 border-slate-600 text-slate-300'
+                                        }`}
+                                        title="Toggle Reason & Batch Note"
+                                    >
+                                        <i className="fas fa-sliders-h text-[10px]"></i>
+                                        <span>Note</span>
+                                    </button>
+                                </div>
                             </div>
 
+                            {/* Action Mode Segmented Control */}
                             <div>
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-sliders-h text-amber-400 mr-1.5"></i>Action Mode
+                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-exchange-alt text-amber-400 mr-1"></i>Action Mode
                                 </label>
-                                <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded-lg border border-slate-600">
+                                <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded-lg border border-slate-600 h-[36px] sm:h-[38px] items-center">
                                     {[
-                                        { id: 'set', label: '= Set', active: 'bg-blue-600 text-white' },
-                                        { id: 'add', label: '+ Add', active: 'bg-emerald-600 text-white' },
-                                        { id: 'remove', label: '- Sub', active: 'bg-rose-600 text-white' }
+                                        { id: 'set', label: '= Set', active: 'bg-blue-600 text-white shadow' },
+                                        { id: 'add', label: '+ Add', active: 'bg-emerald-600 text-white shadow' },
+                                        { id: 'remove', label: '− Sub', active: 'bg-rose-600 text-white shadow' }
                                     ].map(opt => (
                                         <button
                                             key={opt.id}
                                             type="button"
                                             disabled={isSubmitting}
                                             onClick={() => setActionType(opt.id)}
-                                            className={`py-1.5 rounded text-xs font-black transition ${actionType === opt.id ? opt.active : 'text-slate-400 hover:text-white'}`}
+                                            className={`h-full rounded text-xs font-black transition ${actionType === opt.id ? opt.active : 'text-slate-400 hover:text-white'}`}
                                         >
                                             {opt.label}
                                         </button>
@@ -26319,15 +26380,16 @@
                                 </div>
                             </div>
 
-                            <div>
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-clipboard-list text-purple-400 mr-1.5"></i>Reason
+                            {/* Reason (Always visible on sm+, collapsible on mobile) */}
+                            <div className={`${showMobileOptions ? 'block' : 'hidden'} sm:block`}>
+                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-clipboard-list text-purple-400 mr-1"></i>Reason
                                 </label>
                                 <select
                                     value={reason}
                                     onChange={(e) => setReason(e.target.value)}
                                     disabled={isSubmitting}
-                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-purple-500 outline-none text-xs sm:text-sm"
+                                    className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-purple-500 outline-none text-xs sm:text-sm h-[36px] sm:h-[38px]"
                                 >
                                     <option>Inventory Count</option>
                                     <option>Opening Stock</option>
@@ -26340,9 +26402,10 @@
                                 </select>
                             </div>
 
-                            <div>
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-sticky-note text-emerald-400 mr-1.5"></i>Batch Note (Optional)
+                            {/* Batch Note (Always visible on sm+, collapsible on mobile) */}
+                            <div className={`${showMobileOptions ? 'block' : 'hidden'} sm:block`}>
+                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                    <i className="fas fa-sticky-note text-emerald-400 mr-1"></i>Batch Note
                                 </label>
                                 <input
                                     type="text"
@@ -26350,44 +26413,44 @@
                                     onChange={(e) => setBatchNote(e.target.value)}
                                     disabled={isSubmitting}
                                     placeholder="e.g. Monthly Stock Take"
-                                    className="w-full bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-emerald-500 outline-none text-xs sm:text-sm"
+                                    className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-emerald-500 outline-none text-xs sm:text-sm h-[36px] sm:h-[38px]"
                                 />
                             </div>
                         </div>
 
-                        {/* Step 2: Mode Tabs (Bulk Grid Editor vs. Excel/CSV Upload) + Pending Changes Summary */}
-                        <div className="flex flex-wrap items-center justify-between gap-2.5">
-                            <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-700">
+                        {/* Step 2: Compact Mode Switcher + Pending Summary Strip */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="grid grid-cols-2 sm:inline-flex bg-slate-900 p-1 rounded-xl border border-slate-700 w-full sm:w-auto">
                                 <button
                                     type="button"
                                     onClick={() => setInputTab('grid')}
-                                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                                         inputTab === 'grid' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
                                     }`}
                                 >
-                                    <i className="fas fa-table"></i>
-                                    <span>Bulk Grid Editor</span>
+                                    <i className="fas fa-list-check"></i>
+                                    <span>Stock Take Grid</span>
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => setInputTab('excel')}
-                                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ${
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
                                         inputTab === 'excel' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
                                     }`}
                                 >
                                     <i className="fas fa-file-excel"></i>
-                                    <span>Excel / CSV Upload</span>
+                                    <span>Excel / CSV</span>
                                 </button>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <div className="flex items-center justify-between sm:justify-end gap-2 text-xs">
                                 <span className={`px-2.5 py-1 rounded-lg font-mono font-bold border ${
                                     pendingChanges.length > 0
                                         ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                                         : 'bg-slate-900 text-slate-400 border-slate-700'
                                 }`}>
-                                    Ready: {pendingChanges.length} item(s)
-                                    {pendingChanges.length > 0 && ` (${totalNetDelta > 0 ? '+' : ''}${totalNetDelta} net)`}
+                                    Ready: {pendingChanges.length}
+                                    {pendingChanges.length > 0 && ` (${totalNetDelta > 0 ? '+' : ''}${totalNetDelta})`}
                                 </span>
                                 {Object.keys(qtyInputs).length > 0 && (
                                     <button
@@ -26396,30 +26459,30 @@
                                         onClick={() => { setQtyInputs({}); setItemNotes({}); setUnmatchedRows([]); }}
                                         className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 font-bold transition"
                                     >
-                                        <i className="fas fa-eraser mr-1"></i>Clear Inputs
+                                        <i className="fas fa-eraser mr-1"></i>Clear
                                     </button>
                                 )}
                             </div>
                         </div>
 
                         {inputTab === 'excel' ? (
-                            /* TAB 2: EXCEL / CSV UPLOAD & LIVE PREVIEW */
+                            /* TAB 2: EXCEL / CSV UPLOAD & LIVE PREVIEW (Mobile Cards + Desktop Table) */
                             <div className="space-y-3">
-                                <div className="bg-slate-900/60 p-4 rounded-xl border border-indigo-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                                    <div className="space-y-1">
-                                        <h4 className="text-sm font-bold text-indigo-300 flex items-center gap-2">
+                                <div className="bg-slate-900/60 p-3 sm:p-4 rounded-xl border border-indigo-500/30 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                                    <div className="space-y-0.5">
+                                        <h4 className="text-xs sm:text-sm font-bold text-indigo-300 flex items-center gap-1.5">
                                             <i className="fas fa-upload"></i>
-                                            <span>Upload 2-Column Stock Sheet (.xlsx / .csv)</span>
+                                            <span>Upload Stock Sheet (.xlsx / .csv)</span>
                                         </h4>
-                                        <p className="text-xs text-slate-400">
-                                            Columns: <code className="text-slate-200 font-mono">code</code> (or <code className="text-slate-200 font-mono">barcode</code>), <code className="text-slate-200 font-mono">quantity</code>, and optional <code className="text-slate-200 font-mono">note</code>. Applied using <strong className="text-white">{actionType === 'set' ? '= Set Exact Qty' : actionType === 'add' ? '+ Add Stock' : '- Remove Stock'}</strong>.
+                                        <p className="text-[11px] sm:text-xs text-slate-400">
+                                            Columns: <code className="text-slate-200 font-mono">code</code> (or <code className="text-slate-200 font-mono">barcode</code>), <code className="text-slate-200 font-mono">quantity</code>, <code className="text-slate-200 font-mono">note</code>. Mode: <strong className="text-white">{actionType === 'set' ? '= Set' : actionType === 'add' ? '+ Add' : '− Sub'}</strong>.
                                         </p>
                                     </div>
-                                    <div className="flex items-center gap-2 shrink-0">
+                                    <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
                                         <button
                                             type="button"
                                             onClick={handleDownloadBatchTemplate}
-                                            className="px-3 py-2 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/40 text-xs font-bold transition flex items-center gap-1.5"
+                                            className="px-3 py-2 rounded-lg bg-cyan-600/20 hover:bg-cyan-600 text-cyan-300 hover:text-white border border-cyan-500/40 text-xs font-bold transition flex items-center justify-center gap-1.5"
                                         >
                                             <i className="fas fa-download"></i> Template
                                         </button>
@@ -26433,7 +26496,7 @@
                                         <button
                                             type="button"
                                             onClick={() => excelInputRef.current?.click()}
-                                            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow transition flex items-center gap-1.5"
+                                            className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow transition flex items-center justify-center gap-1.5"
                                         >
                                             <i className="fas fa-file-upload"></i> Choose File
                                         </button>
@@ -26441,12 +26504,12 @@
                                 </div>
 
                                 {unmatchedRows.length > 0 && (
-                                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1">
+                                    <div className="p-2.5 sm:p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1">
                                         <div className="font-bold text-amber-300">
                                             <i className="fas fa-exclamation-triangle mr-1.5"></i>
                                             {unmatchedRows.length} Unmatched / Skipped Row(s):
                                         </div>
-                                        <div className="max-h-24 overflow-y-auto font-mono text-[11px] space-y-0.5">
+                                        <div className="max-h-20 overflow-y-auto font-mono text-[11px] space-y-0.5">
                                             {unmatchedRows.slice(0, 20).map((u, idx) => (
                                                 <div key={idx}>Row {u.row}: "{u.key}" — {u.reason}</div>
                                             ))}
@@ -26455,8 +26518,54 @@
                                     </div>
                                 )}
 
-                                {/* Live Preview of Matched Changes */}
-                                <div className="border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
+                                {/* Mobile Preview Cards (md:hidden) */}
+                                <div className="md:hidden space-y-2 max-h-[42dvh] overflow-y-auto pr-0.5">
+                                    {pendingChanges.length === 0 ? (
+                                        <div className="p-6 text-center text-slate-500 text-xs bg-slate-900/40 rounded-xl border border-slate-700">
+                                            Upload an Excel/CSV file or enter quantities in the grid to preview changes here.
+                                        </div>
+                                    ) : pendingChanges.map(({ product, currentStock, newStock, delta, note }) => (
+                                        <div key={product.id} className="bg-slate-900/70 p-2.5 rounded-xl border border-blue-500/40 space-y-2">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="text-xs font-bold text-slate-100 truncate">{product.name}</div>
+                                                    <div className="text-[10px] font-mono text-slate-400 truncate">
+                                                        {product.code}{note ? ` • ${note}` : ''}
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleQtyInputChange(product.id, '')}
+                                                    className="w-7 h-7 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 flex items-center justify-center shrink-0"
+                                                    title="Remove from batch"
+                                                >
+                                                    <i className="fas fa-times text-xs"></i>
+                                                </button>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-800">
+                                                <div className="text-[11px] font-mono text-slate-300 flex items-center gap-1.5">
+                                                    <span className="text-slate-400">{currentStock}</span>
+                                                    <i className="fas fa-arrow-right text-[9px] text-slate-500"></i>
+                                                    <strong className="text-white">{newStock}</strong>
+                                                    <span className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                                                        {delta > 0 ? '+' : ''}{delta}
+                                                    </span>
+                                                </div>
+                                                <input
+                                                    type="number"
+                                                    inputMode="numeric"
+                                                    min="0"
+                                                    value={qtyInputs[product.id] ?? ''}
+                                                    onChange={(e) => handleQtyInputChange(product.id, e.target.value)}
+                                                    className="w-20 h-8 bg-slate-800 text-white text-center font-mono font-bold px-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs"
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Desktop Preview Table (hidden md:block) */}
+                                <div className="hidden md:block border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
                                     <div className="max-h-72 overflow-y-auto">
                                         <table className="min-w-full divide-y divide-slate-700 text-xs sm:text-sm">
                                             <thead className="bg-slate-900 sticky top-0 z-10 text-slate-400 text-[11px] uppercase">
@@ -26473,7 +26582,7 @@
                                                 {pendingChanges.length === 0 ? (
                                                     <tr>
                                                         <td colSpan="6" className="p-8 text-center text-slate-500 text-xs">
-                                                            Upload an Excel/CSV file or enter quantities in the Bulk Grid Editor to preview stock changes here.
+                                                            Upload an Excel/CSV file or enter quantities in the Stock Take Grid to preview stock changes here.
                                                         </td>
                                                     </tr>
                                                 ) : pendingChanges.map(({ product, currentStock, newStock, delta, note }) => (
@@ -26520,9 +26629,83 @@
                                 </div>
                             </div>
                         ) : (
-                            /* TAB 1: BULK GRID EDITOR */
-                            <div className="space-y-3">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2 items-center">
+                            /* TAB 1: COMPACT MOBILE CARDS + DESKTOP BULK GRID EDITOR */
+                            <div className="space-y-2.5 sm:space-y-3">
+                                {/* Search Bar + Quick Changed Toggle + Mobile Filter Drawer Button */}
+                                <div className="flex items-center gap-1.5 sm:hidden">
+                                    <div className="relative flex-1 min-w-0">
+                                        <input
+                                            type="text"
+                                            value={searchTerm}
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                            placeholder="Search name, code, barcode..."
+                                            className="w-full bg-slate-900 text-white pl-8 pr-7 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs h-[36px]"
+                                        />
+                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                        {searchTerm && (
+                                            <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
+                                                <i className="fas fa-times-circle text-xs"></i>
+                                            </button>
+                                        )}
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setOnlyChanged(prev => !prev)}
+                                        className={`h-[36px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1 transition ${
+                                            onlyChanged
+                                                ? 'bg-blue-600 border-blue-400 text-white shadow'
+                                                : 'bg-slate-900 border-slate-600 text-slate-300'
+                                        }`}
+                                        title="Show Changed Items Only"
+                                    >
+                                        <i className="fas fa-check-double text-[10px]"></i>
+                                        <span>{pendingChanges.length}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowMobileFilters(prev => !prev)}
+                                        className={`h-[36px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1 transition relative ${
+                                            showMobileFilters || activeFilterCount > 0
+                                                ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                                                : 'bg-slate-900 border-slate-600 text-slate-300'
+                                        }`}
+                                        title="Filter by Vendor / Category"
+                                    >
+                                        <i className="fas fa-filter text-[10px]"></i>
+                                        {activeFilterCount > 0 && (
+                                            <span className="text-[10px] font-black">{activeFilterCount}</span>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {/* Mobile Collapsible Vendor/Category Filter Drawer */}
+                                {showMobileFilters && (
+                                    <div className="sm:hidden bg-slate-900/70 p-2.5 rounded-xl border border-slate-700 grid grid-cols-2 gap-2">
+                                        <select
+                                            value={vendorFilter}
+                                            onChange={(e) => setVendorFilter(e.target.value)}
+                                            className="w-full bg-slate-800 text-slate-200 px-2 py-1.5 rounded-lg border border-slate-600 text-xs outline-none"
+                                        >
+                                            <option value="">All Vendors</option>
+                                            {(vendors || []).map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                                        </select>
+                                        <select
+                                            value={categoryFilter}
+                                            onChange={(e) => setCategoryFilter(e.target.value)}
+                                            className="w-full bg-slate-800 text-slate-200 px-2 py-1.5 rounded-lg border border-slate-600 text-xs outline-none"
+                                        >
+                                            <option value="">All Categories</option>
+                                            {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                                        </select>
+                                        <label className="col-span-2 flex items-center gap-2 text-xs text-slate-300 pt-0.5">
+                                            <input type="checkbox" checked={onlyAssignedToShop} onChange={(e) => setOnlyAssignedToShop(e.target.checked)} className="rounded accent-emerald-500" />
+                                            <span>Show Assigned Shop Products Only</span>
+                                        </label>
+                                    </div>
+                                )}
+
+                                {/* Desktop / Tablet Filter Bar (hidden sm:grid) */}
+                                <div className="hidden sm:grid sm:grid-cols-2 lg:grid-cols-12 gap-2 items-center">
                                     <div className="lg:col-span-4 relative">
                                         <input
                                             type="text"
@@ -26570,16 +26753,123 @@
                                     </div>
                                 </div>
 
-                                <div className="border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
+                                {/* MOBILE COMPACT STOCK-TAKE CARD LIST (md:hidden — Zero Horizontal Scroll & Thumb-Friendly) */}
+                                <div className="md:hidden space-y-2 max-h-[44dvh] overflow-y-auto pr-0.5">
+                                    {filteredGridProducts.length === 0 ? (
+                                        <div className="p-8 text-center text-slate-500 text-xs bg-slate-900/40 rounded-xl border border-slate-700">
+                                            No matching products found.
+                                        </div>
+                                    ) : filteredGridProducts.slice(0, GRID_DISPLAY_CAP).map(prod => {
+                                        const rawVal = qtyInputs[prod.id] ?? '';
+                                        const { hasInput, currentStock, newStock, delta } = computeChangeForProduct(prod, rawVal);
+                                        const isModified = hasInput && delta !== 0;
+
+                                        return (
+                                            <div
+                                                key={prod.id}
+                                                className={`p-2.5 rounded-xl border transition-colors ${
+                                                    isModified
+                                                        ? 'bg-blue-950/35 border-blue-500/60 shadow-sm'
+                                                        : 'bg-slate-900/65 border-slate-700/80'
+                                                }`}
+                                            >
+                                                {/* Card Row 1: Product Name + Code + Current Stock Badge */}
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-xs font-bold text-slate-100 leading-snug line-clamp-2">{prod.name}</div>
+                                                        <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                                                            {prod.code}{prod.barcode ? ` • ${prod.barcode}` : ''}
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-right shrink-0">
+                                                        <span className="inline-block px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-[10px] font-mono text-slate-300">
+                                                            Curr: <strong className="text-white">{currentStock}</strong>
+                                                        </span>
+                                                    </div>
+                                                </div>
+
+                                                {/* Card Row 2: Live Result/Diff + Touch Stepper (− [input] +) */}
+                                                <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800/80">
+                                                    <div className="flex items-center gap-1.5 text-[11px] font-mono min-w-0">
+                                                        {isModified ? (
+                                                            <>
+                                                                <span className="text-slate-400">New:</span>
+                                                                <strong className="text-white text-xs">{newStock}</strong>
+                                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
+                                                                    delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+                                                                }`}>
+                                                                    {delta > 0 ? '+' : ''}{delta}
+                                                                </span>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleQtyInputChange(prod.id, '')}
+                                                                    className="text-slate-400 hover:text-red-400 px-1"
+                                                                    title="Reset this item"
+                                                                >
+                                                                    <i className="fas fa-undo text-[10px]"></i>
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <span className="text-[10px] text-slate-500">
+                                                                {actionType === 'set' ? 'Enter counted qty' : actionType === 'add' ? 'Qty to add' : 'Qty to deduct'}
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Thumb-Friendly Stepper */}
+                                                    <div className="flex items-center gap-1 shrink-0">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleStepQty(prod, -1)}
+                                                            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-rose-600 text-slate-200 border border-slate-600 flex items-center justify-center transition"
+                                                            aria-label="Decrease quantity"
+                                                        >
+                                                            <i className="fas fa-minus text-[10px]"></i>
+                                                        </button>
+                                                        <input
+                                                            type="number"
+                                                            inputMode="numeric"
+                                                            min="0"
+                                                            value={rawVal}
+                                                            onChange={(e) => handleQtyInputChange(prod.id, e.target.value)}
+                                                            placeholder={actionType === 'set' ? String(currentStock) : '0'}
+                                                            className={`w-16 h-8 bg-slate-950 text-center font-mono font-black rounded-lg border outline-none text-xs ${
+                                                                isModified
+                                                                    ? 'border-blue-500 text-white'
+                                                                    : 'border-slate-600 text-slate-200 focus:border-blue-500'
+                                                            }`}
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleStepQty(prod, 1)}
+                                                            className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-emerald-600 text-slate-200 border border-slate-600 flex items-center justify-center transition"
+                                                            aria-label="Increase quantity"
+                                                        >
+                                                            <i className="fas fa-plus text-[10px]"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                    {filteredGridProducts.length > GRID_DISPLAY_CAP && (
+                                        <div className="px-3 py-2 bg-slate-900/90 rounded-lg border border-slate-700 text-[11px] text-slate-400 text-center">
+                                            Showing first {GRID_DISPLAY_CAP} of {filteredGridProducts.length} products. Use Search or Filters to narrow results.
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* DESKTOP FULL-WIDTH TABLE (hidden md:block) */}
+                                <div className="hidden md:block border border-slate-700 rounded-xl overflow-hidden bg-slate-900/40">
                                     <div className="max-h-80 overflow-y-auto">
                                         <table className="min-w-full divide-y divide-slate-700 text-xs sm:text-sm">
                                             <thead className="bg-slate-900 sticky top-0 z-10 text-slate-400 text-[11px] uppercase">
                                                 <tr>
                                                     <th className="px-3 py-2.5 text-left">Product &amp; Code</th>
-                                                    <th className="px-3 py-2.5 text-left hidden sm:table-cell">Vendor</th>
+                                                    <th className="px-3 py-2.5 text-left">Vendor</th>
                                                     <th className="px-3 py-2.5 text-center">Current</th>
                                                     <th className="px-3 py-2.5 text-center">
-                                                        {actionType === 'set' ? 'New Qty (=)' : actionType === 'add' ? 'Add Qty (+)' : 'Remove Qty (-)'}
+                                                        {actionType === 'set' ? 'New Qty (=)' : actionType === 'add' ? 'Add Qty (+)' : 'Remove Qty (−)'}
                                                     </th>
                                                     <th className="px-3 py-2.5 text-center">Result</th>
                                                     <th className="px-3 py-2.5 text-center">Diff</th>
@@ -26605,7 +26895,7 @@
                                                                     {prod.code}{prod.barcode ? ` • ${prod.barcode}` : ''}
                                                                 </div>
                                                             </td>
-                                                            <td className="px-3 py-2 text-xs text-slate-400 hidden sm:table-cell truncate max-w-[140px]">
+                                                            <td className="px-3 py-2 text-xs text-slate-400 truncate max-w-[140px]">
                                                                 {prod.vendorName || '-'}
                                                             </td>
                                                             <td className="px-3 py-2 text-center font-mono font-bold text-slate-300">
@@ -26656,16 +26946,21 @@
                     </div>
                 </ModalBody>
                 <ModalFooter>
-                    <div className="w-full flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
-                        <div className="text-xs text-slate-400 font-mono">
+                    <div className="w-full flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+                        <div className="hidden sm:block text-xs text-slate-400 font-mono truncate">
                             {progressText || (selectedShop ? `Target: ${selectedShop.name} • Logged in Adjust Stock Log` : '')}
                         </div>
-                        <div className="flex items-center gap-2.5">
+                        {progressText && (
+                            <div className="sm:hidden text-[11px] text-amber-300 font-mono text-center">
+                                {progressText}
+                            </div>
+                        )}
+                        <div className="grid grid-cols-3 sm:flex items-center gap-2">
                             <button
                                 type="button"
                                 disabled={isSubmitting}
                                 onClick={onClose}
-                                className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-5 rounded-xl text-xs sm:text-sm transition disabled:opacity-50"
+                                className="col-span-1 bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-4 sm:px-5 rounded-xl text-xs sm:text-sm transition disabled:opacity-50"
                             >
                                 Cancel
                             </button>
@@ -26673,10 +26968,10 @@
                                 type="button"
                                 disabled={isSubmitting || pendingChanges.length === 0 || !shopId}
                                 onClick={handleCommitBatch}
-                                className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black py-2.5 px-6 rounded-xl text-xs sm:text-sm shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                className="col-span-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black py-2.5 px-4 sm:px-6 rounded-xl text-xs sm:text-sm shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-1.5 sm:gap-2 transition active:scale-95"
                             >
                                 {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className="fas fa-check-double"></i>}
-                                <span>{isSubmitting ? 'Updating...' : `Apply Batch Update (${pendingChanges.length})`}</span>
+                                <span>{isSubmitting ? 'Updating...' : `Apply (${pendingChanges.length})`}</span>
                             </button>
                         </div>
                     </div>
@@ -36118,7 +36413,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         };
 
         return (
-            <div className="flex h-screen h-[100dvh] bg-slate-900 text-slate-300 overflow-hidden">
+            <div className="fixed inset-0 w-full flex h-[100dvh] pt-[env(safe-area-inset-top)] bg-slate-900 text-slate-300 overflow-hidden">
                 <InstallAppModal
                     show={showInstallModal}
                     onClose={() => setShowInstallModal(false)}
@@ -36142,7 +36437,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                         toggleSidebar={toggleSidebar}
                         onOpenInstallModal={() => setShowInstallModal(true)}
                     />
-                    <main className={`flex-1 overflow-x-hidden overflow-y-auto bg-slate-800 ${activePage === 'pos-terminal' ? 'p-2 sm:p-3 lg:p-4' : 'p-4 sm:p-6'}`}>
+                    <main className={`flex-1 min-h-0 overflow-x-hidden bg-slate-800 ${activePage === 'pos-terminal' ? 'overflow-hidden flex flex-col p-1.5 sm:p-3 lg:p-4' : 'overflow-y-auto p-4 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]'}`}>
                         <SearchProvider>
                             {renderActivePage()}
                         </SearchProvider>
