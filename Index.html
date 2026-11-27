@@ -501,19 +501,39 @@
 
         <!-- Custom Styles -->
         <style>
+            :root {
+                --sat: env(safe-area-inset-top, 0px);
+                --sab: env(safe-area-inset-bottom, 0px);
+                --sal: env(safe-area-inset-left, 0px);
+                --sar: env(safe-area-inset-right, 0px);
+                --app-height: 100dvh;
+            }
             html, body, #root {
                 height: 100%;
+                height: var(--app-height, 100dvh);
                 width: 100%;
                 margin: 0;
                 padding: 0;
+                overflow: hidden;
             }
             body {
                 background-color: #0f172a; /* bg-slate-900 */
                 -webkit-font-smoothing: antialiased;
                 -moz-osx-font-smoothing: grayscale;
                 overflow-x: hidden; /* Prevent horizontal scroll on the body */
-                overscroll-behavior-y: none; /* Prevent pull-to-refresh on installed homepad/tablet PWA */
+                overscroll-behavior: none; /* Prevent rubber-band bounce gaps on mobile/PWA */
                 -webkit-tap-highlight-color: transparent;
+            }
+            /* Safe-area utility helpers for edge-to-edge mobile full-screen Header & Footer */
+            .safe-top {
+                padding-top: var(--sat);
+            }
+            .safe-bottom {
+                padding-bottom: var(--sab);
+            }
+            .safe-x {
+                padding-left: var(--sal);
+                padding-right: var(--sar);
             }
             /* Custom utility to hide scrollbars */
             .no-scrollbar::-webkit-scrollbar {
@@ -651,6 +671,31 @@
             </div>
         </div>
         <script>
+            // ====================================================================
+            // FLEXI FULL-SCREEN MOBILE VIEWPORT ENGINE (iOS Safari / Android / PWA)
+            // Dynamically tracks window.visualViewport height so collapsing address
+            // bars, notches, and on-screen keyboards never create dead gaps or clip
+            // the mobile Header & Footer.
+            // ====================================================================
+            (function initFlexiMobileViewport() {
+                const syncViewportHeight = () => {
+                    try {
+                        const vh = (window.visualViewport && window.visualViewport.height)
+                            ? Math.round(window.visualViewport.height)
+                            : window.innerHeight;
+                        if (vh > 0) {
+                            document.documentElement.style.setProperty('--app-height', `${vh}px`);
+                        }
+                    } catch (e) {}
+                };
+                syncViewportHeight();
+                window.addEventListener('resize', syncViewportHeight, { passive: true });
+                window.addEventListener('orientationchange', () => setTimeout(syncViewportHeight, 120), { passive: true });
+                if (window.visualViewport) {
+                    window.visualViewport.addEventListener('resize', syncViewportHeight, { passive: true });
+                }
+            })();
+
             // ====================================================================
             // PHASE 1.1: ZERO-SETTINGS LOCAL CACHE SECURITY POLICY — BOOT SANITIZER
             // Automatically purges any legacy Settings keys from localStorage at 0ms
@@ -6291,7 +6336,7 @@
     ));
 
     const ModalFooter = memo(({ children }) => (
-        <div className="px-4 sm:px-6 py-3.5 bg-slate-900/90 border-t border-slate-700 flex flex-col-reverse sm:flex-row justify-end items-stretch sm:items-center gap-2.5 sm:gap-3 shrink-0">
+        <div className="px-4 sm:px-6 pt-3 pb-[max(0.875rem,env(safe-area-inset-bottom,0px))] bg-slate-900/95 border-t border-slate-700 flex flex-col-reverse sm:flex-row justify-end items-stretch sm:items-center gap-2.5 sm:gap-3 shrink-0">
             {children}
         </div>
     ));
@@ -6423,7 +6468,7 @@
         };
 
         return (
-            <div className="min-h-screen bg-[#0a0f1c] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-800/40 via-[#0a0f1c] to-[#0a0f1c] flex items-center justify-center p-4 relative overflow-hidden">
+            <div className="min-h-[100dvh] h-full overflow-y-auto bg-[#0a0f1c] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-800/40 via-[#0a0f1c] to-[#0a0f1c] flex items-center justify-center p-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] relative">
                 {/* Decorative Background Blur Orbs */}
                 <div className="absolute -top-32 -left-32 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
                 <div className="absolute -bottom-32 -right-32 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none"></div>
@@ -6548,8 +6593,8 @@
         };
 
         return (
-            <Modal show={show} maxWidth="max-w-md">
-                <ModalHeader title="Install App to Home Screen" onClose={onClose} />
+            <Modal show={show} onClose={onClose} maxWidth="max-w-md">
+                <ModalHeader title="Install to Home Screen" onClose={onClose} />
                 <ModalBody>
                     <div className="space-y-4">
                         {/* App Preview Header */}
@@ -6654,8 +6699,8 @@
         const allowedPages = userProfile.permissions || [];
         
         return (
-            <aside className={`w-72 bg-[#0B1120] text-slate-300 p-4 sm:p-5 flex flex-col transform ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'} transition-transform duration-300 ease-in-out z-50 fixed inset-y-0 left-0 h-full border-r border-slate-800/80`}>
-                <div className="flex items-center justify-between mb-8 px-1">
+            <aside className={`w-72 bg-[#0B1120] text-slate-300 px-4 sm:px-5 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1rem,env(safe-area-inset-bottom,0px))] flex flex-col transform ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'} transition-transform duration-300 ease-in-out z-50 fixed inset-y-0 left-0 h-full border-r border-slate-800/80`}>
+                <div className="flex items-center justify-between mb-6 sm:mb-8 px-1">
                     <div className="flex items-center flex-1 min-w-0 mr-2">
                         <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 text-white flex items-center justify-center shadow-lg shadow-blue-500/30 mr-3 shrink-0">
                             <i className="fas fa-file-invoice-dollar text-base"></i>
@@ -7064,7 +7109,16 @@
 
         const activeProfileName = liveUserRecord?.name || userProfile?.name || 'User';
         const activeProfileRole = liveUserRecord?.role || userProfile?.role || 'Staff';
-        const activeProfilePhoto = liveUserRecord?.photoUrl !== undefined ? liveUserRecord.photoUrl : (userProfile?.photoUrl || '');
+        const activeProfilePhoto = useMemo(() => {
+            const pickPhoto = (obj) => {
+                if (!obj) return '';
+                return String(obj.photoUrl || obj.photoURL || obj.avatarUrl || '').trim();
+            };
+            if (liveUserRecord && liveUserRecord.photoUrl !== undefined) {
+                return pickPhoto(liveUserRecord);
+            }
+            return pickPhoto(liveUserRecord) || pickPhoto(userProfile) || String(auth.currentUser?.photoURL || '').trim();
+        }, [liveUserRecord, userProfile]);
 
         useEffect(() => {
             setAvatarImgError(false);
@@ -7151,7 +7205,8 @@
         };
 
         return (
-            <header className="h-12 sm:h-16 bg-slate-900 border-b border-slate-700/80 px-2.5 sm:px-5 flex items-center justify-between shrink-0 z-20 relative">
+            <header className="w-full bg-slate-900/95 backdrop-blur-md border-b border-slate-700/80 pt-[env(safe-area-inset-top,0px)] pl-[env(safe-area-inset-left,0px)] pr-[env(safe-area-inset-right,0px)] shrink-0 z-30 relative">
+                <div className="h-12 sm:h-16 px-2.5 sm:px-5 flex items-center justify-between">
                 {userProfile?.role === 'Admin' && (
                     <MasterClearCacheModal
                         show={showClearCacheModal}
@@ -7165,7 +7220,7 @@
                     />
                 )}
                 {syncToast && (
-                    <div className="fixed top-14 sm:top-16 right-3 sm:right-4 z-[120] bg-emerald-600 text-white px-3.5 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
+                    <div className="fixed top-[calc(3.5rem+env(safe-area-inset-top,0px))] sm:top-16 right-3 sm:right-4 z-[120] bg-emerald-600 text-white px-3.5 py-2 rounded-xl shadow-xl text-xs font-bold flex items-center gap-2 animate-fade-in-up">
                         <i className="fas fa-check-circle"></i>
                         <span>{syncToast}</span>
                     </div>
@@ -7175,7 +7230,7 @@
                     <button
                         type="button"
                         onClick={toggleSidebar}
-                        className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition shrink-0"
+                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition shrink-0"
                         title="Open Navigation Menu"
                     >
                         <i className="fas fa-bars text-xs sm:text-sm"></i>
@@ -7191,7 +7246,7 @@
                         <button
                             type="button"
                             onClick={() => window.SolarisKeepAwakeManager?.engage(true)}
-                            className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 ${
+                            className={`w-9 h-9 sm:w-9 sm:h-9 rounded-xl border flex items-center justify-center transition shadow-sm active:scale-95 ${
                                 keepAwakeState.isActive
                                     ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                                     : 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
@@ -7217,19 +7272,23 @@
                         <button
                             type="button"
                             onClick={() => setIsUserMenuOpen(prev => !prev)}
-                            className="flex items-center gap-1.5 sm:gap-2 pl-1.5 sm:pl-2 pr-2 sm:pr-2.5 py-1 sm:py-1.5 rounded-lg sm:rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
+                            className="flex items-center gap-1.5 sm:gap-2 pl-1 sm:pl-1.5 pr-2 sm:pr-2.5 py-1 rounded-full sm:rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 border border-slate-700 transition"
+                            aria-label="User account menu"
                         >
-                            <div className="relative w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-[11px] sm:text-xs flex items-center justify-center uppercase shrink-0 ring-2 ring-slate-700/80">
-                                {activeProfilePhoto && !avatarImgError ? (
-                                    <img
-                                        src={activeProfilePhoto}
-                                        alt={activeProfileName}
-                                        onError={() => setAvatarImgError(true)}
-                                        className="w-full h-full rounded-full object-cover"
-                                    />
-                                ) : (
-                                    <span>{activeProfileName.slice(0, 2)}</span>
-                                )}
+                            <div className="relative w-8 h-8 rounded-full shrink-0">
+                                <div className="w-full h-full rounded-full overflow-hidden bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-[11px] sm:text-xs flex items-center justify-center uppercase ring-2 ring-slate-700/80">
+                                    {activeProfilePhoto && !avatarImgError ? (
+                                        <img
+                                            src={activeProfilePhoto}
+                                            alt={activeProfileName}
+                                            referrerPolicy="no-referrer"
+                                            onError={() => setAvatarImgError(true)}
+                                            className="w-full h-full object-cover block"
+                                        />
+                                    ) : (
+                                        <span>{activeProfileName.slice(0, 2)}</span>
+                                    )}
+                                </div>
                                 {isSyncingNow && (
                                     <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-amber-400 border-2 border-slate-900 animate-ping"></span>
                                 )}
@@ -7249,8 +7308,9 @@
                                             <img
                                                 src={activeProfilePhoto}
                                                 alt={activeProfileName}
+                                                referrerPolicy="no-referrer"
                                                 onError={() => setAvatarImgError(true)}
-                                                className="w-full h-full object-cover"
+                                                className="w-full h-full object-cover block"
                                             />
                                         ) : (
                                             <span>{activeProfileName.slice(0, 2)}</span>
@@ -7328,6 +7388,7 @@
                             </div>
                         )}
                     </div>
+                </div>
                 </div>
             </header>
         );
@@ -8573,10 +8634,10 @@
                     </Modal>
                 )}
 
-                {/* Main Split Workspace */}
-                <div className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden">
+                {/* Main Split Workspace (Edge-to-Edge on Mobile, Split Cards on Tablet/Desktop) */}
+                <div className="flex-1 flex flex-col md:flex-row gap-0 md:gap-3 min-h-0 overflow-hidden">
                     {/* LEFT: Product Catalog Panel */}
-                    <div className={`flex-1 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
+                    <div className={`flex-1 flex flex-col bg-slate-800 md:rounded-xl border-0 md:border border-slate-700/80 md:shadow-lg overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Top Toolbar: Search Input + Locked Shop Selector + Action Buttons */}
                         <div className="p-2 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0">
                             <div className="flex items-center gap-1.5 sm:gap-2 flex-1 min-w-0">
@@ -9113,7 +9174,7 @@
                     </div>
 
                     {/* RIGHT: POS Cart / Current Ticket (Visible on Tablet/Desktop OR when Mobile Tab is 'cart') */}
-                    <div className={`w-full md:w-[340px] lg:w-[390px] xl:w-[420px] flex-1 md:flex-none min-h-0 shrink-0 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
+                    <div className={`w-full md:w-[340px] lg:w-[390px] xl:w-[420px] flex-1 md:flex-none min-h-0 shrink-0 flex flex-col bg-slate-800 md:rounded-xl border-0 md:border border-slate-700/80 md:shadow-lg overflow-hidden ${activeMobileTab === 'cart' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Cart Header: Customer Selector + Quick Add Customer */}
                         <div className="p-2.5 sm:p-3 bg-slate-900/70 border-b border-slate-700/80 space-y-2 shrink-0">
                             <div className="flex items-center justify-between">
@@ -9372,14 +9433,14 @@
                     </div>
                 </div>
 
-                {/* STICKY 3-ACTION MOBILE FOOTER (Catalog, Ticket & Checkout) */}
-                <footer className="md:hidden shrink-0 -mx-1.5 mt-1.5 bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2.5 pt-1.5 pb-[max(0.5rem,calc(env(safe-area-inset-bottom)-14px))] z-30 shadow-[0_-6px_18px_rgba(0,0,0,0.45)]">
+                {/* FLEXI EDGE-TO-EDGE MOBILE FOOTER (Catalog, Ticket & Checkout) */}
+                <footer className="md:hidden shrink-0 w-full bg-slate-900/95 backdrop-blur-xl border-t border-slate-700/90 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] pl-[max(0.625rem,env(safe-area-inset-left,0px))] pr-[max(0.625rem,env(safe-area-inset-right,0px))] z-30 shadow-[0_-8px_24px_rgba(0,0,0,0.45)]">
                     <div className="grid grid-cols-12 gap-2 items-stretch max-w-screen-md mx-auto">
                         {/* 1. Catalog Button */}
                         <button
                             type="button"
                             onClick={() => setActiveMobileTab('products')}
-                            className={`col-span-3 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl border transition-all active:scale-95 ${
+                            className={`col-span-3 min-h-[48px] flex flex-col items-center justify-center py-1.5 px-1 rounded-xl border transition-all active:scale-95 ${
                                 activeMobileTab === 'products'
                                     ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
                                     : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:text-white'
@@ -9393,7 +9454,7 @@
                         <button
                             type="button"
                             onClick={() => setActiveMobileTab('cart')}
-                            className={`col-span-4 flex flex-col items-center justify-center py-1.5 px-1.5 rounded-xl border transition-all active:scale-95 relative ${
+                            className={`col-span-4 min-h-[48px] flex flex-col items-center justify-center py-1.5 px-1.5 rounded-xl border transition-all active:scale-95 relative ${
                                 activeMobileTab === 'cart'
                                     ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
                                     : 'bg-slate-800/90 text-slate-200 border-slate-700 hover:text-white'
@@ -9430,7 +9491,7 @@
                                     setShowPaymentModal(true);
                                 }
                             }}
-                            className={`col-span-5 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-black transition-all active:scale-95 ${
+                            className={`col-span-5 min-h-[48px] flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-black transition-all active:scale-95 ${
                                 !currentShift
                                     ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-lg shadow-amber-900/30'
                                     : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white shadow-lg shadow-emerald-900/30'
@@ -35572,10 +35633,8 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                 );
                 ctx.restore();
 
-                let dataUrl = canvas.toDataURL('image/webp', 0.82);
-                if (!dataUrl || dataUrl.length < 50) {
-                    dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-                }
+                // Use JPEG for 100% universal iOS Safari / Android / Desktop compatibility & compact Firestore size
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
                 onApply(dataUrl);
             } catch (err) {
                 console.error('Avatar crop error:', err);
@@ -35886,28 +35945,22 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                     const secondaryAuth = secondaryApp.auth();
 
                     try {
-                        const userCredential = await secondaryAuth.createUserWithEmailAndPassword(formData.email, password);
+                        const userCredential = await secondaryAuth.createUserWithEmailAndPassword(formData.email.trim(), password);
                         uidToSave = userCredential.user.uid;
                         await secondaryAuth.signOut();
-                    } catch (authError) {
-                        if (authError.code === 'auth/email-already-in-use') {
-                            throw new Error("This email is already registered.");
-                        } else {
-                            throw authError;
-                        }
                     } finally {
-                        await secondaryApp.delete();
+                        try { await secondaryApp.delete(); } catch (e) {}
                     }
 
-                    const newUserProfile = {
+                    const newUserDoc = {
                         ...formData,
                         uid: uidToSave,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp()
                     };
                     if (window.SolarisCollectionMutator) {
-                        window.SolarisCollectionMutator.upsertDoc("users", uidToSave, newUserProfile, true);
+                        window.SolarisCollectionMutator.upsertDoc("users", uidToSave, newUserDoc, true);
                     } else {
-                        await db.collection("users").doc(uidToSave).set(newUserProfile);
+                        await db.collection("users").doc(uidToSave).set(newUserDoc);
                     }
                 }
 
@@ -35916,30 +35969,22 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             } catch (error) {
                 console.error("User save error:", error);
                 setModal({ type: 'message', data: { title: 'Error', message: error.message || 'Failed to save user.', isError: true } });
+            } finally {
                 setIsSubmitting(false);
             }
-        };
-
-        const toggleAllAssignedShops = (checked) => {
-            setFormData(prev => ({
-                ...prev,
-                assignedShops: checked ? (shops || []).map(s => s.id) : []
-            }));
-        };
-
-        const toggleAllPermissions = (checked) => {
-            setFormData(prev => ({
-                ...prev,
-                permissions: checked ? [...permissionOptions] : []
-            }));
         };
 
         return (
             <div className="space-y-6">
                 <MessageModal {...modal.data} show={modal.type === 'message'} onClose={() => setModal({ type: null })} />
-                <ConfirmationModal title="Delete User" message="Are you sure? This deletes their profile but not their login access." show={modal.type === 'confirmDelete'} onConfirm={() => {handleDelete(modal.data); setModal({type: null})}} onCancel={() => setModal({ type: null })} />
+                <ConfirmationModal
+                    title="Delete User"
+                    message="Are you sure you want to delete this user profile?"
+                    show={modal.type === 'confirmDelete'}
+                    onConfirm={() => { handleDelete(modal.data); setModal({ type: null }); }}
+                    onCancel={() => setModal({ type: null })}
+                />
 
-                {/* Interactive Smart Crop Modal for User Profile Photo */}
                 {cropSourceImage && (
                     <UserAvatarCropModal
                         imageSrc={cropSourceImage}
@@ -35951,467 +35996,190 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                     />
                 )}
 
-                {/* User Form Modal */}
                 {showUserModal && (
-                    <Modal show={true} onClose={resetForm} maxWidth="max-w-3xl">
-                        <ModalHeader title={editId ? "Edit User Profile" : "Create New User"} onClose={resetForm} />
+                    <Modal show={true} onClose={resetForm} maxWidth="max-w-2xl">
+                        <ModalHeader title={editId ? 'Edit User & Permissions' : 'Add New User'} onClose={resetForm} />
                         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
                             <ModalBody>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-5 p-1">
-                                    {/* User Profile Photo Upload & Smart Crop Section */}
-                                    <div className="sm:col-span-2 bg-slate-900/60 p-4 rounded-xl border border-slate-700 flex flex-col sm:flex-row items-center gap-4">
-                                        <div
-                                            onClick={() => avatarFileInputRef.current?.click()}
-                                            className="relative w-20 h-20 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-2xl flex items-center justify-center uppercase shrink-0 overflow-hidden ring-2 ring-blue-500/50 shadow-lg cursor-pointer group"
-                                            title="Click to upload & smart-crop profile photo"
-                                        >
+                                <div className="space-y-4">
+                                    {/* Profile Photo Smart Crop Section */}
+                                    <div className="flex items-center gap-4 bg-slate-900/60 p-3.5 rounded-xl border border-slate-700">
+                                        <div className="w-16 h-16 rounded-full overflow-hidden bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-lg flex items-center justify-center uppercase shrink-0 ring-2 ring-blue-500/40">
                                             {formData.photoUrl ? (
-                                                <img src={formData.photoUrl} alt={formData.name || 'Avatar'} className="w-full h-full object-cover" />
+                                                <img src={formData.photoUrl} alt={formData.name || 'User'} className="w-full h-full object-cover" />
                                             ) : (
-                                                <span>{(formData.name || 'U').slice(0, 2)}</span>
+                                                <span>{(formData.name || 'US').slice(0, 2)}</span>
                                             )}
-                                            <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-bold">
-                                                <i className="fas fa-camera text-base"></i>
-                                            </div>
                                         </div>
-
-                                        <div className="flex-1 text-center sm:text-left space-y-2 min-w-0">
-                                            <div>
-                                                <h4 className="text-sm font-bold text-slate-100 flex items-center justify-center sm:justify-start gap-2">
-                                                    <i className="fas fa-id-badge text-blue-400"></i>
-                                                    <span>User Profile Photo</span>
-                                                </h4>
-                                                <p className="text-xs text-slate-400 mt-0.5">
-                                                    Upload a photo and use Smart Crop to frame the avatar shown at the top-right login corner.
-                                                </p>
-                                            </div>
-                                            <input
-                                                ref={avatarFileInputRef}
-                                                type="file"
-                                                accept="image/*"
-                                                onChange={handleAvatarFileSelected}
-                                                className="hidden"
-                                            />
-                                            <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => avatarFileInputRef.current?.click()}
-                                                    className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
-                                                >
-                                                    <i className="fas fa-upload"></i>
-                                                    <span>{formData.photoUrl ? 'Change Photo' : 'Upload & Smart Crop'}</span>
+                                        <div className="flex-1 min-w-0 space-y-1.5">
+                                            <div className="text-xs font-bold text-slate-200">User Profile Photo</div>
+                                            <div className="flex flex-wrap gap-2">
+                                                <input ref={avatarFileInputRef} type="file" accept="image/*" onChange={handleAvatarFileSelected} className="hidden" />
+                                                <button type="button" onClick={() => avatarFileInputRef.current?.click()} className="px-3 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 text-xs font-bold transition">
+                                                    <i className="fas fa-camera mr-1.5"></i>{formData.photoUrl ? 'Change Photo' : 'Upload Photo'}
                                                 </button>
                                                 {formData.photoUrl && (
-                                                    <>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setCropSourceImage(formData.photoUrl)}
-                                                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-600 text-xs font-bold transition flex items-center gap-1.5"
-                                                        >
-                                                            <i className="fas fa-crop-simple"></i>
-                                                            <span>Re-Crop</span>
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => setFormData(prev => ({ ...prev, photoUrl: '' }))}
-                                                            className="px-3 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 text-xs font-bold transition flex items-center gap-1.5"
-                                                        >
-                                                            <i className="fas fa-trash-alt"></i>
-                                                            <span>Remove</span>
-                                                        </button>
-                                                    </>
+                                                    <button type="button" onClick={() => setFormData(prev => ({ ...prev, photoUrl: '' }))} className="px-3 py-1.5 rounded-lg bg-red-600/15 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/30 text-xs font-bold transition">
+                                                        Remove
+                                                    </button>
                                                 )}
                                             </div>
                                         </div>
                                     </div>
 
-                                    <div>
-                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-user text-blue-400 mr-2"></i>Full Name <span className="text-red-400">*</span>
-                                        </label>
-                                        <input type="text" name="name" value={formData.name} onChange={handleInputChange} placeholder="e.g. Sokha" className="w-full bg-slate-700 text-slate-100 px-3 py-2.5 text-sm border border-slate-600 rounded-xl focus:border-blue-500 focus:ring-2 focus:ring-blue-500/40 outline-none" required />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-envelope text-orange-400 mr-2"></i>Email Address <span className="text-red-400">*</span>
-                                        </label>
-                                        <input type="email" name="email" value={formData.email} onChange={handleInputChange} placeholder="staff@example.com" className="w-full bg-slate-700 text-slate-100 px-3 py-2.5 text-sm border border-slate-600 rounded-xl focus:border-blue-500 focus:ring-2 focus:ring-blue-500/40 outline-none read-only:opacity-70 read-only:cursor-not-allowed" required readOnly={!!editId} />
-                                    </div>
-                                    
-                                    {/* Password Field - Only show when creating new user */}
-                                    {!editId && (
-                                        <div className="sm:col-span-2 bg-blue-900/15 p-3.5 rounded-xl border border-blue-500/30">
-                                            <label className="block text-xs sm:text-sm font-medium text-blue-300 mb-1">
-                                                <i className="fas fa-lock text-blue-400 mr-2"></i>Set Login Password <span className="text-red-400">*</span>
-                                            </label>
-                                            <div className="relative">
-                                                <input 
-                                                    type={showPassword ? "text" : "password"} 
-                                                    value={password} 
-                                                    onChange={e => setPassword(e.target.value)}
-                                                    placeholder="Minimum 6 characters"
-                                                    className="w-full bg-slate-800 text-slate-100 pl-3 pr-10 py-2.5 text-sm border border-blue-500/40 rounded-xl focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40 outline-none"
-                                                    minLength={6}
-                                                    required
-                                                />
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setShowPassword(prev => !prev)}
-                                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                                                    title={showPassword ? "Hide Password" : "Show Password"}
-                                                >
-                                                    <i className={`fas ${showPassword ? 'fa-eye-slash text-amber-400' : 'fa-eye'}`}></i>
-                                                </button>
-                                            </div>
-                                            <p className="text-[11px] text-slate-400 mt-1">
-                                                Used by this staff member to sign in. You will remain logged into your Admin session.
-                                            </p>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-300 mb-1">Full Name *</label>
+                                            <input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-sm outline-none focus:border-blue-500" />
                                         </div>
-                                    )}
-
-                                    {/* Role Selector */}
-                                    <div>
-                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-user-tag text-purple-400 mr-2"></i>Role
-                                        </label>
-                                        <select
-                                            name="role"
-                                            value={formData.role}
-                                            onChange={handleInputChange}
-                                            className="w-full bg-slate-700 text-slate-100 px-3 py-2.5 text-sm border border-slate-600 rounded-xl focus:border-blue-500 outline-none font-semibold"
-                                        >
-                                            {roleOptions.map(role => (
-                                                <option key={role} value={role}>{role}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-
-                                    {/* Account Status Selector */}
-                                    <div>
-                                        <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1">
-                                            <i className="fas fa-user-check text-emerald-400 mr-2"></i>Account Status
-                                        </label>
-                                        <select
-                                            name="status"
-                                            value={formData.status || 'Active'}
-                                            onChange={handleInputChange}
-                                            className="w-full bg-slate-700 text-slate-100 px-3 py-2.5 text-sm border border-slate-600 rounded-xl focus:border-blue-500 outline-none font-semibold"
-                                        >
-                                            <option value="Active">Active (Allowed to Login)</option>
-                                            <option value="Disactive">Disactive (Blocked / Resigned)</option>
-                                        </select>
-                                    </div>
-
-                                    {/* Assigned Shops Multi-Select */}
-                                    <div className="bg-slate-900/50 p-3.5 rounded-xl border border-slate-700 space-y-2.5">
-                                        <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
-                                            <label className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                                                <i className="fas fa-store text-amber-400"></i>
-                                                <span>Assigned Shops</span>
-                                            </label>
-                                            {formData.role !== 'Admin' && (shops || []).length > 0 && (
-                                                <label className="flex items-center gap-1.5 text-[11px] font-bold text-blue-400 cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={(formData.assignedShops || []).length === (shops || []).length}
-                                                        onChange={e => toggleAllAssignedShops(e.target.checked)}
-                                                        className="rounded accent-blue-500"
-                                                    />
-                                                    <span>Select All</span>
-                                                </label>
-                                            )}
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-300 mb-1">Email Address *</label>
+                                            <input type="email" name="email" value={formData.email} onChange={handleInputChange} required readOnly={!!editId} className="w-full bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-sm outline-none read-only:opacity-60" />
                                         </div>
-                                        {formData.role === 'Admin' ? (
-                                            <p className="text-xs text-emerald-400 font-semibold py-2">
-                                                <i className="fas fa-globe mr-1.5"></i>Admins automatically have access to All Branches.
-                                            </p>
-                                        ) : (
-                                            <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                                                {(shops || []).map(shop => (
-                                                    <label key={shop.id} className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-200 cursor-pointer hover:bg-slate-800/70 px-2 py-1 rounded-lg transition">
-                                                        <input
-                                                            type="checkbox"
-                                                            value={shop.id}
-                                                            checked={(formData.assignedShops || []).includes(shop.id)}
-                                                            onChange={e => handleCheckboxChange(e, 'assignedShops')}
-                                                            className="rounded accent-blue-500 w-4 h-4"
-                                                        />
-                                                        <span className="truncate">{shop.name}</span>
-                                                    </label>
-                                                ))}
-                                                {(shops || []).length === 0 && (
-                                                    <p className="text-xs text-slate-500 italic">No shops registered yet.</p>
-                                                )}
+                                        {!editId && (
+                                            <div className="sm:col-span-2">
+                                                <label className="block text-xs font-bold text-slate-300 mb-1">Initial Password *</label>
+                                                <div className="relative">
+                                                    <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} required minLength={6} placeholder="Minimum 6 characters" className="w-full bg-slate-700 text-white px-3 pr-10 py-2 rounded-xl border border-slate-600 text-sm outline-none focus:border-blue-500" />
+                                                    <button type="button" onClick={() => setShowPassword(p => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
+                                                        <i className={`fas ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                                                    </button>
+                                                </div>
                                             </div>
                                         )}
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-300 mb-1">Role</label>
+                                            <select name="role" value={formData.role} onChange={handleInputChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-sm outline-none">
+                                                {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-300 mb-1">Account Status</label>
+                                            <select name="status" value={formData.status} onChange={handleInputChange} className="w-full bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-sm outline-none">
+                                                <option value="Active">Active</option>
+                                                <option value="Disactive">Disactive (Blocked)</option>
+                                            </select>
+                                        </div>
                                     </div>
 
-                                    {/* Page Permissions Multi-Select */}
-                                    <div className="bg-slate-900/50 p-3.5 rounded-xl border border-slate-700 space-y-2.5">
-                                        <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
-                                            <label className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                                                <i className="fas fa-shield-alt text-emerald-400"></i>
-                                                <span>Page Permissions</span>
-                                            </label>
-                                            <label className="flex items-center gap-1.5 text-[11px] font-bold text-blue-400 cursor-pointer">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={(formData.permissions || []).length === permissionOptions.length}
-                                                    onChange={e => toggleAllPermissions(e.target.checked)}
-                                                    className="rounded accent-emerald-500"
-                                                />
-                                                <span>Select All</span>
-                                            </label>
+                                    {/* Assigned Shops */}
+                                    <div className="bg-slate-900/50 p-3.5 rounded-xl border border-slate-700">
+                                        <label className="block text-xs font-bold uppercase text-slate-400 mb-2">Assigned Shops</label>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                            {(shops || []).map(s => (
+                                                <label key={s.id} className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                                                    <input type="checkbox" value={s.id} checked={(formData.assignedShops || []).includes(s.id)} onChange={e => handleCheckboxChange(e, 'assignedShops')} className="rounded accent-blue-500" />
+                                                    <span className="truncate">{s.name}</span>
+                                                </label>
+                                            ))}
                                         </div>
-                                        <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                                            {permissionOptions.map(perm => {
-                                                const label = perm.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                                                return (
-                                                    <label key={perm} className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-200 cursor-pointer hover:bg-slate-800/70 px-2 py-1 rounded-lg transition">
-                                                        <input
-                                                            type="checkbox"
-                                                            value={perm}
-                                                            checked={(formData.permissions || []).includes(perm)}
-                                                            onChange={e => handleCheckboxChange(e, 'permissions')}
-                                                            className="rounded accent-emerald-500 w-4 h-4"
-                                                        />
-                                                        <span>{label}</span>
-                                                    </label>
-                                                );
-                                            })}
+                                    </div>
+
+                                    {/* Page Permissions */}
+                                    <div className="bg-slate-900/50 p-3.5 rounded-xl border border-slate-700">
+                                        <label className="block text-xs font-bold uppercase text-slate-400 mb-2">Module Permissions</label>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                            {permissionOptions.map(perm => (
+                                                <label key={perm} className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                                                    <input type="checkbox" value={perm} checked={(formData.permissions || []).includes(perm)} onChange={e => handleCheckboxChange(e, 'permissions')} className="rounded accent-emerald-500" />
+                                                    <span className="capitalize">{perm.replace('-', ' ')}</span>
+                                                </label>
+                                            ))}
                                         </div>
                                     </div>
                                 </div>
                             </ModalBody>
                             <ModalFooter>
-                                <button type="button" onClick={resetForm} disabled={isSubmitting} className="w-full sm:w-auto bg-slate-600 hover:bg-slate-500 text-white font-bold py-2.5 px-5 rounded-xl text-sm transition disabled:opacity-50">
-                                    Cancel
-                                </button>
-                                <button type="submit" disabled={isSubmitting} className={`w-full sm:w-auto ${editId ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'} text-white font-bold py-2.5 px-6 rounded-xl text-sm transition shadow-lg flex items-center justify-center gap-2 disabled:opacity-50`}>
-                                    {isSubmitting ? <div className="loader w-4 h-4"></div> : <i className={`fas ${editId ? 'fa-save' : 'fa-user-plus'}`}></i>}
-                                    <span>{isSubmitting ? 'Saving...' : (editId ? 'Update User' : 'Create User')}</span>
+                                <button type="button" onClick={resetForm} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-5 rounded-xl text-sm">Cancel</button>
+                                <button type="submit" disabled={isSubmitting} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-6 rounded-xl text-sm flex items-center justify-center gap-2">
+                                    {isSubmitting && <div className="loader w-4 h-4"></div>}
+                                    <span>{editId ? 'Update User' : 'Create User'}</span>
                                 </button>
                             </ModalFooter>
                         </form>
                     </Modal>
                 )}
 
-                <TableCard title={`User Management (${userFilterStats.total}${hasActiveFilters ? ` of ${userFilterStats.allTotal}` : ''})`}>
-                    <div className="mb-4 pb-4 border-b border-slate-700 space-y-3">
-                        {/* Header Strip: Description, Live Status Counts & Add New User */}
-                        <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <p className="text-xs sm:text-sm text-slate-400">Manage application users, roles, assigned branches, and page permissions.</p>
-                                <div className="flex items-center gap-1.5 text-[11px] font-bold">
-                                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                                        Active: {userFilterStats.active}
-                                    </span>
-                                    <span className="px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300 border border-rose-500/30">
-                                        Disactive: {userFilterStats.disactive}
-                                    </span>
-                                </div>
-                            </div>
-                            <button onClick={handleAddNew} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 shrink-0 shadow-lg shadow-blue-900/20 text-sm">
-                                <i className="fas fa-user-plus"></i> Add New User
+                <TableCard title={`User & Permission Management (${userFilterStats.total} / ${userFilterStats.allTotal})`}>
+                    <div className="mb-4 pb-4 border-b border-slate-700 flex flex-col lg:flex-row justify-between gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 flex-1">
+                            <input type="text" placeholder="Search name or email..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs sm:text-sm outline-none" />
+                            <select value={shopFilter} onChange={e => setShopFilter(e.target.value)} className="bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs sm:text-sm outline-none">
+                                <option value="ALL">All Shops</option>
+                                <option value="UNASSIGNED">Unassigned</option>
+                                {(shops || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                            </select>
+                            <select value={roleFilter} onChange={e => setRoleFilter(e.target.value)} className="bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs sm:text-sm outline-none">
+                                <option value="ALL">All Roles</option>
+                                {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+                            </select>
+                            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="bg-slate-700 text-white px-3 py-2 rounded-xl border border-slate-600 text-xs sm:text-sm outline-none">
+                                <option value="ALL">All Status</option>
+                                <option value="Active">Active</option>
+                                <option value="Disactive">Disactive</option>
+                            </select>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                            {hasActiveFilters && (
+                                <button type="button" onClick={resetFilters} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold">Reset</button>
+                            )}
+                            <button type="button" onClick={handleAddNew} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded-xl text-xs sm:text-sm flex items-center gap-2 shadow-lg">
+                                <i className="fas fa-user-plus"></i> Add User
                             </button>
                         </div>
-
-                        {/* Smart Filter Toolbar (Keyword Search, Shop, Role, Status & 1-Click Reset) */}
-                        <div className="bg-slate-900/60 p-3 rounded-xl border border-slate-700/80 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5 items-end">
-                            {/* Keyword Search */}
-                            <div className="lg:col-span-4">
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-search text-blue-400 mr-1"></i>Search User
-                                </label>
-                                <div className="relative">
-                                    <input
-                                        type="text"
-                                        value={searchTerm}
-                                        onChange={e => setSearchTerm(e.target.value)}
-                                        placeholder="Name or email..."
-                                        className="w-full bg-slate-800 text-slate-100 pl-8 pr-7 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs sm:text-sm"
-                                    />
-                                    <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-                                    {searchTerm && (
-                                        <button
-                                            type="button"
-                                            onClick={() => setSearchTerm('')}
-                                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                                            title="Clear search"
-                                        >
-                                            <i className="fas fa-times-circle text-xs"></i>
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Shop Filter */}
-                            <div className="lg:col-span-3">
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-store text-amber-400 mr-1"></i>Shop
-                                </label>
-                                <select
-                                    value={shopFilter}
-                                    onChange={e => setShopFilter(e.target.value)}
-                                    className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs sm:text-sm font-medium"
-                                >
-                                    <option value="ALL">All Shops</option>
-                                    {(shops || []).map(shop => (
-                                        <option key={shop.id} value={shop.id}>{shop.name}</option>
-                                    ))}
-                                    <option value="UNASSIGNED">Unassigned (No Shop)</option>
-                                </select>
-                            </div>
-
-                            {/* Role Filter */}
-                            <div className="lg:col-span-2">
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-user-tag text-purple-400 mr-1"></i>Role
-                                </label>
-                                <select
-                                    value={roleFilter}
-                                    onChange={e => setRoleFilter(e.target.value)}
-                                    className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs sm:text-sm font-medium"
-                                >
-                                    <option value="ALL">All Roles</option>
-                                    {roleOptions.map(role => (
-                                        <option key={role} value={role}>{role}</option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            {/* Status Filter */}
-                            <div className="lg:col-span-2">
-                                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-user-check text-emerald-400 mr-1"></i>Status
-                                </label>
-                                <select
-                                    value={statusFilter}
-                                    onChange={e => setStatusFilter(e.target.value)}
-                                    className="w-full bg-slate-800 text-slate-100 px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs sm:text-sm font-medium"
-                                >
-                                    <option value="ALL">All Status</option>
-                                    <option value="Active">Active</option>
-                                    <option value="Disactive">Disactive</option>
-                                </select>
-                            </div>
-
-                            {/* 1-Click Reset Filters */}
-                            <div className="lg:col-span-1">
-                                <button
-                                    type="button"
-                                    disabled={!hasActiveFilters}
-                                    onClick={resetFilters}
-                                    className="w-full py-2 px-3 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 font-bold text-xs border border-slate-600 transition flex items-center justify-center gap-1.5"
-                                    title="Reset all filters"
-                                >
-                                    <i className="fas fa-rotate-left"></i>
-                                    <span className="lg:hidden">Reset Filters</span>
-                                </button>
-                            </div>
-                        </div>
                     </div>
-                    {loading ? <p className="text-center p-4">Loading...</p> : filteredUsers.length === 0 ? (
-                        <div className="text-center p-8 text-slate-400 space-y-2">
-                            <i className="fas fa-users-slash text-3xl opacity-40 block"></i>
-                            <p className="text-sm font-semibold text-slate-300">
-                                {hasActiveFilters ? 'No users match the selected filters.' : 'No users found.'}
-                            </p>
-                            {hasActiveFilters && (
-                                <button
-                                    type="button"
-                                    onClick={resetFilters}
-                                    className="mt-1 px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition"
-                                >
-                                    <i className="fas fa-rotate-left mr-1.5"></i>Reset Filters
-                                </button>
-                            )}
-                        </div>
+
+                    {loading ? <div className="flex justify-center p-6"><div className="loader"></div></div> : filteredUsers.length === 0 ? (
+                        <p className="text-center p-6 text-slate-400">No users found.</p>
                     ) : (
-                        <div className="overflow-x-auto -mx-2 sm:mx-0">
+                        <div className="overflow-x-auto">
                             <table className="min-w-full divide-y divide-slate-700 whitespace-nowrap">
                                 <thead className="bg-slate-900/50">
                                     <tr>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
+                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">User</th>
                                         <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Role</th>
-                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Email</th>
                                         <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Assigned Shops</th>
-                                        <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Page Permissions</th>
+                                        <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Status</th>
                                         <th className="px-4 py-3 text-center text-xs font-semibold text-slate-400 uppercase">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-700">
-                                    {filteredUsers.map(user => {
-                                        const assignedShopsNames = user.role === 'Admin' ? ['All Branches'] : 
-                                            (user.assignedShops || []).map(id => shops.find(s => s.id === id)?.name).filter(Boolean);
-                                        const permissionLabels = (user.permissions || []).map(p => p.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '));
-                                        const isDisactive = user.status === 'Disactive';
-                                        
+                                    {filteredUsers.map(u => {
+                                        const isDisactive = u.status === 'Disactive' || u.status === 'Inactive';
+                                        const shopNames = u.role === 'Admin'
+                                            ? 'All Shops'
+                                            : ((u.assignedShops || []).map(sid => shops.find(s => s.id === sid)?.name).filter(Boolean).join(', ') || 'None');
                                         return (
-                                        <tr key={user.id} className={`hover:bg-slate-700/50 transition-colors ${isDisactive ? 'opacity-65 bg-rose-950/15' : ''}`}>
-                                            <td className="px-4 py-3 text-sm font-bold text-slate-200">
-                                                <div className="flex items-center gap-2.5">
-                                                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-xs flex items-center justify-center uppercase shrink-0 overflow-hidden ring-1 ring-slate-600">
-                                                        {user.photoUrl ? (
-                                                            <img src={user.photoUrl} alt={user.name} className="w-full h-full object-cover" />
-                                                        ) : (
-                                                            <span>{(user.name || 'U').slice(0, 2)}</span>
-                                                        )}
+                                            <tr key={u.id} className="hover:bg-slate-700/50 transition-colors">
+                                                <td className="px-4 py-3">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="w-9 h-9 rounded-full overflow-hidden bg-gradient-to-br from-blue-600 to-indigo-600 text-white font-black text-xs flex items-center justify-center uppercase shrink-0">
+                                                            {u.photoUrl ? (
+                                                                <img src={u.photoUrl} alt={u.name} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+                                                            ) : (
+                                                                <span>{(u.name || 'US').slice(0, 2)}</span>
+                                                            )}
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-sm font-bold text-slate-100">{u.name}</div>
+                                                            <div className="text-xs text-slate-400">{u.email}</div>
+                                                        </div>
                                                     </div>
-                                                    <span>{user.name}</span>
-                                                </div>
-                                            </td>
-                                            <td className="px-4 py-3 text-sm">
-                                                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
-                                                    user.role === 'Admin'
-                                                        ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
-                                                        : user.role === 'Shop Manager'
-                                                            ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
-                                                            : user.role === 'Shop Supervisor'
-                                                                ? 'bg-teal-500/15 text-teal-300 border-teal-500/30'
-                                                                : 'bg-slate-700 text-slate-300 border-slate-600'
-                                                }`}>
-                                                    {user.role}
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3 text-center">
-                                                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold border ${
-                                                    isDisactive
-                                                        ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
-                                                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                                }`}>
-                                                    <i className={`fas ${isDisactive ? 'fa-ban text-[10px]' : 'fa-check-circle text-[10px]'}`}></i>
-                                                    <span>{isDisactive ? 'Disactive' : 'Active'}</span>
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3 text-sm text-slate-400">{user.email}</td>
-                                            <td className="px-4 py-3 text-xs text-slate-300 max-w-[200px] whitespace-normal">
-                                                {user.role === 'Admin' ? (
-                                                    <span className="text-emerald-400 font-semibold">All Branches</span>
-                                                ) : assignedShopsNames.length > 0 ? (
-                                                    <div className="flex flex-wrap gap-1">
-                                                        {assignedShopsNames.map((shopName, idx) => (
-                                                            <span key={idx} className="px-2 py-0.5 rounded bg-slate-700 border border-slate-600 truncate max-w-[120px]" title={shopName}>{shopName}</span>
-                                                        ))}
-                                                    </div>
-                                                ) : (
-                                                    <span className="text-slate-500">None</span>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3 text-xs text-slate-300 max-w-[200px] whitespace-normal">
-                                                <div className="flex flex-wrap gap-1">
-                                                    {permissionLabels.length > 0 ? permissionLabels.map((perm, idx) => (
-                                                        <span key={idx} className="px-2 py-0.5 rounded bg-emerald-900/30 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">{perm}</span>
-                                                    )) : <span className="text-slate-500">None</span>}
-                                                </div>
-                                            </td>
-                                            <td className="px-4 py-3 text-center space-x-3">
-                                                <button onClick={() => handleEdit(user)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="Edit User"><i className="fas fa-edit"></i></button>
-                                                <button onClick={() => setModal({ type: 'confirmDelete', data: user.id })} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete User"><i className="fas fa-trash"></i></button>
-                                            </td>
-                                        </tr>
-                                    )})}
+                                                </td>
+                                                <td className="px-4 py-3 text-sm font-semibold text-blue-300">{u.role || 'Staff'}</td>
+                                                <td className="px-4 py-3 text-xs text-slate-300 max-w-[200px] truncate" title={shopNames}>{shopNames}</td>
+                                                <td className="px-4 py-3 text-center">
+                                                    <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${isDisactive ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                                                        {isDisactive ? 'Disactive' : 'Active'}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-center space-x-3">
+                                                    <button type="button" onClick={() => handleEdit(u)} className="p-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg transition" title="Edit User"><i className="fas fa-edit"></i></button>
+                                                    <button type="button" onClick={() => setModal({ type: 'confirmDelete', data: u.id })} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded-lg transition" title="Delete User"><i className="fas fa-trash"></i></button>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -36421,29 +36189,30 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         );
     };
 
-    // --- 8.9 Dashboard (Layout) COMPONENT ---
-
-    const resolveDefaultActivePage = (userProfile) => {
-        if (!userProfile) return 'pos-terminal';
-        const permissions = userProfile?.permissions || [];
-        if (
-            userProfile.role === 'Admin' ||
-            (userProfile.assignedShops && userProfile.assignedShops.length > 0) ||
-            permissions.includes('pos-terminal')
-        ) {
-            return 'pos-terminal';
-        }
-        return permissions[0] || null;
-    };
-
+    // --- 9. DASHBOARD SHELL (FLEXI FULL-SCREEN MOBILE & DESKTOP LAYOUT) ---
     const Dashboard = ({ userProfile }) => {
-        const { backgroundFetchInitiated, backgroundLoadComplete, systemConfig, activateHeavyCollections } = useData();
-        const [activePage, setActivePage] = useState(() => resolveDefaultActivePage(userProfile));
+        const { systemConfig, backgroundFetchInitiated, backgroundLoadComplete, activateHeavyCollections } = useData();
+        const [activePage, setActivePage] = useState('pos-terminal');
         const [pageData, setPageData] = useState(null);
-        const [isSidebarOpen, setSidebarOpen] = useState(false);
+        const [isSidebarOpen, setIsSidebarOpen] = useState(false);
         const [showInstallModal, setShowInstallModal] = useState(false);
 
-        // --- Always-On Screen Keep-Awake Engine (Active ONLY on POS Terminal Page; Other Pages Allow Normal Sleep & Lock) ---
+        const handleNavigate = useCallback((page, data = null) => {
+            setActivePage(page);
+            setPageData(data);
+            setIsSidebarOpen(false);
+        }, []);
+
+        // Lazy-activate heavy collections when entering Inventory, PO Audit, or Settings
+        useEffect(() => {
+            if (activePage === 'inventory' || activePage === 'po-audit' || activePage === 'settings') {
+                if (typeof activateHeavyCollections === 'function') {
+                    activateHeavyCollections();
+                }
+            }
+        }, [activePage, activateHeavyCollections]);
+
+        // Keep-Awake Engine: Active ONLY on POS Terminal page
         useEffect(() => {
             if (!window.SolarisKeepAwakeManager) return;
             if (activePage === 'pos-terminal') {
@@ -36452,220 +36221,134 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                 window.SolarisKeepAwakeManager.stop();
             }
             return () => {
-                window.SolarisKeepAwakeManager.stop();
+                window.SolarisKeepAwakeManager?.stop();
             };
         }, [activePage]);
-
-        // --- NEW: Update Document Title & Dynamic PWA Manifest on Dashboard Load ---
-        useEffect(() => {
-            if (systemConfig?.appName) {
-                document.title = systemConfig.appName;
-                if (window.SolarisPWAManager) {
-                    window.SolarisPWAManager.init(systemConfig.appName);
-                }
-            }
-        }, [systemConfig]);
-
-        // --- NEW: Auto-Enter Full-Screen Kiosk Mode after Login on Desktop / Tablet (>= 768px) ---
-        useEffect(() => {
-            if (window.innerWidth < 768) return;
-
-            // Attempt immediate fullscreen if triggered by login
-            if (sessionStorage.getItem('solaris_kiosk_auto_enter') === '1') {
-                window.SolarisPWAManager?.enterKioskFullscreen();
-            }
-
-            // Fallback: If browser requires a post-render interaction to complete fullscreen, enter on first tap/click
-            const ensureKioskOnFirstInteraction = () => {
-                if (sessionStorage.getItem('solaris_kiosk_auto_enter') === '1') {
-                    sessionStorage.removeItem('solaris_kiosk_auto_enter');
-                    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-                        window.SolarisPWAManager?.enterKioskFullscreen();
-                    }
-                }
-            };
-
-            window.addEventListener('click', ensureKioskOnFirstInteraction, { once: true });
-            window.addEventListener('touchstart', ensureKioskOnFirstInteraction, { once: true });
-            return () => {
-                window.removeEventListener('click', ensureKioskOnFirstInteraction);
-                window.removeEventListener('touchstart', ensureKioskOnFirstInteraction);
-            };
-        }, []);
-
-        // --- QUOTA OPTIMIZATION: Only load POs, Transfers, and Users collections when navigating to Inventory or Settings ---
-        useEffect(() => {
-            if (activePage === 'inventory' || activePage === 'settings' || activePage === 'po-audit') {
-                activateHeavyCollections();
-            }
-        }, [activePage, activateHeavyCollections]);
-
-        useEffect(() => {
-            if (!userProfile) return;
-            setActivePage(prev => prev || resolveDefaultActivePage(userProfile));
-        }, [userProfile]);
-
-        const toggleSidebar = () => setSidebarOpen(!isSidebarOpen);
-        
-        const setPage = useCallback((page, data = null) => {
-            setActivePage(page);
-            setPageData(data);
-            setSidebarOpen(false); // Auto-hide sidebar on every page selection to maximize screen space
-            try {
-                window.history.pushState({ page, data }, '');
-            } catch (e) {}
-        }, []);
-
-        // Handle mobile hardware/gesture Back button so Edit PO or Audit PO returns cleanly to main Inventory page
-        useEffect(() => {
-            const handlePopState = () => {
-                if (activePage === 'po-audit') {
-                    const returnTab = pageData?.status === 'audited'
-                        ? 'audited-po'
-                        : pageData?.status === 'pending-approval'
-                            ? 'pending-approval-po'
-                            : pageData?.status === 'submitted'
-                                ? 'active-po'
-                                : 'auditing-po';
-                    setActivePage('inventory');
-                    setPageData({ activeTab: returnTab });
-                } else if (activePage === 'inventory' && (pageData?.poData || pageData?.lossReportData || pageData?.transferData)) {
-                    const fallbackTab = pageData?.lossReportData
-                        ? 'loss-breakage'
-                        : pageData?.transferData
-                            ? 'drafts'
-                            : 'drafts-po';
-                    setPageData({ activeTab: fallbackTab });
-                }
-            };
-            window.addEventListener('popstate', handlePopState);
-            return () => window.removeEventListener('popstate', handlePopState);
-        }, [activePage, pageData]);
 
         const pageTitles = {
             'pos-terminal': 'POS Terminal',
             'sales-report': 'Sale Report',
             'customer-management': 'Customer Management',
-            'inventory': 'Inventory', 
-            'settings': 'Settings',
-            'po-audit': 'Audit Purchase Order'
+            'inventory': 'Inventory',
+            'po-audit': 'PO Audit',
+            'settings': 'Settings'
         };
 
-        const renderActivePage = () => {
-            if (!userProfile) return null;
-            if (!activePage) return <Card><div className="text-center p-8"><i className="fas fa-exclamation-triangle text-5xl text-red-400 mb-4"></i><h3 className="text-3xl font-bold">No Pages Assigned</h3><p className="text-slate-400 mt-2">Contact an administrator for access.</p></div></Card>;
-            
-            // Basic permission check
-            const hasPermission = (userProfile.role === 'Admin') || 
-                                  (activePage === 'pos-terminal' && userProfile.assignedShops?.length > 0) ||
-                                  (activePage === 'po-audit' && (
-                                      userProfile.role === 'Shop Manager' ||
-                                      userProfile.role === 'Shop Supervisor' ||
-                                      userProfile.permissions?.includes('inventory') ||
-                                      userProfile.permissions?.includes('po-center')
-                                  )) || 
-                                  // Backward compatibility mappings
-                                  (activePage === 'inventory' && (userProfile.permissions?.includes('inventory') || userProfile.permissions?.includes('po-center') || userProfile.permissions?.includes('product-data'))) ||
-                                  userProfile.permissions?.includes(activePage);
-
-            if (!hasPermission) return <Card><div className="text-center p-8"><i className="fas fa-lock text-5xl text-yellow-400 mb-4"></i><h3 className="text-3xl font-bold">No Access</h3><p className="text-slate-400 mt-2">You do not have permission to view this page.</p></div></Card>;
-            
-            switch (activePage) {
-                case 'pos-terminal': return <POSTerminal userProfile={userProfile} />;
-                case 'sales-report': return <SaleReportPage userProfile={userProfile} />;
-                case 'customer-management': return <CustomerManagement />;
-                case 'inventory': return <InventoryPage setPage={setPage} userProfile={userProfile} pageData={pageData} />; 
-                case 'settings': return <SettingsPage userProfile={userProfile} />;
-                case 'po-audit': return <POAuditPage poDataToAudit={pageData} setPage={setPage} userProfile={userProfile} />;
-                default: return <Card><div className="text-center p-8"><i className="fas fa-exclamation-triangle text-5xl text-red-400 mb-4"></i><h3 className="text-3xl font-bold">Page Not Found</h3></div></Card>;
-            }
-        };
+        const isPosPage = activePage === 'pos-terminal';
 
         return (
-            <div className="fixed inset-0 w-full h-full flex pt-[env(safe-area-inset-top)] bg-slate-900 text-slate-300 overflow-hidden">
-                <InstallAppModal
-                    show={showInstallModal}
-                    onClose={() => setShowInstallModal(false)}
-                    appName={systemConfig?.appName || 'POS Terminal'}
-                />
-                <Sidebar
-                    activePage={activePage}
-                    setActivePage={setPage}
-                    userProfile={userProfile}
-                    isSidebarOpen={isSidebarOpen}
-                    toggleSidebar={toggleSidebar}
-                    onOpenInstallModal={() => setShowInstallModal(true)}
-                />
-                {isSidebarOpen && <div onClick={toggleSidebar} className="fixed inset-0 bg-black/60 backdrop-blur-[1px] z-30 transition-opacity"></div>}
-                
-                <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-                    <Header
-                        pageTitle={pageTitles[activePage] || ''}
+            <SearchProvider>
+                <div
+                    className="fixed inset-0 w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden"
+                    style={{ height: 'var(--app-height, 100dvh)' }}
+                >
+                    {isSidebarOpen && (
+                        <div
+                            onClick={() => setIsSidebarOpen(false)}
+                            className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-40 transition-opacity"
+                        />
+                    )}
+
+                    <Sidebar
                         activePage={activePage}
+                        setActivePage={(p) => handleNavigate(p, null)}
                         userProfile={userProfile}
-                        toggleSidebar={toggleSidebar}
+                        isSidebarOpen={isSidebarOpen}
+                        toggleSidebar={() => setIsSidebarOpen(prev => !prev)}
                         onOpenInstallModal={() => setShowInstallModal(true)}
                     />
-                    <main className={`flex-1 min-h-0 overflow-x-hidden bg-slate-800 ${activePage === 'pos-terminal' ? 'overflow-hidden flex flex-col px-1.5 pt-1.5 pb-0 md:p-3 lg:p-4' : 'overflow-y-auto p-4 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]'}`}>
-                        <SearchProvider>
-                            {renderActivePage()}
-                        </SearchProvider>
+
+                    <InstallAppModal
+                        show={showInstallModal}
+                        onClose={() => setShowInstallModal(false)}
+                        appName={systemConfig?.appName || 'POS Terminal'}
+                    />
+
+                    <Header
+                        pageTitle={pageTitles[activePage] || systemConfig?.appName || 'POS Terminal'}
+                        activePage={activePage}
+                        userProfile={userProfile}
+                        toggleSidebar={() => setIsSidebarOpen(prev => !prev)}
+                        onOpenInstallModal={() => setShowInstallModal(true)}
+                    />
+
+                    <main
+                        className={
+                            isPosPage
+                                ? 'flex-1 min-h-0 flex flex-col overflow-hidden p-0 md:p-3 bg-slate-900'
+                                : 'flex-1 min-h-0 overflow-y-auto overscroll-contain px-2.5 sm:px-5 pt-3 sm:pt-5 pb-[calc(1rem+env(safe-area-inset-bottom,0px))]'
+                        }
+                    >
+                        {activePage === 'pos-terminal' && <POSTerminal userProfile={userProfile} />}
+                        {activePage === 'sales-report' && <SaleReportPage userProfile={userProfile} />}
+                        {activePage === 'customer-management' && <CustomerManagement />}
+                        {activePage === 'inventory' && <InventoryPage setPage={handleNavigate} userProfile={userProfile} pageData={pageData} />}
+                        {activePage === 'po-audit' && <POAuditPage poDataToAudit={pageData} setPage={handleNavigate} userProfile={userProfile} />}
+                        {activePage === 'settings' && <SettingsPage userProfile={userProfile} />}
                     </main>
+
                     {backgroundFetchInitiated && <LoadingStatusToast isComplete={backgroundLoadComplete} />}
                 </div>
-            </div>
+            </SearchProvider>
         );
     };
 
-    // --- 10. ROOT APP COMPONENT ---
-
+    // --- 10. MAIN APPLICATION ROOT & AUTHENTICATION ---
     function App() {
-        // RAM-Only Auth State (0ms Fast-Path: if no active tab session exists, render LoginPage immediately without waiting for Firebase Auth round-trip)
-        const [authState, setAuthState] = useState(() => {
-            try {
-                const hasActiveTabSession = sessionStorage.getItem(AUTH_SESSION_ACTIVE_KEY) === '1';
-                const lastActiveTs = parseInt(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0', 10);
-                const isExpired = !lastActiveTs || (Date.now() - lastActiveTs > MAX_INACTIVITY_MS);
-                if (!hasActiveTabSession || isExpired) {
-                    return { loading: false, userProfile: null };
-                }
-            } catch (e) {}
-            return { loading: true, userProfile: null };
-        });
+        const [authState, setAuthState] = useState({ loading: true, userProfile: null });
         const [authBlockedMsg, setAuthBlockedMsg] = useState('');
 
         useEffect(() => {
             const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
                 if (firebaseUser) {
-                    // Security Check 1: Did the user close the browser/tab or exceed the 30-minute inactivity window?
-                    const hasActiveTabSession = sessionStorage.getItem(AUTH_SESSION_ACTIVE_KEY) === '1';
-                    const lastActiveTs = parseInt(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0', 10);
-                    const isExpired = !lastActiveTs || (Date.now() - lastActiveTs > MAX_INACTIVITY_MS);
+                    const lastActiveTs = Number(localStorage.getItem(AUTH_LAST_ACTIVE_TS_KEY) || '0');
+                    const isSessionFlagged = sessionStorage.getItem(AUTH_SESSION_ACTIVE_KEY) === '1';
+                    const isInactiveTooLong = lastActiveTs > 0 && (Date.now() - lastActiveTs > MAX_INACTIVITY_MS);
 
-                    if (!hasActiveTabSession || isExpired) {
-                        // Force re-login if the web application was closed or inactive for too long
+                    if (!isSessionFlagged && isInactiveTooLong) {
                         await window.safeSignOut();
                         setAuthState({ loading: false, userProfile: null });
                         return;
                     }
 
                     try {
-                        let querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
+                        // 1. Direct lookup by UID document ID first (fastest & avoids missing docs without a `uid` field)
+                        let matchedDocId = null;
+                        let matchedData = null;
 
-                        // Fallback 1: Match by email if the user was migrated from the previous Firebase project
-                        if (querySnapshot.empty && firebaseUser.email) {
-                            const emailSnap = await db.collection("users").where("email", "==", firebaseUser.email).get();
-                            if (!emailSnap.empty) {
-                                const matchedDoc = emailSnap.docs[0];
-                                await db.collection("users").doc(firebaseUser.uid).set({ ...matchedDoc.data(), uid: firebaseUser.uid }, { merge: true });
-                                try { await db.collection("users").doc(matchedDoc.id).delete(); } catch(e){}
-                                querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
+                        const directSnap = await db.collection("users").doc(firebaseUser.uid).get();
+                        if (directSnap.exists) {
+                            matchedDocId = directSnap.id;
+                            matchedData = directSnap.data() || {};
+                        } else {
+                            let querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
+
+                            // Fallback 1: Match by email if the user was migrated from a previous project
+                            if (querySnapshot.empty && firebaseUser.email) {
+                                const emailSnap = await db.collection("users").where("email", "==", firebaseUser.email).get();
+                                if (!emailSnap.empty) {
+                                    const matchedDoc = emailSnap.docs[0];
+                                    await db.collection("users").doc(firebaseUser.uid).set({ ...matchedDoc.data(), uid: firebaseUser.uid }, { merge: true });
+                                    try { await db.collection("users").doc(matchedDoc.id).delete(); } catch(e){}
+                                    querySnapshot = await db.collection("users").where("uid", "==", firebaseUser.uid).get();
+                                }
+                            }
+
+                            if (!querySnapshot.empty) {
+                                const userDoc = querySnapshot.docs[0];
+                                matchedDocId = userDoc.id;
+                                matchedData = userDoc.data() || {};
                             }
                         }
 
-                        if (!querySnapshot.empty) {
-                            const userDoc = querySnapshot.docs[0];
-                            const profileObj = { id: userDoc.id, ...userDoc.data(), uid: firebaseUser.uid };
+                        if (matchedData) {
+                            const resolvedPhoto = String(matchedData.photoUrl || matchedData.photoURL || matchedData.avatarUrl || firebaseUser.photoURL || '').trim();
+                            const profileObj = {
+                                id: matchedDocId,
+                                ...matchedData,
+                                uid: firebaseUser.uid,
+                                photoUrl: resolvedPhoto
+                            };
 
                             // Enforce Active / Disactive Login Authorization Policy
                             if (profileObj.status === 'Disactive' || profileObj.status === 'Inactive') {
@@ -36676,10 +36359,10 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             }
                             
                             // Auto-migrate to UID as document ID if it isn't already to satisfy Firestore Security Rules
-                            if (userDoc.id !== firebaseUser.uid) {
+                            if (matchedDocId !== firebaseUser.uid) {
                                 try {
-                                    await db.collection("users").doc(firebaseUser.uid).set(profileObj);
-                                    await db.collection("users").doc(userDoc.id).delete();
+                                    await db.collection("users").doc(firebaseUser.uid).set(profileObj, { merge: true });
+                                    await db.collection("users").doc(matchedDocId).delete();
                                     profileObj.id = firebaseUser.uid;
                                 } catch (e) {
                                     console.warn("Migration failed, proceeding with old ID");
@@ -36695,6 +36378,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                 uid: firebaseUser.uid,
                                 name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Admin'),
                                 email: firebaseUser.email || '',
+                                photoUrl: String(firebaseUser.photoURL || '').trim(),
                                 role: 'Admin',
                                 status: 'Active',
                                 assignedShops: [],
@@ -36702,7 +36386,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                                 createdAt: firebase.firestore.FieldValue.serverTimestamp()
                             };
                             try {
-                                await db.collection("users").doc(firebaseUser.uid).set(newProfileData);
+                                await db.collection("users").doc(firebaseUser.uid).set(newProfileData, { merge: true });
                             } catch(e) {
                                 console.warn("Failed to create admin profile doc", e);
                             }
@@ -36721,6 +36405,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                             uid: firebaseUser.uid,
                             name: firebaseUser.displayName || (firebaseUser.email ? firebaseUser.email.split('@')[0] : 'Staff'),
                             email: firebaseUser.email || '',
+                            photoUrl: String(firebaseUser.photoURL || '').trim(),
                             role: 'Admin',
                             status: 'Active',
                             assignedShops: [],
@@ -36760,11 +36445,17 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                 }
                 setAuthState(prev => {
                     if (!prev.userProfile) return prev;
+                    const resolvedLivePhoto = String(
+                        liveData.photoUrl !== undefined
+                            ? liveData.photoUrl
+                            : (liveData.photoURL || liveData.avatarUrl || prev.userProfile.photoUrl || auth.currentUser?.photoURL || '')
+                    ).trim();
                     const updatedProfile = {
                         ...prev.userProfile,
                         ...liveData,
                         id: docSnap.id,
-                        uid: prev.userProfile.uid
+                        uid: prev.userProfile.uid,
+                        photoUrl: resolvedLivePhoto
                     };
                     const prevSig = JSON.stringify({
                         name: prev.userProfile.name,
