@@ -7705,14 +7705,17 @@
             return Array.from(set);
         }, [products]);
 
-        const vendorOptions = useMemo(() => {
-            const set = new Set();
-            vendorNameById.forEach(label => set.add(label));
+        const { vendorOptions, vendorCounts } = useMemo(() => {
+            const counts = new Map();
+            vendorNameById.forEach(label => {
+                if (!counts.has(label)) counts.set(label, 0);
+            });
             for (let i = 0; i < products.length; i++) {
                 const label = getProductVendorLabel(products[i], vendorNameById);
-                if (label) set.add(label);
+                if (label) counts.set(label, (counts.get(label) || 0) + 1);
             }
-            return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+            const sorted = Array.from(counts.keys()).sort((a, b) => a.localeCompare(b));
+            return { vendorOptions: ['All', ...sorted], vendorCounts: counts };
         }, [vendorNameById, products]);
 
         const activeQuickGroup = useMemo(
@@ -8591,9 +8594,9 @@
                                         className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs border transition ${
                                             isVirtualKeyboardEnabled
                                                 ? 'bg-blue-600 text-white border-blue-400'
-                                                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                                                : 'bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border-slate-700'
                                         }`}
-                                        title={isVirtualKeyboardEnabled ? 'Switch back to Scanner-Ready Mode' : 'Open On-Screen Keyboard'}
+                                        title={isVirtualKeyboardEnabled ? 'Switch to Barcode Scanner Mode (Hide Keyboard)' : 'Enable On-Screen Keyboard'}
                                     >
                                         <i className="fas fa-keyboard"></i>
                                     </button>
@@ -8601,53 +8604,63 @@
                             </div>
                         </div>
 
-                        {/* Unified Toolbar: All Reset Pill + Vendor Droplist + Quick Group Pills + (+ Quick Group) + List / Grid Switcher */}
+                        {/* Unified Toolbar: Master All/Vendor Filter + Quick Group Pills + (+ Quick Group) + List / Grid Switcher */}
                         <div className="flex items-center gap-2 shrink-0 min-w-0">
                             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1 min-w-0 py-0.5">
-                                {/* All Reset Pill */}
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setSelectedVendor('All');
-                                        setSelectedQuickGroupId('');
-                                        setSelectedCategory('All');
-                                        refocusSearchInput(true);
-                                    }}
-                                    className={`h-9 px-3.5 rounded-xl text-xs font-bold whitespace-nowrap border transition shrink-0 flex items-center gap-1.5 ${
-                                        selectedVendor === 'All' && !selectedQuickGroupId && selectedCategory === 'All'
-                                            ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30'
-                                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white hover:border-slate-500'
-                                    }`}
-                                >
-                                    <i className="fas fa-layer-group text-[11px]"></i>
-                                    <span>All-{products.length}</span>
-                                </button>
-
-                                {/* Vendor Droplist */}
-                                <div className="relative shrink-0">
-                                    <i className="fas fa-store text-[11px] text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
-                                    <select
-                                        value={selectedVendor}
-                                        onChange={e => {
-                                            const val = e.target.value;
-                                            setSelectedVendor(val);
-                                            if (val !== 'All') setSelectedQuickGroupId('');
-                                            refocusSearchInput(true);
-                                        }}
-                                        aria-label="Filter by Vendor"
-                                        className={`h-9 pl-7 pr-7 rounded-xl text-xs font-bold border outline-none transition cursor-pointer max-w-[165px] sm:max-w-[190px] truncate ${
-                                            selectedVendor !== 'All'
-                                                ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/50'
-                                                : 'bg-slate-900 text-slate-200 border-slate-700 hover:border-slate-500'
-                                        }`}
-                                    >
-                                        {vendorOptions.map(v => (
-                                            <option key={v} value={v} className="bg-slate-900 text-slate-100">
-                                                {v === 'All' ? 'All Vendors' : v}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
+                                {/* Merged Master Filter: All Products (Count) + Vendors */}
+                                {(() => {
+                                    const isAllMasterActive = selectedVendor === 'All' && !selectedQuickGroupId && selectedCategory === 'All';
+                                    const isVendorActive = selectedVendor !== 'All';
+                                    const masterFilterValue = (selectedQuickGroupId || (selectedVendor === 'All' && selectedCategory !== 'All'))
+                                        ? '__FILTERED__'
+                                        : selectedVendor;
+                                    return (
+                                        <div className="relative shrink-0">
+                                            <i className={`fas ${isVendorActive ? 'fa-store text-emerald-300' : 'fa-layer-group'} text-[11px] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none ${
+                                                isAllMasterActive ? 'text-white' : (isVendorActive ? 'text-emerald-300' : 'text-slate-400')
+                                            }`}></i>
+                                            <select
+                                                value={masterFilterValue}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    if (val === 'All') {
+                                                        setSelectedVendor('All');
+                                                        setSelectedQuickGroupId('');
+                                                        setSelectedCategory('All');
+                                                    } else {
+                                                        setSelectedVendor(val);
+                                                        setSelectedQuickGroupId('');
+                                                    }
+                                                    refocusSearchInput(true);
+                                                }}
+                                                aria-label="Master Product and Vendor Filter"
+                                                className={`h-9 pl-8 pr-7 rounded-xl text-xs font-bold border outline-none transition cursor-pointer appearance-none max-w-[180px] sm:max-w-[220px] truncate ${
+                                                    isAllMasterActive
+                                                        ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/30'
+                                                        : isVendorActive
+                                                            ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/50'
+                                                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:text-white hover:border-slate-500'
+                                                }`}
+                                            >
+                                                {masterFilterValue === '__FILTERED__' && (
+                                                    <option value="__FILTERED__" hidden className="bg-slate-900 text-slate-100">
+                                                        All ({products.length})
+                                                    </option>
+                                                )}
+                                                {vendorOptions.map(v => (
+                                                    <option key={v} value={v} className="bg-slate-900 text-slate-100">
+                                                        {v === 'All'
+                                                            ? `All (${products.length})`
+                                                            : `${v} (${vendorCounts.get(v) || 0})`}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <i className={`fas fa-chevron-down text-[9px] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none ${
+                                                isAllMasterActive ? 'text-blue-100' : (isVendorActive ? 'text-emerald-300' : 'text-slate-400')
+                                            }`}></i>
+                                        </div>
+                                    );
+                                })()}
 
                                 {/* Saved Quick Group Pills */}
                                 {quickGroups.map(group => {
