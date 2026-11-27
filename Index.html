@@ -8568,7 +8568,7 @@
                 )}
 
                 {/* Main Split Workspace */}
-                <div className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden">
+                <div className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden pb-[74px] md:pb-0">
                     {/* LEFT: Product Catalog Panel */}
                     <div className={`flex-1 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Top Toolbar: Search Input + Locked Shop Selector + Action Buttons */}
@@ -9366,9 +9366,9 @@
                     </div>
                 </div>
 
-                {/* STICKY 3-ACTION MOBILE FOOTER (Catalog, Cart Ticket & Direct Checkout / Open Shift) */}
-                <footer className="md:hidden bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] -mx-1.5 -mb-1.5 mt-1.5 shrink-0 z-30 shadow-[0_-6px_20px_rgba(0,0,0,0.45)]">
-                    <div className="grid grid-cols-12 gap-1.5 items-stretch">
+                {/* STICKY 3-ACTION MOBILE FOOTER (Catalog, Ticket & Checkout) */}
+                <footer className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2.5 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] z-40 shadow-[0_-8px_24px_rgba(0,0,0,0.55)]">
+                    <div className="grid grid-cols-12 gap-2 items-stretch max-w-screen-md mx-auto">
                         {/* 1. Catalog Button */}
                         <button
                             type="button"
@@ -9376,21 +9376,21 @@
                             className={`col-span-3 flex flex-col items-center justify-center py-2 px-1 rounded-xl border transition-all active:scale-95 ${
                                 activeMobileTab === 'products'
                                     ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
-                                    : 'bg-slate-800/80 text-slate-300 border-slate-700 hover:text-white'
+                                    : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:text-white'
                             }`}
                         >
-                            <i className="fas fa-th-large text-sm mb-0.5"></i>
+                            <i className="fas fa-th-large text-sm mb-1"></i>
                             <span className="text-[11px] font-bold leading-none">Catalog</span>
                         </button>
 
-                        {/* 2. Cart Ticket Button (Live Item Count Badge + Formatted KHR Total) */}
+                        {/* 2. Ticket Button (Live Item Count Badge + Formatted KHR Total) */}
                         <button
                             type="button"
                             onClick={() => setActiveMobileTab('cart')}
                             className={`col-span-4 flex flex-col items-center justify-center py-1.5 px-1.5 rounded-xl border transition-all active:scale-95 relative ${
                                 activeMobileTab === 'cart'
                                     ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
-                                    : 'bg-slate-800/80 text-slate-200 border-slate-700 hover:text-white'
+                                    : 'bg-slate-800/90 text-slate-200 border-slate-700 hover:text-white'
                             }`}
                         >
                             <div className="flex items-center gap-1.5">
@@ -9404,7 +9404,7 @@
                                         </span>
                                     )}
                                 </div>
-                                <span className="text-[11px] font-bold leading-none ml-1">Cart Ticket</span>
+                                <span className="text-[11px] font-bold leading-none ml-1">Ticket</span>
                             </div>
                             <span className={`text-[10px] font-mono font-black mt-1 truncate max-w-full ${
                                 activeMobileTab === 'cart' ? 'text-amber-300' : 'text-emerald-400'
@@ -9413,35 +9413,35 @@
                             </span>
                         </button>
 
-                        {/* 3. Direct Bill Payment (Checkout) or Open Shift Button */}
-                        {!currentShift ? (
-                            <button
-                                type="button"
-                                onClick={() => setShowShiftModal(true)}
-                                className="col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black shadow-lg shadow-amber-900/30 transition-all active:scale-95"
-                            >
-                                <div className="flex items-center gap-1.5">
-                                    <i className="fas fa-play-circle text-sm"></i>
-                                    <span className="text-xs font-black leading-none">Open Shift</span>
-                                </div>
-                                <span className="text-[10px] font-bold opacity-80 mt-0.5 leading-none">Start Selling</span>
-                            </button>
-                        ) : (
-                            <button
-                                type="button"
-                                disabled={cart.length === 0 || isProcessing}
-                                onClick={() => setShowPaymentModal(true)}
-                                className="col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white font-black shadow-lg shadow-emerald-900/30 transition-all active:scale-95"
-                            >
-                                <div className="flex items-center gap-1.5">
-                                    <i className="fas fa-cash-register text-sm"></i>
-                                    <span className="text-xs font-black leading-none">Checkout</span>
-                                </div>
-                                <span className="text-[10px] font-mono font-bold opacity-95 mt-0.5 leading-none truncate max-w-full">
-                                    {cart.length > 0 ? `៛${khrFormatter.format(cartTotal)}` : 'Empty Cart'}
-                                </span>
-                            </button>
-                        )}
+                        {/* 3. Checkout Button (Prompts Open Shift if closed, otherwise opens Payment Modal) */}
+                        <button
+                            type="button"
+                            disabled={!!currentShift && (cart.length === 0 || isProcessing)}
+                            onClick={() => {
+                                if (!currentShift) {
+                                    setShowShiftModal(true);
+                                } else {
+                                    setShowPaymentModal(true);
+                                }
+                            }}
+                            className={`col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl font-black transition-all active:scale-95 ${
+                                !currentShift
+                                    ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-lg shadow-amber-900/30'
+                                    : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white shadow-lg shadow-emerald-900/30'
+                            }`}
+                        >
+                            <div className="flex items-center gap-1.5">
+                                <i className={`fas ${!currentShift ? 'fa-play-circle' : 'fa-cash-register'} text-sm`}></i>
+                                <span className="text-xs font-black leading-none">Checkout</span>
+                            </div>
+                            <span className={`text-[10px] font-mono font-bold mt-0.5 leading-none truncate max-w-full ${!currentShift ? 'opacity-85 font-sans' : 'opacity-95'}`}>
+                                {!currentShift
+                                    ? 'Open Shift'
+                                    : cart.length > 0
+                                        ? `៛${khrFormatter.format(cartTotal)}`
+                                        : 'Empty Cart'}
+                            </span>
+                        </button>
                     </div>
                 </footer>
             </div>
