@@ -27635,6 +27635,30 @@
                                     : false;
                                 const customPriceShopsCount = managedShops.filter(s => Number(p.priceByShop?.[s.id]) > 0).length;
                                 const actualMarginPct = currentPrice > 0 ? ((currentPrice - displayFifoCost) / currentPrice) * 100 : 0;
+                                const focusedTargetMargin = focusedShopObj
+                                    ? Math.max(0, Math.min(99, parseFloat(focusedShopObj.saleMargin) || 0))
+                                    : 0;
+                                const underTargetShops = !focusedShopObj
+                                    ? managedShops.filter(s => {
+                                        if (!isProductAvailableForShop(p, s.id)) return false;
+                                        const sTarget = Math.max(0, Math.min(99, parseFloat(s.saleMargin) || 0));
+                                        if (sTarget <= 0) return false;
+                                        const sPrice = getEffectiveShopPrice(p, s.id);
+                                        const sCost = prodFifo?.byShop?.[s.id]?.fifoUnitCost ?? baseCost;
+                                        const sMargin = sPrice > 0 ? ((sPrice - sCost) / sPrice) * 100 : -Infinity;
+                                        return (sMargin + 0.005) < sTarget;
+                                    })
+                                    : [];
+                                const isUnderTargetMargin = focusedShopObj
+                                    ? (focusedTargetMargin > 0 ? (actualMarginPct + 0.005) < focusedTargetMargin : actualMarginPct < 0)
+                                    : underTargetShops.length > 0;
+                                const marginBadgeTitle = focusedShopObj
+                                    ? (focusedTargetMargin > 0
+                                        ? `${isUnderTargetMargin ? 'Under' : 'Upper'} Margin: ${actualMarginPct.toFixed(1)}% vs Target ${focusedTargetMargin}% (${focusedShopObj.name})`
+                                        : `Actual Margin: ${actualMarginPct.toFixed(1)}% (No target margin set for ${focusedShopObj.name})`)
+                                    : (underTargetShops.length > 0
+                                        ? `Under Target Margin at ${underTargetShops.length} shop(s): ${underTargetShops.map(s => `${s.name} (${s.saleMargin}%)`).join(', ')}`
+                                        : `Meets or exceeds target sale margin across assigned shops`);
                                 const displayTotalValue = focusedShopObj
                                     ? (focusedShopFifo ? focusedShopFifo.totalFifoValue : ((Number(p.stockByShop?.[focusedShopObj.id]) || 0) * baseCost))
                                     : (prodFifo?.globalFifoValue ?? (totalStock * baseCost));
@@ -27746,14 +27770,18 @@
                                                             {customPriceShopsCount} Shop Price{customPriceShopsCount > 1 ? 's' : ''}
                                                         </span>
                                                     )}
-                                                    <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
-                                                        actualMarginPct >= 20
-                                                            ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
-                                                            : actualMarginPct >= 0
-                                                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                                                                : 'bg-red-500/20 text-red-300 border-red-500/40'
-                                                    }`}>
-                                                        {actualMarginPct.toFixed(1)}%
+                                                    <span
+                                                        title={marginBadgeTitle}
+                                                        className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
+                                                            actualMarginPct < 0
+                                                                ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                                                                : isUnderTargetMargin
+                                                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                                                                    : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35'
+                                                        }`}
+                                                    >
+                                                        <i className={`fas ${isUnderTargetMargin ? 'fa-arrow-down text-[8px]' : 'fa-arrow-up text-[8px]'}`}></i>
+                                                        <span>{actualMarginPct.toFixed(1)}%</span>
                                                     </span>
                                                 </div>
                                             </td>
@@ -28196,6 +28224,7 @@
         
         const [filters, setFilters] = useState({ searchTerm: '', vendorId: '', categoryName: '', catVendorQuery: '' });
         const [focusedShopId, setFocusedShopId] = useState('ALL');
+        const [marginFilter, setMarginFilter] = useState('ALL'); // 'ALL' | 'UPPER' | 'UNDER'
         const [currentPage, setCurrentPage] = useState(1);
         const [itemsPerPage] = useState(20);
         
@@ -28417,7 +28446,45 @@
             });
         }, [allProducts]);
 
-        const filteredProducts = useMemo(() => {
+        // Evaluates whether a product is Upper (>= Target) or Under (< Target) the Sale Margin set in Shop & Location Management
+        const isProductUnderMarginTarget = useCallback((product) => {
+            const prodFifo = fifoValuationMap?.get(product.id);
+            const baseCost = Number(product.cost) || 0;
+            const focusedShopObj = focusedShopId !== 'ALL'
+                ? managedShops.find(s => s.id === focusedShopId) || null
+                : null;
+
+            if (focusedShopObj) {
+                const targetMargin = Math.max(0, Math.min(99, parseFloat(focusedShopObj.saleMargin) || 0));
+                const shopPrice = getEffectiveShopPrice(product, focusedShopObj.id);
+                const shopCost = prodFifo?.byShop?.[focusedShopObj.id]?.fifoUnitCost ?? baseCost;
+                const actualMargin = shopPrice > 0 ? ((shopPrice - shopCost) / shopPrice) * 100 : -Infinity;
+                return (actualMargin + 0.005) < targetMargin;
+            }
+
+            // All Shop View: evaluate against all assigned managed shops that have a target saleMargin configured
+            const assignedShops = managedShops.filter(s => isProductAvailableForShop(product, s.id));
+            const shopsWithTarget = assignedShops.filter(s => (parseFloat(s.saleMargin) || 0) > 0);
+            const shopsToCheck = shopsWithTarget.length > 0 ? shopsWithTarget : assignedShops;
+
+            if (shopsToCheck.length === 0) {
+                const basePrice = Number(product.price) || 0;
+                const globalCost = prodFifo?.globalFifoUnitCost ?? baseCost;
+                const margin = basePrice > 0 ? ((basePrice - globalCost) / basePrice) * 100 : -Infinity;
+                return margin < 0;
+            }
+
+            // Under Margin if at least one assigned shop falls below its configured Sale Margin (%)
+            return shopsToCheck.some(shop => {
+                const targetMargin = Math.max(0, Math.min(99, parseFloat(shop.saleMargin) || 0));
+                const shopPrice = getEffectiveShopPrice(product, shop.id);
+                const shopCost = prodFifo?.byShop?.[shop.id]?.fifoUnitCost ?? baseCost;
+                const actualMargin = shopPrice > 0 ? ((shopPrice - shopCost) / shopPrice) * 100 : -Infinity;
+                return (actualMargin + 0.005) < targetMargin;
+            });
+        }, [fifoValuationMap, focusedShopId, managedShops]);
+
+        const baseFilteredProducts = useMemo(() => {
             if (!allProducts) return [];
             const { searchTerm, vendorId, categoryName, catVendorQuery } = filters;
             
@@ -28452,85 +28519,139 @@
             return results.sort((a, b) => a.name.localeCompare(b.name));
         }, [filters, allProducts, fuse]);
 
+        const marginFilterCounts = useMemo(() => {
+            let upper = 0;
+            let under = 0;
+            baseFilteredProducts.forEach(p => {
+                if (isProductUnderMarginTarget(p)) under += 1;
+                else upper += 1;
+            });
+            return { all: baseFilteredProducts.length, upper, under };
+        }, [baseFilteredProducts, isProductUnderMarginTarget]);
+
+        const filteredProducts = useMemo(() => {
+            if (marginFilter === 'ALL') return baseFilteredProducts;
+            return baseFilteredProducts.filter(p => {
+                const isUnder = isProductUnderMarginTarget(p);
+                return marginFilter === 'UNDER' ? isUnder : !isUnder;
+            });
+        }, [baseFilteredProducts, marginFilter, isProductUnderMarginTarget]);
+
+        const activeShopMarginLabel = useMemo(() => {
+            const focusedShopObj = focusedShopId !== 'ALL'
+                ? managedShops.find(s => s.id === focusedShopId) || null
+                : null;
+            if (focusedShopObj) {
+                const m = Math.max(0, Math.min(99, parseFloat(focusedShopObj.saleMargin) || 0));
+                return { label: `${m}%`, detail: `${focusedShopObj.name} Target` };
+            }
+            const configuredMargins = managedShops
+                .map(s => Math.max(0, Math.min(99, parseFloat(s.saleMargin) || 0)))
+                .filter(m => m > 0);
+            if (configuredMargins.length === 0) {
+                return { label: '0%', detail: 'No Shop Margin Set' };
+            }
+            const minM = Math.min(...configuredMargins);
+            const maxM = Math.max(...configuredMargins);
+            return {
+                label: minM === maxM ? `${minM}%` : `${minM}%–${maxM}%`,
+                detail: `${configuredMargins.length} Shop Target${configuredMargins.length > 1 ? 's' : ''}`
+            };
+        }, [focusedShopId, managedShops]);
+
         useEffect(() => {
             setCurrentPage(1);
-        }, [filters]);
+        }, [filters, marginFilter, focusedShopId]);
 
         const totalPages = Math.ceil(filteredProducts.length / itemsPerPage);
         const paginatedProducts = useMemo(() => {
-            const startIndex = (currentPage - 1) * itemsPerPage;
-            return filteredProducts.slice(startIndex, startIndex + itemsPerPage);
+            const start = (currentPage - 1) * itemsPerPage;
+            return filteredProducts.slice(start, start + itemsPerPage);
         }, [filteredProducts, currentPage, itemsPerPage]);
 
-        const handleNextPage = () => setCurrentPage(prev => Math.min(prev + 1, totalPages));
-        const handlePrevPage = () => setCurrentPage(prev => Math.max(prev - 1, 1));
+        const handleNextPage = useCallback(() => {
+            setCurrentPage(p => Math.min(totalPages, p + 1));
+        }, [totalPages]);
 
-        const handleAddNew = async () => {
-            setIsGeneratingCode(true);
-            try {
-                const newCode = await generateUniqueProductCode();
-                setProductModal({ show: true, product: { ...initialFormState, code: newCode }, mode: 'edit' });
-            } catch (error) {
-                handleAction('show-message', { title: 'Error', message: error.message, isError: true });
-            } finally {
-                setIsGeneratingCode(false);
-            }
-        };
-
-        const handleAction = useCallback((type, data) => {
-            switch (type) {
-                case 'view': setProductModal({ show: true, product: data, mode: 'view' }); break;
-                case 'edit': setProductModal({ show: true, product: data, mode: 'edit' }); break;
-                case 'delete': setModal({ type: 'confirmDelete', data: data.id, title: 'Delete Product', message: `Delete ${data.name}?` }); break;
-                case 'show-history': setModal({ type: 'history', data }); break;
-                case 'show-label': setModal({ type: 'label', data }); break;
-                case 'show-movement': setModal({ type: 'movement', data }); break;
-                case 'show-message': setModal({ type: 'message', data }); break;
-                // NEW ACTION
-                case 'adjust-stock': setModal({ type: 'stock-adjust', data: data }); break;
-            }
+        const handlePrevPage = useCallback(() => {
+            setCurrentPage(p => Math.max(1, p - 1));
         }, []);
 
         const handleFilterChange = useCallback((newFilters) => {
             setFilters(newFilters);
         }, []);
-        
-        const refresh = useCallback(() => {
-            setFilters({ searchTerm: '', vendorId: '', categoryName: '' });
-        }, []);
+
+        const handleAddNew = async () => {
+            setIsGeneratingCode(true);
+            try {
+                const newCode = await generateUniqueProductCode();
+                setProductModal({
+                    show: true,
+                    product: { ...initialFormState, code: newCode },
+                    mode: 'edit'
+                });
+            } catch (error) {
+                setModal({ type: 'message', data: { title: 'Error', message: error.message || 'Failed to generate product code.', isError: true } });
+            } finally {
+                setIsGeneratingCode(false);
+            }
+        };
 
         const handleDelete = async (id) => {
+            if (!id) return;
             try {
                 if (window.SolarisCollectionMutator) {
                     window.SolarisCollectionMutator.deleteDoc("products", id);
                 } else {
                     await db.collection("products").doc(id).delete();
-                    if (window.SolarisSmartProductEngine) {
-                        window.SolarisSmartProductEngine.applyLocalProductDelete(id, true);
-                    }
                 }
-                handleAction('show-message', { title: 'Success', message: 'Product deleted.' });
+                setModal({ type: 'message', data: { title: 'Success', message: 'Product deleted.' } });
             } catch (error) {
-                handleAction('show-message', { title: 'Error', message: 'Failed to delete product.', isError: true });
+                setModal({ type: 'message', data: { title: 'Error', message: 'Failed to delete product.', isError: true } });
             }
         };
-        
+
+        const handleAction = useCallback((type, payload) => {
+            if (type === 'show-message') {
+                setModal({ type: 'message', data: payload });
+            } else if (type === 'show-label') {
+                setModal({ type: 'label', data: payload });
+            } else if (type === 'show-history') {
+                setModal({ type: 'history', data: payload });
+            } else if (type === 'show-movement') {
+                setModal({ type: 'movement', data: payload });
+            } else if (type === 'adjust-stock') {
+                setModal({ type: 'stock-adjust', data: payload });
+            } else if (type === 'view') {
+                setProductModal({ show: true, product: payload, mode: 'view' });
+            } else if (type === 'edit') {
+                setProductModal({ show: true, product: payload, mode: 'edit' });
+            } else if (type === 'delete') {
+                setModal({
+                    type: 'confirmDelete',
+                    data: payload.id,
+                    title: 'Delete Product',
+                    message: `Are you sure you want to delete "${payload.name}"?`
+                });
+            }
+        }, []);
+
         const handleSaveProduct = async (formData, editId) => {
-            const selectedVendor = vendors.find(v => v.id === formData.vendorId);
-            const selectedCat = (categories || []).find(c => c.id === formData.categoryId);
-            const resolvedCategoryName = selectedCat?.name || formData.category || 'General';
-            const dataToSave = { 
-                ...formData, 
-                cost: parseFloat(formData.cost), 
-                price: parseFloat(formData.price), 
-                minStock: parseInt(formData.minStock) || 0, // Default / legacy fallback minStock
-                minStockByShop: formData.minStockByShop || {}, // Per-shop Min Stock Alert Level
-                availableByShop: formData.availableByShop || {}, // Per-shop Assigned/Unassigned availability
-                vendorName: selectedVendor?.name || '',
-                category: resolvedCategoryName,
-                categoryName: resolvedCategoryName
-            };
             try {
+                const vendor = vendors.find(v => v.id === formData.vendorId);
+                const resolvedCatName = String(formData.category || formData.categoryName || '').trim();
+                const dataToSave = {
+                    ...formData,
+                    vendorName: vendor ? vendor.name : (formData.vendorName || ''),
+                    category: resolvedCatName,
+                    categoryName: resolvedCatName,
+                    cost: parseFloat(formData.cost) || 0,
+                    price: parseFloat(formData.price) || 0,
+                    minStock: parseInt(formData.minStock, 10) || 0,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                };
+                delete dataToSave.id;
+
                 if (editId) {
                     if (window.SolarisCollectionMutator) {
                         window.SolarisCollectionMutator.upsertDoc("products", editId, dataToSave, false);
@@ -28886,7 +29007,7 @@
                     </div>
                 }>
                     {/* Unified Top Filter & Action Bar: 2-Column Search Grid + Shop View Droplist + Icon-Only Actions */}
-                    <div className="mb-4 pb-3 border-b border-slate-700/80 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-2.5">
+                    <div className="mb-3 pb-3 border-b border-slate-700/80 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-2.5">
                         <ProductFilters onFilterChange={handleFilterChange} />
                         <ProductActions 
                             onAddNew={handleAddNew}
@@ -28911,6 +29032,76 @@
                                 }
                             }}
                         />
+                    </div>
+
+                    {/* Sale Margin Filter Bar (Upper >= Shop Target vs Under < Shop Target) */}
+                    <div className="mb-4 pb-3 border-b border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs text-slate-300">
+                            <span className="font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                                <i className="fas fa-percentage text-cyan-400"></i>
+                                <span>Sale Margin Filter</span>
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300 font-bold">
+                                {activeShopMarginLabel.detail}: {activeShopMarginLabel.label}
+                            </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                                type="button"
+                                onClick={() => setMarginFilter('ALL')}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
+                                    marginFilter === 'ALL'
+                                        ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                        : 'bg-slate-900/80 text-slate-300 border-slate-700 hover:text-white hover:border-slate-500'
+                                }`}
+                            >
+                                <span>All</span>
+                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
+                                    marginFilter === 'ALL' ? 'bg-blue-800/80 text-white' : 'bg-slate-800 text-slate-400'
+                                }`}>
+                                    {marginFilterCounts.all}
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setMarginFilter('UPPER')}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
+                                    marginFilter === 'UPPER'
+                                        ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                                        : 'bg-slate-900/80 text-emerald-300 border-emerald-500/30 hover:bg-emerald-950/50 hover:border-emerald-400'
+                                }`}
+                                title={`Products meeting or exceeding the configured Shop Sale Margin (≥ ${activeShopMarginLabel.label})`}
+                            >
+                                <i className="fas fa-arrow-trend-up text-[11px]"></i>
+                                <span>Upper Margin (&ge; {activeShopMarginLabel.label})</span>
+                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
+                                    marginFilter === 'UPPER' ? 'bg-emerald-800/80 text-white' : 'bg-emerald-500/15 text-emerald-300'
+                                }`}>
+                                    {marginFilterCounts.upper}
+                                </span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => setMarginFilter('UNDER')}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 ${
+                                    marginFilter === 'UNDER'
+                                        ? 'bg-amber-600 text-white border-amber-400 shadow-sm'
+                                        : 'bg-slate-900/80 text-amber-300 border-amber-500/30 hover:bg-amber-950/50 hover:border-amber-400'
+                                }`}
+                                title={`Products below the configured Shop Sale Margin (< ${activeShopMarginLabel.label})`}
+                            >
+                                <i className="fas fa-arrow-trend-down text-[11px]"></i>
+                                <span>Under Margin (&lt; {activeShopMarginLabel.label})</span>
+                                <span className={`px-1.5 py-0.2 rounded-full font-mono text-[10px] ${
+                                    marginFilter === 'UNDER' ? 'bg-amber-800/80 text-white' : 'bg-amber-500/15 text-amber-300'
+                                }`}>
+                                    {marginFilterCounts.under}
+                                </span>
+                            </button>
+                        </div>
                     </div>
                     {dataLoading ? (
                         <div className="flex justify-center p-8"><div className="loader"></div></div>
