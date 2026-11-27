@@ -211,14 +211,19 @@
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
     <style>
+        html, body, #root {
+            height: 100%;
+            height: 100dvh;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
         body {
             background-color: #0f172a;
             -webkit-font-smoothing: antialiased;
-            overflow: hidden;
             overscroll-behavior-y: none;
             -webkit-tap-highlight-color: transparent;
-            padding-top: env(safe-area-inset-top);
-            padding-bottom: env(safe-area-inset-bottom);
         }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -2922,17 +2927,17 @@
         const isShiftOpen = !!(activeShift && activeShift.status === 'open');
 
         return (
-            <header className="h-14 bg-slate-900 border-b border-slate-800 px-2.5 sm:px-4 flex items-center justify-between gap-2 shrink-0 z-40 select-none">
+            <header className="h-14 bg-slate-900 border-b border-slate-800 px-2 sm:px-4 flex items-center justify-between gap-1.5 sm:gap-2 shrink-0 z-40 select-none">
                 {/* Left: Brand & Active Branch */}
-                <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-md shadow-blue-950/40 border border-blue-400/30 shrink-0">
-                        <i className="fas fa-cash-register text-white text-sm"></i>
+                <div className="flex items-center gap-2 min-w-0 shrink">
+                    <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-md shadow-blue-950/40 border border-blue-400/30 shrink-0">
+                        <i className="fas fa-cash-register text-white text-xs sm:text-sm"></i>
                     </div>
                     <div className="min-w-0 leading-tight">
-                        <div className="text-sm font-black text-white truncate">
+                        <div className="text-xs sm:text-sm font-black text-white truncate max-w-[110px] sm:max-w-none">
                             {systemConfig?.appName || 'POS Terminal'}
                         </div>
-                        <div className="text-[11px] font-semibold text-slate-400 truncate flex items-center gap-1.5">
+                        <div className="text-[10px] sm:text-[11px] font-semibold text-slate-400 truncate max-w-[110px] sm:max-w-none flex items-center gap-1.5">
                             <span className="truncate">{activeShop?.name || 'No Shop Selected'}</span>
                             <span className={`hidden sm:inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-black uppercase ${
                                 isShiftOpen
@@ -2947,12 +2952,12 @@
                 </div>
 
                 {/* Right: Cashier Controls & User Profile / Logout */}
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
                     {/* Shift Management Button */}
                     <button
                         type="button"
                         onClick={onOpenShiftModal}
-                        className={`h-9 px-2.5 sm:px-3 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition ${
+                        className={`h-8 sm:h-9 px-2 sm:px-3 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition ${
                             isShiftOpen
                                 ? 'bg-emerald-600/15 hover:bg-emerald-600 text-emerald-300 hover:text-white border-emerald-500/40'
                                 : 'bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border-amber-500/40 animate-pulse'
@@ -2967,7 +2972,7 @@
                     <button
                         type="button"
                         onClick={onOpenHistoryModal}
-                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition"
+                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 flex items-center justify-center transition"
                         title="Today's Transactions & Void"
                     >
                         <i className="fas fa-receipt text-xs"></i>
@@ -2977,7 +2982,7 @@
                     <button
                         type="button"
                         onClick={onOpenDailyReportModal}
-                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
+                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
                         title="Today's Sales Summary"
                     >
                         <i className="fas fa-chart-pie text-xs"></i>
@@ -2987,7 +2992,7 @@
                     <button
                         type="button"
                         onClick={onOpenBankAutoSumModal}
-                        className="h-9 px-2.5 rounded-xl bg-slate-800 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-slate-700 hover:border-emerald-500 flex items-center justify-center gap-1.5 text-xs font-bold transition"
+                        className="h-8 sm:h-9 px-2 sm:px-2.5 rounded-xl bg-slate-800 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-slate-700 hover:border-emerald-500 flex items-center justify-center gap-1.5 text-xs font-bold transition"
                         title="Bank AutoSum (Live Shift ABA Feed)"
                     >
                         <i className="fas fa-university text-xs"></i>
@@ -2998,7 +3003,7 @@
                     <button
                         type="button"
                         onClick={onOpenKhqrSimulatorModal}
-                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-rose-600 text-rose-400 hover:text-white border border-slate-700 hover:border-rose-500 flex items-center justify-center transition"
+                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-rose-600 text-rose-400 hover:text-white border border-slate-700 hover:border-rose-500 flex items-center justify-center transition"
                         title="Live Dynamic KHQR Simulator (PIN)"
                     >
                         <i className="fas fa-qrcode text-xs"></i>
@@ -3019,7 +3024,7 @@
                         type="button"
                         onClick={handleSyncCatalog}
                         disabled={syncing}
-                        className="w-9 h-9 rounded-xl bg-slate-800 hover:bg-blue-600 text-blue-400 hover:text-white border border-slate-700 flex items-center justify-center transition disabled:opacity-60"
+                        className="hidden sm:flex w-9 h-9 rounded-xl bg-slate-800 hover:bg-blue-600 text-blue-400 hover:text-white border border-slate-700 items-center justify-center transition disabled:opacity-60"
                         title="Force Full Catalog Sync"
                     >
                         <i className={`fas fa-sync-alt text-xs ${syncing ? 'fa-spin' : ''}`}></i>
@@ -3050,17 +3055,17 @@
                     </button>
 
                     {!pwaState.isInstalled && (
-                        <button type="button" onClick={onOpenInstallModal} className="w-9 h-9 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/40 flex items-center justify-center" title="Install to Home Screen">
+                        <button type="button" onClick={onOpenInstallModal} className="hidden sm:flex w-9 h-9 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white border border-emerald-500/40 items-center justify-center" title="Install to Home Screen">
                             <i className="fas fa-download text-xs"></i>
                         </button>
                     )}
 
                     {/* Professional User Profile & Logout Menu (Live from /users/{uid}) */}
-                    <div ref={userMenuRef} className="relative pl-1.5 ml-0.5 border-l border-slate-700/80">
+                    <div ref={userMenuRef} className="relative pl-1 sm:pl-1.5 ml-0.5 border-l border-slate-700/80">
                         <button
                             type="button"
                             onClick={() => setShowUserMenu(prev => !prev)}
-                            className={`h-9 pl-1.5 pr-2 sm:pr-2.5 rounded-xl border flex items-center gap-2 transition-all duration-150 ${
+                            className={`h-8 sm:h-9 pl-1 sm:pl-1.5 pr-1.5 sm:pr-2.5 rounded-xl border flex items-center gap-1.5 sm:gap-2 transition-all duration-150 ${
                                 showUserMenu
                                     ? 'bg-slate-800 border-blue-500/60 shadow-lg shadow-blue-950/40'
                                     : 'bg-slate-800/80 hover:bg-slate-800 border-slate-700 hover:border-slate-600'
@@ -3686,8 +3691,8 @@
                             </div>
                         </ModalBody>
                         <ModalFooter>
-                            <button onClick={() => { setSaleToVoid(null); setVoidReason(''); }} className="bg-slate-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-slate-500 transition">Cancel</button>
-                            <button onClick={executeVoid} disabled={!voidReason.trim()} className="bg-red-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-red-700 disabled:opacity-50 transition">Confirm Void</button>
+                            <button type="button" onClick={() => { setSaleToVoid(null); setVoidReason(''); }} className="bg-slate-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-slate-500 transition">Cancel</button>
+                            <button type="button" onClick={executeVoid} disabled={!voidReason.trim()} className="bg-red-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-red-700 disabled:opacity-50 transition">Confirm Void</button>
                         </ModalFooter>
                     </Modal>
                 )}
@@ -8301,7 +8306,7 @@
         };
 
         return (
-            <div className="flex-1 flex flex-col overflow-hidden bg-slate-950 text-slate-200 min-h-0 p-2 sm:p-3 select-none">
+            <div className="flex-1 flex flex-col overflow-hidden bg-slate-950 text-slate-200 min-h-0 select-none">
                 <MessageModal
                     {...modalMsg}
                     onClose={() => {
@@ -8521,7 +8526,7 @@
                 )}
 
                 {/* MAIN WORKSPACE SPLIT: LEFT CATALOG + RIGHT CURRENT TICKET */}
-                <div className="flex-1 flex gap-2.5 lg:gap-4 overflow-hidden relative min-h-0">
+                <div className="flex-1 flex gap-2.5 lg:gap-4 overflow-hidden relative min-h-0 p-2 sm:p-3">
                     {/* LEFT: PRODUCT CATALOG */}
                     <div className={`flex-1 flex flex-col min-w-0 min-h-0 bg-slate-900/40 rounded-xl border border-slate-800/80 p-2.5 sm:p-3 gap-2.5 overflow-hidden ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Top Search, Shop Selector & View Switcher */}
@@ -9122,7 +9127,7 @@
                             )}
                         </div>
 
-                        {/* Cart Footer: Totals & Checkout Button */}
+                        {/* Cart Footer: Totals & Checkout Button (Checkout CTA hidden on mobile since pinned mobile footer handles Checkout directly) */}
                         <div className="p-3 bg-slate-900/90 border-t border-slate-700 space-y-2.5 shrink-0">
                             <div className="flex items-baseline justify-between">
                                 <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Grand Total</span>
@@ -9140,7 +9145,7 @@
                                 <button
                                     type="button"
                                     onClick={() => setShowShiftModal(true)}
-                                    className="w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm shadow-lg shadow-amber-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                    className="hidden md:flex w-full py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-sm shadow-lg shadow-amber-900/30 items-center justify-center gap-2 transition active:scale-95"
                                 >
                                     <i className="fas fa-play-circle text-base"></i>
                                     <span>Open Shift to Start Selling</span>
@@ -9150,7 +9155,7 @@
                                     type="button"
                                     disabled={cart.length === 0 || isProcessing}
                                     onClick={() => setShowPaymentModal(true)}
-                                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2 transition active:scale-95"
+                                    className="hidden md:flex w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-black text-sm sm:text-base shadow-lg shadow-emerald-900/30 items-center justify-center gap-2 transition active:scale-95"
                                 >
                                     <i className="fas fa-cash-register"></i>
                                     <span>Checkout • ៛{khrFormatter.format(cartTotal)}</span>
@@ -9160,34 +9165,73 @@
                     </div>
                 </div>
 
-                {/* MOBILE BOTTOM NAVIGATION BAR (2-Tab Switcher: Catalog & Ticket) */}
-                <div className="md:hidden h-14 bg-slate-900 border-t border-slate-700 grid grid-cols-2 items-center px-3 shrink-0 mt-2 rounded-xl shadow-lg gap-2">
-                    <button
-                        type="button"
-                        onClick={() => setActiveMobileTab('products')}
-                        className={`flex items-center justify-center gap-2 h-10 rounded-xl transition-all ${activeMobileTab === 'products' ? 'text-white bg-blue-600 font-bold shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-slate-200 bg-slate-800/60'}`}
-                    >
-                        <i className="fas fa-th-large text-sm"></i>
-                        <span className="text-xs font-bold">Catalog</span>
-                    </button>
+                {/* MOBILE STICKY FOOTER BAR (Catalog • Cart Ticket • Direct Checkout / Open Shift) */}
+                <div className="md:hidden shrink-0 bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2.5 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(0,0,0,0.45)] z-30">
+                    <div className="grid grid-cols-12 gap-1.5 items-center">
+                        {/* 1. Catalog Tab */}
+                        <button
+                            type="button"
+                            onClick={() => setActiveMobileTab('products')}
+                            className={`col-span-3 h-12 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-all active:scale-95 ${
+                                activeMobileTab === 'products'
+                                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40'
+                                    : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-slate-700/80'
+                            }`}
+                        >
+                            <i className="fas fa-th-large text-sm"></i>
+                            <span className="text-[10px] font-bold leading-none">Catalog</span>
+                        </button>
 
-                    <button
-                        type="button"
-                        onClick={() => setActiveMobileTab('cart')}
-                        className={`flex items-center justify-center gap-2 h-10 rounded-xl transition-all relative ${activeMobileTab === 'cart' ? 'text-white bg-blue-600 font-bold shadow-md shadow-blue-900/40' : 'text-slate-400 hover:text-slate-200 bg-slate-800/60'}`}
-                    >
-                        <div className="relative">
-                            <i className="fas fa-shopping-basket text-sm"></i>
-                            {cartItemCount > 0 && (
-                                <span className={`absolute -top-2 -right-3 text-[10px] font-black px-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center shadow ${activeMobileTab === 'cart' ? 'bg-amber-400 text-slate-950' : 'bg-red-500 text-white animate-bounce'}`}>
-                                    {cartItemCount}
-                                </span>
-                            )}
-                        </div>
-                        <span className="text-xs font-bold ml-1">
-                            Ticket {cartTotal > 0 ? `(៛${new Intl.NumberFormat('en-US', { notation: 'compact' }).format(cartTotal)})` : ''}
-                        </span>
-                    </button>
+                        {/* 2. Cart Ticket Tab with Live Count & Total */}
+                        <button
+                            type="button"
+                            onClick={() => setActiveMobileTab('cart')}
+                            className={`col-span-4 h-12 rounded-xl px-2 flex items-center justify-center gap-2 transition-all active:scale-95 relative ${
+                                activeMobileTab === 'cart'
+                                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/40'
+                                    : 'bg-slate-800/80 text-slate-200 border border-slate-700/80 hover:bg-slate-800'
+                            }`}
+                        >
+                            <div className="relative shrink-0">
+                                <i className="fas fa-shopping-cart text-sm"></i>
+                                {cartItemCount > 0 && (
+                                    <span className={`absolute -top-2 -right-2.5 text-[9px] font-black px-1 min-w-[16px] h-[16px] rounded-full flex items-center justify-center shadow ${
+                                        activeMobileTab === 'cart' ? 'bg-amber-400 text-slate-950' : 'bg-rose-500 text-white'
+                                    }`}>
+                                        {cartItemCount}
+                                    </span>
+                                )}
+                            </div>
+                            <div className="min-w-0 text-left leading-tight">
+                                <div className="text-[10px] font-bold uppercase tracking-wide opacity-90">Ticket</div>
+                                <div className="text-[11px] font-black font-mono truncate">
+                                    {cartTotal > 0 ? `៛${khrFormatter.format(cartTotal)}` : 'Empty'}
+                                </div>
+                            </div>
+                        </button>
+
+                        {/* 3. Direct Checkout / Open Shift Bill Payment Button */}
+                        {!activeShift || activeShift.status !== 'open' ? (
+                            <button
+                                type="button"
+                                onClick={() => setShowShiftModal(true)}
+                                className="col-span-5 h-12 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shadow-lg shadow-amber-900/30 flex items-center justify-center gap-1.5 transition active:scale-95 px-2"
+                            >
+                                <i className="fas fa-play-circle text-sm"></i>
+                                <span>Open Shift</span>
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                disabled={cart.length === 0 || isProcessing}
+                                onClick={() => setShowPaymentModal(true)}
+                                className="col-span-5 h-12 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white font-black text-xs shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-1.5 transition active:scale-95 px-2"
+                            >
+                                <i className="fas fa-cash-register text-sm shrink-0"></i>
+                                <span className="truncate">Checkout</span>
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
         );
@@ -9387,7 +9431,7 @@
         }, [activeShop?.id]);
 
         return (
-            <div className="h-screen h-[100dvh] w-screen bg-slate-950 flex flex-col overflow-hidden">
+            <div className="fixed inset-0 h-[100dvh] w-full bg-slate-950 flex flex-col overflow-hidden pt-[env(safe-area-inset-top)]">
                 <InstallAppModal show={showInstallModal} onClose={() => setShowInstallModal(false)} appName={systemConfig?.appName || 'POS Terminal'} />
                 <POSHeader
                     userProfile={userProfile}
