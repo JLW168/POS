@@ -15746,6 +15746,11 @@
         
         const totalAmount = useMemo(() => items.reduce((sum, item) => sum + (item.cost * item.quantity), 0), [items]);
 
+        // Live O(1) product lookup map so On Hand QTY updates in real time whenever shopId or stock changes
+        const productMap = useMemo(() => {
+            return new Map((products || []).map(p => [p.id, p]));
+        }, [products]);
+
         const filteredPoItems = useMemo(() => {
             const indexedItems = items.map((item, idx) => ({ ...item, originalIndex: idx }));
             if (!poItemsSearch.trim()) return indexedItems;
@@ -15912,12 +15917,22 @@
                             />
                             {searchResults.length > 0 && (
                                 <div className="absolute z-20 w-full bg-slate-800 border border-slate-600 rounded-md mt-1 shadow-lg max-h-60 overflow-y-auto">
-                                    {searchResults.map(p => (
-                                        <div key={p.id} onClick={() => selectProduct(p)} className="p-2 cursor-pointer hover:bg-slate-700 border-b border-slate-700/50 last:border-0">
-                                            <p className="font-semibold text-slate-200 text-xs md:text-sm">{p.name}</p>
-                                            <p className="text-[11px] text-slate-400">Code: {p.code} | Barcode: {p.barcode || 'N/A'} | Cost: ៛{khrFormatter.format(p.cost)}</p>
-                                        </div>
-                                    ))}
+                                    {searchResults.map(p => {
+                                        const liveStock = shopId ? (Number(p.stockByShop?.[shopId]) || 0) : null;
+                                        return (
+                                            <div key={p.id} onClick={() => selectProduct(p)} className="p-2 cursor-pointer hover:bg-slate-700 border-b border-slate-700/50 last:border-0">
+                                                <p className="font-semibold text-slate-200 text-xs md:text-sm">{p.name}</p>
+                                                <p className="text-[11px] text-slate-400">
+                                                    Code: {p.code} | Barcode: {p.barcode || 'N/A'} | Cost: ៛{khrFormatter.format(p.cost)}
+                                                    {liveStock !== null && (
+                                                        <span className={`ml-1.5 font-bold ${liveStock <= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                                                            | On Hand: {khrFormatter.format(liveStock)}
+                                                        </span>
+                                                    )}
+                                                </p>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -15982,6 +15997,7 @@
                                     <th className="px-2 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Barcode</th>
                                     <th className="px-2 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
                                     <th className="px-2 py-3 text-left text-xs font-semibold text-slate-400 uppercase">Vendor</th>
+                                    <th className="px-2 py-3 text-center text-xs font-semibold text-cyan-400 uppercase">On Hand QTY</th>
                                     <th className="px-2 py-3 text-center text-xs font-semibold text-slate-400 uppercase">QTY</th>
                                     <th className="px-2 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Price (៛)</th>
                                     <th className="px-2 py-3 text-right text-xs font-semibold text-slate-400 uppercase">Cost (៛)</th>
@@ -15991,28 +16007,55 @@
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-700">
-                                {filteredPoItems.map((item) => (
-                                    <tr key={item.originalIndex} className="hover:bg-slate-700/50">
-                                        <td className="px-2 py-2 text-sm text-slate-400">{item.originalIndex + 1}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300">{item.code}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300">{item.barcode || ''}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300">{item.name}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-400">{item.vendorName}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300 text-center">{item.quantity}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.price || 0)}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.cost)}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.cost * item.quantity)}</td>
-                                        <td className="px-2 py-2 text-sm text-slate-300">{item.note || ''}</td>
-                                        <td className="px-2 py-2 text-center space-x-4">
-                                            <button type="button" onClick={() => handleEditItem(item.originalIndex)} className="text-blue-400 hover:text-blue-300"><i className="fas fa-edit"></i></button>
-                                            <button type="button" onClick={() => handleRemoveItem(item.originalIndex)} className="text-red-500 hover:text-red-400"><i className="fas fa-trash"></i></button>
-                                        </td>
-                                    </tr>
-                                ))}
+                                {filteredPoItems.map((item) => {
+                                    const liveProduct = productMap.get(item.productId) || (products || []).find(p => p.code && p.code === item.code);
+                                    const hasShopSelected = !!shopId;
+                                    const onHandQty = hasShopSelected ? (Number(liveProduct?.stockByShop?.[shopId]) || 0) : null;
+                                    const minStock = (hasShopSelected && liveProduct) ? getEffectiveShopMinStock(liveProduct, shopId) : 0;
+                                    const isOutOfStock = hasShopSelected && onHandQty <= 0;
+                                    const isLowStock = hasShopSelected && onHandQty > 0 && minStock > 0 && onHandQty < minStock;
+
+                                    return (
+                                        <tr key={item.originalIndex} className="hover:bg-slate-700/50">
+                                            <td className="px-2 py-2 text-sm text-slate-400">{item.originalIndex + 1}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300">{item.code}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300">{item.barcode || ''}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300">{item.name}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-400">{item.vendorName}</td>
+                                            <td className="px-2 py-2 text-sm text-center">
+                                                {hasShopSelected ? (
+                                                    <span
+                                                        className={`inline-flex items-center justify-center px-2 py-0.5 rounded-md font-mono text-xs font-bold border ${
+                                                            isOutOfStock
+                                                                ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                                                                : isLowStock
+                                                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                                                    : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                        }`}
+                                                        title={`Live On Hand QTY${minStock > 0 ? ` (Min Alert: ${minStock})` : ''}`}
+                                                    >
+                                                        {khrFormatter.format(onHandQty)}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-slate-500 italic" title="Select a Shop to view live On Hand QTY">-</span>
+                                                )}
+                                            </td>
+                                            <td className="px-2 py-2 text-sm text-slate-200 font-semibold text-center">{item.quantity}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.price || 0)}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.cost)}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300 text-right">{khrFormatter.format(item.cost * item.quantity)}</td>
+                                            <td className="px-2 py-2 text-sm text-slate-300">{item.note || ''}</td>
+                                            <td className="px-2 py-2 text-center space-x-4">
+                                                <button type="button" onClick={() => handleEditItem(item.originalIndex)} className="text-blue-400 hover:text-blue-300"><i className="fas fa-edit"></i></button>
+                                                <button type="button" onClick={() => handleRemoveItem(item.originalIndex)} className="text-red-500 hover:text-red-400"><i className="fas fa-trash"></i></button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                             <tfoot className="bg-slate-900/50">
                                 <tr>
-                                    <td colSpan="8" className="px-2 py-3 text-right text-sm font-bold text-slate-300 uppercase">Grand Total</td>
+                                    <td colSpan="9" className="px-2 py-3 text-right text-sm font-bold text-slate-300 uppercase">Grand Total</td>
                                     <td className="px-2 py-3 text-right text-sm font-bold text-slate-200">៛{khrFormatter.format(totalAmount)}</td>
                                     <td colSpan="2"></td>
                                 </tr>
