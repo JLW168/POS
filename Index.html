@@ -506,7 +506,50 @@
                 --sab: env(safe-area-inset-bottom, 0px);
                 --sal: env(safe-area-inset-left, 0px);
                 --sar: env(safe-area-inset-right, 0px);
-                --app-height: 100dvh;
+                --app-height: 100%;
+            }
+            html {
+                height: 100%;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+                overflow: hidden;
+                background-color: #0f172a;
+            }
+            body, #root {
+                position: fixed;
+                inset: 0;
+                height: 100%;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+                overflow: hidden;
+            }
+            body {
+                background-color: #0f172a; /* bg-slate-900 */
+                -webkit-font-smoothing: antialiased;
+                -moz-osx-font-smoothing: grayscale;
+                overflow-x: hidden; /* Prevent horizontal scroll on the body */
+                overscroll-behavior: none; /* Prevent rubber-band bounce gaps on mobile/PWA */
+                -webkit-tap-highlight-color: transparent;
+            }
+            /* Safe-area utility helpers for edge-to-edge mobile full-screen Header & Footer */
+            .safe-top {
+                padding-top: var(--sat);
+            }
+            .safe-bottom {
+                padding-bottom: var(--sab);
+            }
+            .safe-x {
+                padding-left: var(--sal);
+                padding-right: var(--sar);
+            }
+            /* Compact edge-to-edge mobile footer safe-area (eliminates oversized bottom gap on iOS PWA) */
+            .mobile-footer-safe {
+                padding-top: 0.5rem;
+                padding-bottom: max(0.5rem, min(env(safe-area-inset-bottom, 0px), 18px));
+                padding-left: max(0.625rem, env(safe-area-inset-left, 0px));
+                padding-right: max(0.625rem, env(safe-area-inset-right, 0px));
             }
             html, body, #root {
                 height: 100%;
@@ -673,24 +716,39 @@
         <script>
             // ====================================================================
             // FLEXI FULL-SCREEN MOBILE VIEWPORT ENGINE (iOS Safari / Android / PWA)
-            // Dynamically tracks window.visualViewport height so collapsing address
-            // bars, notches, and on-screen keyboards never create dead gaps or clip
-            // the mobile Header & Footer.
+            // Uses true edge-to-edge 100% height in standalone "Add to Home Screen"
+            // mode (fixing the iOS WebKit visualViewport bottom-gap bug), and only
+            // shrinks height dynamically when the on-screen keyboard is open.
             // ====================================================================
             (function initFlexiMobileViewport() {
+                const isStandalonePWA = () =>
+                    window.navigator.standalone === true ||
+                    window.matchMedia('(display-mode: standalone)').matches;
+
                 const syncViewportHeight = () => {
                     try {
-                        const vh = (window.visualViewport && window.visualViewport.height)
-                            ? Math.round(window.visualViewport.height)
-                            : window.innerHeight;
-                        if (vh > 0) {
-                            document.documentElement.style.setProperty('--app-height', `${vh}px`);
+                        const vv = window.visualViewport;
+                        const layoutH = window.innerHeight || document.documentElement.clientHeight;
+                        const vvH = vv && vv.height ? Math.round(vv.height) : layoutH;
+                        const isKeyboardOpen = vv && layoutH > 0 && (layoutH - vvH) > 120;
+
+                        if (isKeyboardOpen) {
+                            // Shrink cleanly above the active virtual keyboard
+                            document.documentElement.style.setProperty('--app-height', `${vvH}px`);
+                        } else if (isStandalonePWA()) {
+                            // In iOS/Android standalone PWA, let fixed inset-0 fill 100% of the physical display
+                            document.documentElement.style.setProperty('--app-height', '100%');
+                        } else if (vvH > 0) {
+                            document.documentElement.style.setProperty('--app-height', `${vvH}px`);
+                        } else {
+                            document.documentElement.style.setProperty('--app-height', '100%');
                         }
                     } catch (e) {}
                 };
                 syncViewportHeight();
                 window.addEventListener('resize', syncViewportHeight, { passive: true });
-                window.addEventListener('orientationchange', () => setTimeout(syncViewportHeight, 120), { passive: true });
+                window.addEventListener('orientationchange', () => setTimeout(syncViewportHeight, 150), { passive: true });
+                window.addEventListener('pageshow', () => setTimeout(syncViewportHeight, 100), { passive: true });
                 if (window.visualViewport) {
                     window.visualViewport.addEventListener('resize', syncViewportHeight, { passive: true });
                 }
@@ -9434,7 +9492,7 @@
                 </div>
 
                 {/* FLEXI EDGE-TO-EDGE MOBILE FOOTER (Catalog, Ticket & Checkout) */}
-                <footer className="md:hidden shrink-0 w-full bg-slate-900/95 backdrop-blur-xl border-t border-slate-700/90 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom,0px))] pl-[max(0.625rem,env(safe-area-inset-left,0px))] pr-[max(0.625rem,env(safe-area-inset-right,0px))] z-30 shadow-[0_-8px_24px_rgba(0,0,0,0.45)]">
+                <footer className="md:hidden shrink-0 w-full bg-slate-900/95 backdrop-blur-xl border-t border-slate-700/90 mobile-footer-safe z-30 shadow-[0_-8px_24px_rgba(0,0,0,0.45)]">
                     <div className="grid grid-cols-12 gap-2 items-stretch max-w-screen-md mx-auto">
                         {/* 1. Catalog Button */}
                         <button
@@ -36468,7 +36526,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
             <SearchProvider>
                 <div
                     className="fixed inset-0 w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden"
-                    style={{ height: 'var(--app-height, 100dvh)' }}
+                    style={{ height: 'var(--app-height, 100%)' }}
                 >
                     {isSidebarOpen && (
                         <div
