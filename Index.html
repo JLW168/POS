@@ -27360,95 +27360,111 @@
         };
 
         return (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 flex-1 min-w-0">
+            <div className="grid grid-cols-2 gap-2.5 sm:gap-4 w-full">
                 {/* 1. Search by Product Name, Code, or Barcode */}
-                <div className="relative min-w-0">
-                    <input 
-                        type="text" 
-                        placeholder="Search by product name, code, or barcode..." 
-                        value={searchTerm} 
-                        onChange={(e) => setSearchTerm(e.target.value)} 
-                        className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none h-[40px]"
-                    />
-                    <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-                    {searchTerm && (
-                        <button
-                            type="button"
-                            onClick={() => setSearchTerm('')}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                            title="Clear Product Search"
-                        >
-                            <i className="fas fa-times-circle text-xs"></i>
-                        </button>
-                    )}
+                <div className="min-w-0">
+                    <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5 truncate">
+                        <i className="fas fa-search text-blue-400 mr-1.5"></i>Search by Product Name / Code
+                    </label>
+                    <div className="relative">
+                        <input 
+                            type="text" 
+                            placeholder="Search by product name, code, or barcode..." 
+                            value={searchTerm} 
+                            onChange={(e) => setSearchTerm(e.target.value)} 
+                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none h-[40px]"
+                        />
+                        <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                        {searchTerm && (
+                            <button
+                                type="button"
+                                onClick={() => setSearchTerm('')}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                title="Clear Product Search"
+                            >
+                                <i className="fas fa-times-circle text-xs"></i>
+                            </button>
+                        )}
+                    </div>
                 </div>
 
-                {/* 2. Merged Search by Category or Vendor */}
-                <div className="relative min-w-0">
-                    <input
-                        type="text"
-                        placeholder="Search by Category or Vendor..."
-                        value={catVendorSearch}
-                        onFocus={() => setIsDropdownOpen(true)}
-                        onBlur={() => setTimeout(() => setIsDropdownOpen(false), 180)}
-                        onChange={(e) => {
-                            setCatVendorSearch(e.target.value);
-                            setSelectedCatVendor(null);
-                            setIsDropdownOpen(true);
-                        }}
-                        className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none h-[40px]"
-                    />
-                    <i className={`fas ${
-                        selectedCatVendor?.type === 'vendor'
-                            ? 'fa-truck text-orange-400'
-                            : selectedCatVendor?.type === 'category'
-                                ? 'fa-tags text-emerald-400'
-                                : 'fa-filter text-emerald-400'
-                    } absolute left-3 top-1/2 -translate-y-1/2 text-xs`}></i>
-
-                    {catVendorSearch && (
-                        <button
-                            type="button"
-                            onClick={() => {
-                                setCatVendorSearch('');
+                {/* 2. Merged Search by Vendor or Category */}
+                <div className="min-w-0">
+                    <label className="block text-xs sm:text-sm font-medium text-slate-300 mb-1.5 truncate">
+                        <i className={`fas ${
+                            selectedCatVendor?.type === 'vendor'
+                                ? 'fa-truck text-orange-400'
+                                : selectedCatVendor?.type === 'category'
+                                    ? 'fa-tags text-emerald-400'
+                                    : 'fa-filter text-emerald-400'
+                        } mr-1.5`}></i>Search by Vendor or Category
+                    </label>
+                    <div className="relative">
+                        <input
+                            type="text"
+                            placeholder="Search by Vendor or Category..."
+                            value={catVendorSearch}
+                            onFocus={() => setIsDropdownOpen(true)}
+                            onBlur={() => setTimeout(() => setIsDropdownOpen(false), 180)}
+                            onChange={(e) => {
+                                setCatVendorSearch(e.target.value);
                                 setSelectedCatVendor(null);
-                                setCatVendorResults([]);
-                                setIsDropdownOpen(false);
+                                setIsDropdownOpen(true);
                             }}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                            title="Clear Category / Vendor Filter"
-                        >
-                            <i className="fas fa-times-circle text-xs"></i>
-                        </button>
-                    )}
+                            className="w-full bg-slate-700 text-slate-100 pl-9 pr-8 py-2 text-xs sm:text-sm border border-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none h-[40px]"
+                        />
+                        <i className={`fas ${
+                            selectedCatVendor?.type === 'vendor'
+                                ? 'fa-truck text-orange-400'
+                                : selectedCatVendor?.type === 'category'
+                                    ? 'fa-tags text-emerald-400'
+                                    : 'fa-filter text-emerald-400'
+                        } absolute left-3 top-1/2 -translate-y-1/2 text-xs`}></i>
 
-                    {isDropdownOpen && catVendorResults.length > 0 && (
-                        <div className="absolute z-30 w-full bg-slate-800 border border-slate-600 rounded-xl mt-1 shadow-2xl max-h-60 overflow-y-auto divide-y divide-slate-700/60">
-                            {catVendorResults.map((item, idx) => (
-                                <div
-                                    key={`${item.type}_${item.id}_${idx}`}
-                                    onMouseDown={() => handleSelectOption(item)}
-                                    className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex items-center justify-between gap-2 text-xs sm:text-sm"
-                                >
-                                    <span className="font-semibold text-slate-200 truncate">{item.name}</span>
-                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0 border ${
-                                        item.type === 'category'
-                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                            : 'bg-orange-500/15 text-orange-300 border-orange-500/30'
-                                    }`}>
-                                        {item.type}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
-                    )}
+                        {catVendorSearch && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setCatVendorSearch('');
+                                    setSelectedCatVendor(null);
+                                    setCatVendorResults([]);
+                                    setIsDropdownOpen(false);
+                                }}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                                title="Clear Vendor / Category Filter"
+                            >
+                                <i className="fas fa-times-circle text-xs"></i>
+                            </button>
+                        )}
+
+                        {isDropdownOpen && catVendorResults.length > 0 && (
+                            <div className="absolute z-30 w-full bg-slate-800 border border-slate-600 rounded-xl mt-1 shadow-2xl max-h-60 overflow-y-auto divide-y divide-slate-700/60">
+                                {catVendorResults.map((item, idx) => (
+                                    <div
+                                        key={`${item.type}_${item.id}_${idx}`}
+                                        onMouseDown={() => handleSelectOption(item)}
+                                        className="px-3 py-2 cursor-pointer hover:bg-slate-700 flex items-center justify-between gap-2 text-xs sm:text-sm"
+                                    >
+                                        <span className="font-semibold text-slate-200 truncate">{item.name}</span>
+                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase shrink-0 border ${
+                                            item.type === 'category'
+                                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                : 'bg-orange-500/15 text-orange-300 border-orange-500/30'
+                                        }`}>
+                                            {item.type}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
         );
     });
 
-    // Component for handling the main action buttons (Compact Icon-Only Toolbar + Shop View Droplist + Live Delta Sync Badge)
-    const ProductActions = memo(({ onAddNew, onBatchStock, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, managedShops = [], focusedShopId = 'ALL', onSelectShopView, productSyncStatus, onForceFullSync }) => {
+    // Component for handling the main action buttons (Compact Icon-Only Toolbar + Live Delta Sync Badge)
+    const ProductActions = memo(({ onAddNew, onBatchStock, onImport, onExport, onTemplate, onDeleteAll, userProfile, isGeneratingCode, productSyncStatus, onForceFullSync }) => {
         const [isImporting, setIsImporting] = useState(false);
         const [isSyncingCloud, setIsSyncingCloud] = useState(false);
         const fileInputRef = useRef(null);
@@ -27504,33 +27520,6 @@
                         <i className={`fas fa-sync-alt text-[10px] ${isFullSyncing ? 'fa-spin text-amber-300' : ''}`}></i>
                     </button>
                 </div>
-
-                {/* Shop View Droplist (Default: All Shop View + Shop 1, Shop 2, ...) */}
-                {managedShops.length > 0 && (
-                    <div className="relative min-w-[170px] sm:min-w-[195px] flex-1 sm:flex-initial">
-                        <i className="fas fa-store text-cyan-400 absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"></i>
-                        <select
-                            value={focusedShopId}
-                            onChange={(e) => onSelectShopView && onSelectShopView(e.target.value)}
-                            className="w-full bg-slate-900 text-slate-100 pl-8 pr-7 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-cyan-500 outline-none text-xs font-bold appearance-none cursor-pointer h-[40px]"
-                            title="Select Shop View"
-                        >
-                            {(userProfile?.role === 'Admin' || managedShops.length > 1) && (
-                                <option value="ALL">
-                                    {userProfile?.role === 'Admin'
-                                        ? `All Shop View (${managedShops.length})`
-                                        : `All Assigned Shops (${managedShops.length})`}
-                                </option>
-                            )}
-                            {managedShops.map((shop) => (
-                                <option key={shop.id} value={shop.id}>
-                                    {shop.name} {Number(shop.saleMargin) > 0 ? `(${shop.saleMargin}%)` : ''}
-                                </option>
-                            ))}
-                        </select>
-                        <i className="fas fa-chevron-down text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
-                    </div>
-                )}
 
                 {/* Compact Icon-Only Action Buttons */}
                 <div className="flex items-center gap-1.5">
@@ -29085,15 +29074,109 @@
                     />
                 )}
 
-                {productModal.show && <ProductModal 
-                    show={true} 
-                    productToEdit={productModal.product} 
-                    mode={productModal.mode}
-                    fifoInfo={productModal.product?.id ? fifoValuationMap.get(productModal.product.id) : null}
-                    userProfile={userProfile}
-                    onSave={handleSaveProduct} 
-                    onClose={() => setProductModal({ show: false, product: null, mode: 'edit' })} 
-                />}
+                {productModal.show && (
+                    <ProductModal
+                        show={productModal.show}
+                        onClose={() => setProductModal({ show: false, product: null })}
+                        productToEdit={productModal.product}
+                        onSave={handleSaveProduct}
+                        mode={productModal.mode}
+                        fifoInfo={productModal.product?.id ? fifoValuationMap.get(productModal.product.id) : null}
+                        userProfile={userProfile}
+                    />
+                )}
+
+                {/* Phase 1 & 2: Upper 2-Column Search Grid + 3-Column Filter Grid Card */}
+                <Card className="p-3 sm:p-4 relative z-20 space-y-3">
+                    <ProductFilters onFilterChange={handleFilterChange} />
+
+                    {/* Phase 2: 3-Column Filter Grid (All Shop View | All Margin Drop List | Clickable Negative Alert) */}
+                    <div className="pt-3 border-t border-slate-700/70 grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3 items-center">
+                        {/* Column 1: All Shop View Filter */}
+                        <div className="relative min-w-0">
+                            <i className="fas fa-store text-cyan-400 absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"></i>
+                            <select
+                                value={focusedShopId}
+                                onChange={(e) => setFocusedShopId(e.target.value)}
+                                disabled={managedShops.length === 0}
+                                className="w-full bg-slate-900 text-slate-100 pl-8 pr-8 py-2 rounded-xl border border-slate-600 focus:ring-2 focus:ring-cyan-500 outline-none text-xs font-bold appearance-none cursor-pointer h-[40px] disabled:opacity-50"
+                                title="Select Shop View"
+                            >
+                                {(userProfile?.role === 'Admin' || managedShops.length !== 1) && (
+                                    <option value="ALL">
+                                        {userProfile?.role === 'Admin'
+                                            ? `All Shop View (${managedShops.length})`
+                                            : `All Assigned Shops (${managedShops.length})`}
+                                    </option>
+                                )}
+                                {managedShops.map((shop) => (
+                                    <option key={shop.id} value={shop.id}>
+                                        {shop.name} {Number(shop.saleMargin) > 0 ? `(${shop.saleMargin}%)` : ''}
+                                    </option>
+                                ))}
+                            </select>
+                            <i className="fas fa-chevron-down text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
+                        </div>
+
+                        {/* Column 2: All Margin Drop List Filter */}
+                        <div className="relative min-w-0">
+                            <i className={`fas ${
+                                marginFilter === 'UPPER'
+                                    ? 'fa-arrow-trend-up text-emerald-400'
+                                    : marginFilter === 'UNDER'
+                                        ? 'fa-arrow-trend-down text-amber-400'
+                                        : marginFilter === 'NEGATIVE'
+                                            ? 'fa-exclamation-circle text-red-400'
+                                            : 'fa-filter text-blue-400'
+                            } absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none`}></i>
+                            <select
+                                value={marginFilter}
+                                onChange={(e) => setMarginFilter(e.target.value)}
+                                className={`w-full bg-slate-900 pl-8 pr-8 py-2 rounded-xl border text-xs font-bold appearance-none cursor-pointer outline-none h-[40px] transition ${
+                                    marginFilter === 'UPPER'
+                                        ? 'text-emerald-300 border-emerald-500/50 focus:ring-2 focus:ring-emerald-500'
+                                        : marginFilter === 'UNDER'
+                                            ? 'text-amber-300 border-amber-500/50 focus:ring-2 focus:ring-amber-500'
+                                            : marginFilter === 'NEGATIVE'
+                                                ? 'text-red-300 border-red-500/50 focus:ring-2 focus:ring-red-500'
+                                                : 'text-slate-100 border-slate-600 focus:ring-2 focus:ring-blue-500'
+                                }`}
+                                title={`Filter products by Sale Margin (${activeShopMarginLabel.detail}: ${activeShopMarginLabel.label})`}
+                            >
+                                <option value="ALL">All Margins ({marginFilterCounts.all})</option>
+                                <option value="UPPER">Upper Margin (&ge; {activeShopMarginLabel.label}) — {marginFilterCounts.upper}</option>
+                                <option value="UNDER">Under Margin (&lt; {activeShopMarginLabel.label}) — {marginFilterCounts.under}</option>
+                                <option value="NEGATIVE">Negative Margin (&lt; 0%) — {marginFilterCounts.negative}</option>
+                            </select>
+                            <i className="fas fa-chevron-down text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
+                        </div>
+
+                        {/* Column 3: Clickable {n} Negative Alert Button */}
+                        <button
+                            type="button"
+                            onClick={() => setMarginFilter(prev => (prev === 'NEGATIVE' ? 'ALL' : 'NEGATIVE'))}
+                            className={`w-full h-[40px] px-3.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-2 transition active:scale-[0.98] ${
+                                marginFilter === 'NEGATIVE'
+                                    ? 'bg-red-600 hover:bg-red-500 text-white border-red-400 shadow-lg shadow-red-900/40'
+                                    : marginFilterCounts.negative > 0
+                                        ? 'bg-red-500/15 hover:bg-red-500/25 text-red-300 border-red-500/40'
+                                        : 'bg-slate-900/80 hover:bg-slate-800 text-emerald-300 border-emerald-500/30'
+                            }`}
+                            title={marginFilter === 'NEGATIVE' ? 'Click to show all margins' : 'Click to filter products with Negative Margin (< 0%)'}
+                        >
+                            <i className={`fas ${
+                                marginFilter === 'NEGATIVE'
+                                    ? 'fa-times-circle'
+                                    : marginFilterCounts.negative > 0
+                                        ? 'fa-exclamation-triangle animate-pulse'
+                                        : 'fa-check-circle text-emerald-400'
+                            } text-xs`}></i>
+                            <span className="font-mono truncate">
+                                {marginFilterCounts.negative} Negative Alert
+                            </span>
+                        </button>
+                    </div>
+                </Card>
 
                 <TableCard title={
                     <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
@@ -29103,9 +29186,8 @@
                         </span>
                     </div>
                 }>
-                    {/* Unified Top Filter & Action Bar: 2-Column Search Grid + Shop View Droplist + Icon-Only Actions */}
-                    <div className="mb-3 pb-3 border-b border-slate-700/80 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-2.5">
-                        <ProductFilters onFilterChange={handleFilterChange} />
+                    {/* Action Bar: Sync Status + Icon-Only Actions */}
+                    <div className="mb-3 pb-3 border-b border-slate-700/80 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5">
                         <ProductActions 
                             onAddNew={handleAddNew}
                             onBatchStock={() => setModal({ type: 'batch-stock-adjust', data: focusedShopId !== 'ALL' ? focusedShopId : '' })}
@@ -29115,9 +29197,6 @@
                             onDeleteAll={() => setModal({ type: 'confirmDeleteAll', title: 'DANGER: Delete All Products', message: 'Are you sure you want to delete ALL products? This cannot be undone.'})}
                             userProfile={userProfile}
                             isGeneratingCode={isGeneratingCode}
-                            managedShops={managedShops}
-                            focusedShopId={focusedShopId}
-                            onSelectShopView={setFocusedShopId}
                             productSyncStatus={productSyncStatus}
                             onForceFullSync={async () => {
                                 const res = await forceFullProductSync();
@@ -29129,76 +29208,6 @@
                                 }
                             }}
                         />
-                    </div>
-
-                    {/* Sale Margin Filter Bar (Upper >= Shop Target vs Under < Shop Target) */}
-                    {/* Sale Margin Droplist Filter Bar (All / Upper >= Target / Under < Target / Negative < 0%) */}
-                    <div className="mb-4 pb-3 border-b border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                            <span className="font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                                <i className="fas fa-percentage text-cyan-400"></i>
-                                <span>Sale Margin Filter</span>
-                            </span>
-                            <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700 font-mono text-[11px] text-cyan-300 font-bold">
-                                {activeShopMarginLabel.detail}: {activeShopMarginLabel.label}
-                            </span>
-                            {marginFilterCounts.negative > 0 && marginFilter !== 'NEGATIVE' && (
-                                <button
-                                    type="button"
-                                    onClick={() => setMarginFilter('NEGATIVE')}
-                                    className="px-2 py-0.5 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/40 font-mono text-[11px] text-red-300 font-bold transition flex items-center gap-1"
-                                    title="Quick filter products with Negative Margin (< 0%)"
-                                >
-                                    <i className="fas fa-exclamation-triangle text-[10px]"></i>
-                                    <span>{marginFilterCounts.negative} Negative</span>
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="flex items-center gap-2 w-full sm:w-auto">
-                            <div className="relative flex-1 sm:flex-initial sm:min-w-[270px]">
-                                <i className={`fas ${
-                                    marginFilter === 'UPPER'
-                                        ? 'fa-arrow-trend-up text-emerald-400'
-                                        : marginFilter === 'UNDER'
-                                            ? 'fa-arrow-trend-down text-amber-400'
-                                            : marginFilter === 'NEGATIVE'
-                                                ? 'fa-exclamation-circle text-red-400'
-                                                : 'fa-filter text-blue-400'
-                                } absolute left-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none`}></i>
-                                <select
-                                    value={marginFilter}
-                                    onChange={(e) => setMarginFilter(e.target.value)}
-                                    className={`w-full bg-slate-900 pl-8 pr-8 py-2 rounded-xl border text-xs font-bold appearance-none cursor-pointer outline-none h-[38px] transition ${
-                                        marginFilter === 'UPPER'
-                                            ? 'text-emerald-300 border-emerald-500/50 focus:ring-2 focus:ring-emerald-500'
-                                            : marginFilter === 'UNDER'
-                                                ? 'text-amber-300 border-amber-500/50 focus:ring-2 focus:ring-amber-500'
-                                                : marginFilter === 'NEGATIVE'
-                                                    ? 'text-red-300 border-red-500/50 focus:ring-2 focus:ring-red-500'
-                                                    : 'text-slate-100 border-slate-600 focus:ring-2 focus:ring-blue-500'
-                                    }`}
-                                    title="Filter products by Sale Margin against Shop Target"
-                                >
-                                    <option value="ALL">All Margins ({marginFilterCounts.all})</option>
-                                    <option value="UPPER">Upper Margin (&ge; {activeShopMarginLabel.label}) — {marginFilterCounts.upper}</option>
-                                    <option value="UNDER">Under Margin (&lt; {activeShopMarginLabel.label}) — {marginFilterCounts.under}</option>
-                                    <option value="NEGATIVE">Negative Margin (&lt; 0%) — {marginFilterCounts.negative}</option>
-                                </select>
-                                <i className="fas fa-chevron-down text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 text-[10px] pointer-events-none"></i>
-                            </div>
-
-                            {marginFilter !== 'ALL' && (
-                                <button
-                                    type="button"
-                                    onClick={() => setMarginFilter('ALL')}
-                                    className="h-[38px] px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-600 text-xs font-bold transition shrink-0"
-                                    title="Reset Sale Margin Filter"
-                                >
-                                    <i className="fas fa-times"></i>
-                                </button>
-                            )}
-                        </div>
                     </div>
                     {dataLoading ? (
                         <div className="flex justify-center p-8"><div className="loader"></div></div>
