@@ -506,11 +506,17 @@
                 --sab: env(safe-area-inset-bottom, 0px);
                 --sal: env(safe-area-inset-left, 0px);
                 --sar: env(safe-area-inset-right, 0px);
-                --app-height: 100%;
+                --app-height: 100dvh;
+            }
+            @media all and (display-mode: standalone) {
+                :root {
+                    --app-height: 100vh;
+                }
             }
             html {
-                height: 100%;
                 width: 100%;
+                height: var(--app-height, 100vh);
+                min-height: 100vh;
                 margin: 0;
                 padding: 0;
                 overflow: hidden;
@@ -518,9 +524,11 @@
             }
             body, #root {
                 position: fixed;
-                inset: 0;
-                height: 100%;
+                top: 0;
+                left: 0;
+                right: 0;
                 width: 100%;
+                height: var(--app-height, 100vh);
                 margin: 0;
                 padding: 0;
                 overflow: hidden;
@@ -546,37 +554,10 @@
             }
             /* Compact edge-to-edge mobile footer safe-area (eliminates oversized bottom gap on iOS PWA) */
             .mobile-footer-safe {
-                padding-top: 0.5rem;
-                padding-bottom: max(0.5rem, min(env(safe-area-inset-bottom, 0px), 18px));
+                padding-top: 0.45rem;
+                padding-bottom: max(0.5rem, min(env(safe-area-inset-bottom, 0px), 16px));
                 padding-left: max(0.625rem, env(safe-area-inset-left, 0px));
                 padding-right: max(0.625rem, env(safe-area-inset-right, 0px));
-            }
-            html, body, #root {
-                height: 100%;
-                height: var(--app-height, 100dvh);
-                width: 100%;
-                margin: 0;
-                padding: 0;
-                overflow: hidden;
-            }
-            body {
-                background-color: #0f172a; /* bg-slate-900 */
-                -webkit-font-smoothing: antialiased;
-                -moz-osx-font-smoothing: grayscale;
-                overflow-x: hidden; /* Prevent horizontal scroll on the body */
-                overscroll-behavior: none; /* Prevent rubber-band bounce gaps on mobile/PWA */
-                -webkit-tap-highlight-color: transparent;
-            }
-            /* Safe-area utility helpers for edge-to-edge mobile full-screen Header & Footer */
-            .safe-top {
-                padding-top: var(--sat);
-            }
-            .safe-bottom {
-                padding-bottom: var(--sab);
-            }
-            .safe-x {
-                padding-left: var(--sal);
-                padding-right: var(--sar);
             }
             /* Custom utility to hide scrollbars */
             .no-scrollbar::-webkit-scrollbar {
@@ -701,7 +682,7 @@
     <body>
         <div id="root">
             <!-- 0ms Instant Native PWA Boot Splash (Eliminates blank screen while Babel & scripts initialize) -->
-            <div style="min-height: 100dvh; background: radial-gradient(circle at 50% 25%, #1e293b 0%, #0f172a 70%); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f8fafc; user-select: none;">
+            <div style="min-height: var(--app-height, 100vh); background: radial-gradient(circle at 50% 25%, #1e293b 0%, #0f172a 70%); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f8fafc; user-select: none;">
                 <div style="width: 76px; height: 76px; border-radius: 20px; background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #0f172a 100%); display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 20px 45px rgba(37, 99, 235, 0.32), inset 0 1px 1px rgba(255, 255, 255, 0.25); border: 1px solid rgba(96, 165, 250, 0.35); margin-bottom: 1.25rem;">
                     <span style="font-size: 22px; font-weight: 900; letter-spacing: 0.04em; color: #ffffff; line-height: 1;">POS</span>
                     <span style="margin-top: 4px; padding: 2px 7px; border-radius: 999px; background: #10b981; color: #052e16; font-size: 8px; font-weight: 900; letter-spacing: 0.08em;">TERMINAL</span>
@@ -716,39 +697,60 @@
         <script>
             // ====================================================================
             // FLEXI FULL-SCREEN MOBILE VIEWPORT ENGINE (iOS Safari / Android / PWA)
-            // Uses true edge-to-edge 100% height in standalone "Add to Home Screen"
-            // mode (fixing the iOS WebKit visualViewport bottom-gap bug), and only
-            // shrinks height dynamically when the on-screen keyboard is open.
+            // Resolves the iOS WebKit Standalone ("Add to Home Screen") bug where
+            // 100%, 100dvh, and window.innerHeight are shorter than the physical
+            // screen by the status-bar height (~59px), leaving a blank bottom gap.
             // ====================================================================
             (function initFlexiMobileViewport() {
                 const isStandalonePWA = () =>
                     window.navigator.standalone === true ||
                     window.matchMedia('(display-mode: standalone)').matches;
 
+                const isIPhone = () => /iPhone|iPod/i.test(navigator.userAgent || '');
+
+                const getExpectedStandaloneHeight = () => {
+                    const isPortrait = window.matchMedia('(orientation: portrait)').matches || window.innerHeight >= window.innerWidth;
+                    const sw = window.screen?.width || 0;
+                    const sh = window.screen?.height || 0;
+                    if (!sw || !sh) return 0;
+                    return isPortrait ? Math.max(sh, sw) : Math.min(sh, sw);
+                };
+
                 const syncViewportHeight = () => {
                     try {
                         const vv = window.visualViewport;
-                        const layoutH = window.innerHeight || document.documentElement.clientHeight;
+                        const layoutH = window.innerHeight || document.documentElement.clientHeight || 0;
                         const vvH = vv && vv.height ? Math.round(vv.height) : layoutH;
-                        const isKeyboardOpen = vv && layoutH > 0 && (layoutH - vvH) > 120;
+                        const standalone = isStandalonePWA();
+                        const expectedScreenH = standalone && isIPhone() ? getExpectedStandaloneHeight() : 0;
+                        const baseH = Math.max(layoutH, expectedScreenH);
+                        const isKeyboardOpen = vv && baseH > 0 && (baseH - vvH) > 130;
 
                         if (isKeyboardOpen) {
                             // Shrink cleanly above the active virtual keyboard
                             document.documentElement.style.setProperty('--app-height', `${vvH}px`);
-                        } else if (isStandalonePWA()) {
-                            // In iOS/Android standalone PWA, let fixed inset-0 fill 100% of the physical display
-                            document.documentElement.style.setProperty('--app-height', '100%');
+                            window.scrollTo(0, 0);
+                        } else if (standalone) {
+                            // On iPhone standalone PWA, force exact physical display height if WebKit clips 100%/innerHeight
+                            if (expectedScreenH > 0 && layoutH > 0 && (expectedScreenH - layoutH) > 15 && (expectedScreenH - layoutH) < 140) {
+                                document.documentElement.style.setProperty('--app-height', `${expectedScreenH}px`);
+                            } else {
+                                document.documentElement.style.setProperty('--app-height', '100vh');
+                            }
+                            window.scrollTo(0, 0);
                         } else if (vvH > 0) {
                             document.documentElement.style.setProperty('--app-height', `${vvH}px`);
                         } else {
-                            document.documentElement.style.setProperty('--app-height', '100%');
+                            document.documentElement.style.setProperty('--app-height', '100dvh');
                         }
                     } catch (e) {}
                 };
+
                 syncViewportHeight();
                 window.addEventListener('resize', syncViewportHeight, { passive: true });
                 window.addEventListener('orientationchange', () => setTimeout(syncViewportHeight, 150), { passive: true });
                 window.addEventListener('pageshow', () => setTimeout(syncViewportHeight, 100), { passive: true });
+                window.addEventListener('focusout', () => setTimeout(syncViewportHeight, 120), { passive: true });
                 if (window.visualViewport) {
                     window.visualViewport.addEventListener('resize', syncViewportHeight, { passive: true });
                 }
@@ -36525,8 +36527,8 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         return (
             <SearchProvider>
                 <div
-                    className="fixed inset-0 w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden"
-                    style={{ height: 'var(--app-height, 100%)' }}
+                    className="fixed top-0 left-0 right-0 w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden"
+                    style={{ height: 'var(--app-height, 100vh)' }}
                 >
                     {isSidebarOpen && (
                         <div
