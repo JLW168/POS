@@ -501,6 +501,12 @@
 
         <!-- Custom Styles -->
         <style>
+            html, body, #root {
+                height: 100%;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+            }
             body {
                 background-color: #0f172a; /* bg-slate-900 */
                 -webkit-font-smoothing: antialiased;
@@ -8568,7 +8574,7 @@
                 )}
 
                 {/* Main Split Workspace */}
-                <div className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden pb-[74px] md:pb-0">
+                <div className="flex-1 flex flex-col md:flex-row gap-3 min-h-0 overflow-hidden">
                     {/* LEFT: Product Catalog Panel */}
                     <div className={`flex-1 flex flex-col bg-slate-800 rounded-xl border border-slate-700/80 shadow-lg overflow-hidden min-w-0 ${activeMobileTab === 'products' ? 'flex' : 'hidden md:flex'}`}>
                         {/* Top Toolbar: Search Input + Locked Shop Selector + Action Buttons */}
@@ -9367,19 +9373,19 @@
                 </div>
 
                 {/* STICKY 3-ACTION MOBILE FOOTER (Catalog, Ticket & Checkout) */}
-                <footer className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2.5 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] z-40 shadow-[0_-8px_24px_rgba(0,0,0,0.55)]">
+                <footer className="md:hidden shrink-0 -mx-1.5 mt-1.5 bg-slate-900/95 backdrop-blur-md border-t border-slate-700/90 px-2.5 pt-1.5 pb-[max(0.5rem,calc(env(safe-area-inset-bottom)-14px))] z-30 shadow-[0_-6px_18px_rgba(0,0,0,0.45)]">
                     <div className="grid grid-cols-12 gap-2 items-stretch max-w-screen-md mx-auto">
                         {/* 1. Catalog Button */}
                         <button
                             type="button"
                             onClick={() => setActiveMobileTab('products')}
-                            className={`col-span-3 flex flex-col items-center justify-center py-2 px-1 rounded-xl border transition-all active:scale-95 ${
+                            className={`col-span-3 flex flex-col items-center justify-center py-1.5 px-1 rounded-xl border transition-all active:scale-95 ${
                                 activeMobileTab === 'products'
                                     ? 'bg-blue-600 text-white border-blue-400 shadow-md shadow-blue-900/40'
                                     : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:text-white'
                             }`}
                         >
-                            <i className="fas fa-th-large text-sm mb-1"></i>
+                            <i className="fas fa-th-large text-sm mb-0.5"></i>
                             <span className="text-[11px] font-bold leading-none">Catalog</span>
                         </button>
 
@@ -9406,7 +9412,7 @@
                                 </div>
                                 <span className="text-[11px] font-bold leading-none ml-1">Ticket</span>
                             </div>
-                            <span className={`text-[10px] font-mono font-black mt-1 truncate max-w-full ${
+                            <span className={`text-[10px] font-mono font-black mt-0.5 truncate max-w-full ${
                                 activeMobileTab === 'cart' ? 'text-amber-300' : 'text-emerald-400'
                             }`}>
                                 ៛{khrFormatter.format(cartTotal)}
@@ -9424,7 +9430,7 @@
                                     setShowPaymentModal(true);
                                 }
                             }}
-                            className={`col-span-5 flex flex-col items-center justify-center py-2 px-2 rounded-xl font-black transition-all active:scale-95 ${
+                            className={`col-span-5 flex flex-col items-center justify-center py-1.5 px-2 rounded-xl font-black transition-all active:scale-95 ${
                                 !currentShift
                                     ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-lg shadow-amber-900/30'
                                     : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:border disabled:border-slate-700 text-white shadow-lg shadow-emerald-900/30'
@@ -26020,7 +26026,7 @@
         const [searchTerm, setSearchTerm] = useState('');
         const [vendorFilter, setVendorFilter] = useState('');
         const [categoryFilter, setCategoryFilter] = useState('');
-        const [onlyChanged, setOnlyChanged] = useState(false);
+        const [quickFilter, setQuickFilter] = useState('all'); // 'all' | 'zero' | 'changed'
         const [onlyAssignedToShop, setOnlyAssignedToShop] = useState(true);
 
         // Pending quantity inputs: { [productId]: string } and optional per-item Excel notes
@@ -26030,9 +26036,10 @@
         const [isSubmitting, setIsSubmitting] = useState(false);
         const [progressText, setProgressText] = useState('');
         const [modalInfo, setModalInfo] = useState({ show: false, title: '', message: '', isError: false });
-        const [showMobileOptions, setShowMobileOptions] = useState(false);
+        const [showMobileConfig, setShowMobileConfig] = useState(false);
         const [showMobileFilters, setShowMobileFilters] = useState(false);
         const excelInputRef = useRef(null);
+        const searchInputRef = useRef(null);
 
         useEffect(() => {
             if (managedShops.length > 0 && (!shopId || !managedShops.some(s => s.id === shopId))) {
@@ -26094,6 +26101,14 @@
             return list;
         }, [products, qtyInputs, itemNotes, computeChangeForProduct]);
 
+        // Count of zero-stock items for quick Opening Stock filtering
+        const zeroStockCount = useMemo(() => {
+            return (products || []).filter(p => {
+                if (onlyAssignedToShop && shopId && !isProductAvailableForShop(p, shopId)) return false;
+                return (Number(p?.stockByShop?.[shopId]) || 0) <= 0;
+            }).length;
+        }, [products, onlyAssignedToShop, shopId]);
+
         // Filtered products for Bulk Grid Editor
         const filteredGridProducts = useMemo(() => {
             const q = searchTerm.trim().toLowerCase();
@@ -26102,7 +26117,8 @@
                     if (onlyAssignedToShop && shopId && !isProductAvailableForShop(p, shopId)) return false;
                     if (vendorFilter && p.vendorId !== vendorFilter) return false;
                     if (categoryFilter && (p.category || p.categoryName || '').trim() !== categoryFilter) return false;
-                    if (onlyChanged) {
+                    if (quickFilter === 'zero' && (Number(p?.stockByShop?.[shopId]) || 0) > 0) return false;
+                    if (quickFilter === 'changed') {
                         const calc = computeChangeForProduct(p, qtyInputs[p.id]);
                         if (!calc.hasInput || calc.delta === 0) return false;
                     }
@@ -26114,7 +26130,7 @@
                     );
                 })
                 .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-        }, [products, searchTerm, vendorFilter, categoryFilter, onlyChanged, onlyAssignedToShop, shopId, qtyInputs, computeChangeForProduct]);
+        }, [products, searchTerm, vendorFilter, categoryFilter, quickFilter, onlyAssignedToShop, shopId, qtyInputs, computeChangeForProduct]);
 
         const handleQtyInputChange = (productId, val) => {
             if (val === '') {
@@ -26139,6 +26155,58 @@
                 : (actionType === 'set' ? currentStock : 0);
             const nextVal = Math.max(0, baseVal + step);
             setQtyInputs(prev => ({ ...prev, [prod.id]: String(nextVal) }));
+        };
+
+        // Quick 1-tap preset for Stock Count vs Opening Stock workflows
+        const applyOperationPreset = (preset) => {
+            setInputTab('grid');
+            if (preset === 'count') {
+                setReason('Inventory Count');
+                setActionType('set');
+                if (quickFilter === 'zero') setQuickFilter('all');
+            } else if (preset === 'opening') {
+                setReason('Opening Stock');
+                setActionType('set');
+                setQuickFilter('zero');
+            }
+        };
+
+        // Barcode / Code Enter key handler for fast mobile & scanner stock counting
+        const handleSearchKeyDown = (e) => {
+            if (e.key !== 'Enter') return;
+            const q = searchTerm.trim().toLowerCase();
+            if (!q) return;
+            const exact = (products || []).find(
+                p => String(p.barcode || '').trim().toLowerCase() === q || String(p.code || '').trim().toLowerCase() === q
+            );
+            if (exact) {
+                e.preventDefault();
+                handleStepQty(exact, 1);
+                setSearchTerm('');
+            }
+        };
+
+        // Download Excel Template pre-populated with current shop stock for easy Stock Count / Opening Stock
+        const handleDownloadBatchTemplate = () => {
+            if (typeof XLSX === 'undefined') {
+                setModalInfo({ show: true, title: 'Library Loading', message: 'Excel library is still loading. Please try again in a moment.', isError: true });
+                return;
+            }
+            const targetProducts = filteredGridProducts.length > 0 ? filteredGridProducts : (products || []).slice(0, 50);
+            const rows = targetProducts.map(p => ({
+                code: p.code || '',
+                barcode: p.barcode || '',
+                name: p.name || '',
+                current_stock: Number(p?.stockByShop?.[shopId]) || 0,
+                quantity: '',
+                note: ''
+            }));
+            const ws = XLSX.utils.json_to_sheet(rows, { header: ['code', 'barcode', 'name', 'current_stock', 'quantity', 'note'] });
+            ws['!cols'] = [{ wch: 16 }, { wch: 18 }, { wch: 32 }, { wch: 14 }, { wch: 12 }, { wch: 24 }];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'StockTake');
+            const safeShop = (selectedShop?.name || 'Shop').replace(/[^a-zA-Z0-9_-]/g, '_');
+            XLSX.writeFile(wb, `StockTake_${safeShop}_${new Date().toISOString().slice(0, 10)}.xlsx`);
         };
 
         const handleExcelFileUpload = (e) => {
@@ -26184,6 +26252,7 @@
                         if (!rawKey) return;
 
                         const rawQtyVal = norm['quantity'] ?? norm['qty'] ?? norm['stock'] ?? norm['count'] ?? '';
+                        if (String(rawQtyVal).trim() === '') return;
                         const parsedQty = parseInt(String(rawQtyVal).trim(), 10);
                         if (isNaN(parsedQty) || parsedQty < 0) {
                             unmatched.push({ row: idx + 2, key: rawKey, reason: 'Invalid quantity' });
@@ -26209,7 +26278,7 @@
                     setModalInfo({
                         show: true,
                         title: 'Sheet Loaded for Preview',
-                        message: `Matched ${matchedCount} product(s).${unmatched.length > 0 ? ` ${unmatched.length} row(s) could not be matched.` : ''} Review the preview below and click "Apply Batch Update" to commit.`,
+                        message: `Matched ${matchedCount} product(s).${unmatched.length > 0 ? ` ${unmatched.length} row(s) could not be matched.` : ''} Review the preview below and click "Apply" to commit.`,
                         isError: matchedCount === 0
                     });
                 } catch (err) {
@@ -26312,170 +26381,207 @@
         );
 
         const activeFilterCount = (vendorFilter ? 1 : 0) + (categoryFilter ? 1 : 0) + (!onlyAssignedToShop ? 1 : 0);
+        const actionBadgeLabel = actionType === 'set' ? '= Set' : actionType === 'add' ? '+ Add' : '− Sub';
         const GRID_DISPLAY_CAP = 100;
 
         return (
             <Modal show={true} onClose={isSubmitting ? null : onClose} maxWidth="max-w-5xl">
                 <MessageModal {...modalInfo} show={modalInfo.show} onClose={() => setModalInfo({ show: false, title: '', message: '', isError: false })} />
                 <ModalHeader title="Batch Stock Update (Stock Take)" onClose={isSubmitting ? null : onClose} />
+
                 <ModalBody>
-                    <div className="space-y-3 sm:space-y-4">
-                        {/* Step 1: Compact Mobile-First Controls (Shop + Action Mode always visible; Reason & Note collapsible on phones) */}
-                        <div className="bg-slate-900/75 p-2.5 sm:p-4 rounded-xl border border-slate-700 space-y-2.5 sm:space-y-0 sm:grid sm:grid-cols-2 lg:grid-cols-4 sm:gap-3">
-                            {/* Target Shop + Mobile Options Toggle */}
-                            <div className="grid grid-cols-12 gap-2 sm:block">
-                                <div className="col-span-9 sm:col-span-12">
-                                    <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                        <i className="fas fa-store text-cyan-400 mr-1"></i>Target Shop *
-                                    </label>
+                    <div className="space-y-2.5 sm:space-y-3.5">
+                        {/* COMPACT MOBILE-FIRST OPERATION HEADER */}
+                        <div className="bg-slate-900/80 p-2 sm:p-3.5 rounded-xl border border-slate-700/90 space-y-2">
+                            {/* Mobile Single-Row Top Bar: Shop Selector + Mode/Reason Pill + Expand Toggle */}
+                            <div className="flex items-center gap-1.5 sm:hidden">
+                                <div className="relative flex-1 min-w-0">
+                                    <i className="fas fa-store text-cyan-400 text-[11px] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
                                     <select
                                         value={shopId}
                                         onChange={(e) => setShopId(e.target.value)}
                                         disabled={isSubmitting}
-                                        className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs sm:text-sm font-bold h-[36px] sm:h-[38px]"
+                                        className="w-full bg-slate-800 text-white pl-7 pr-6 py-1.5 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs font-bold h-[34px] truncate"
                                     >
                                         {managedShops.map(s => (
                                             <option key={s.id} value={s.id}>{s.name}</option>
                                         ))}
                                     </select>
                                 </div>
-                                <div className="col-span-3 sm:hidden flex flex-col justify-end">
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowMobileOptions(prev => !prev)}
-                                        className={`h-[36px] w-full rounded-lg border text-[11px] font-bold flex items-center justify-center gap-1 transition ${
-                                            showMobileOptions || batchNote.trim()
-                                                ? 'bg-purple-600/25 border-purple-500/60 text-purple-200'
-                                                : 'bg-slate-800 border-slate-600 text-slate-300'
-                                        }`}
-                                        title="Toggle Reason & Batch Note"
-                                    >
-                                        <i className="fas fa-sliders-h text-[10px]"></i>
-                                        <span>Note</span>
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Action Mode Segmented Control */}
-                            <div>
-                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-exchange-alt text-amber-400 mr-1"></i>Action Mode
-                                </label>
-                                <div className="grid grid-cols-3 gap-1 bg-slate-800 p-1 rounded-lg border border-slate-600 h-[36px] sm:h-[38px] items-center">
-                                    {[
-                                        { id: 'set', label: '= Set', active: 'bg-blue-600 text-white shadow' },
-                                        { id: 'add', label: '+ Add', active: 'bg-emerald-600 text-white shadow' },
-                                        { id: 'remove', label: '− Sub', active: 'bg-rose-600 text-white shadow' }
-                                    ].map(opt => (
-                                        <button
-                                            key={opt.id}
-                                            type="button"
-                                            disabled={isSubmitting}
-                                            onClick={() => setActionType(opt.id)}
-                                            className={`h-full rounded text-xs font-black transition ${actionType === opt.id ? opt.active : 'text-slate-400 hover:text-white'}`}
-                                        >
-                                            {opt.label}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Reason (Always visible on sm+, collapsible on mobile) */}
-                            <div className={`${showMobileOptions ? 'block' : 'hidden'} sm:block`}>
-                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-clipboard-list text-purple-400 mr-1"></i>Reason
-                                </label>
-                                <select
-                                    value={reason}
-                                    onChange={(e) => setReason(e.target.value)}
-                                    disabled={isSubmitting}
-                                    className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-purple-500 outline-none text-xs sm:text-sm h-[36px] sm:h-[38px]"
-                                >
-                                    <option>Inventory Count</option>
-                                    <option>Opening Stock</option>
-                                    <option>Damaged / Broken</option>
-                                    <option>Expired</option>
-                                    <option>Theft / Loss</option>
-                                    <option>Internal Use</option>
-                                    <option>Return to Vendor</option>
-                                    <option>Other</option>
-                                </select>
-                            </div>
-
-                            {/* Batch Note (Always visible on sm+, collapsible on mobile) */}
-                            <div className={`${showMobileOptions ? 'block' : 'hidden'} sm:block`}>
-                                <label className="block text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                                    <i className="fas fa-sticky-note text-emerald-400 mr-1"></i>Batch Note
-                                </label>
-                                <input
-                                    type="text"
-                                    value={batchNote}
-                                    onChange={(e) => setBatchNote(e.target.value)}
-                                    disabled={isSubmitting}
-                                    placeholder="e.g. Monthly Stock Take"
-                                    className="w-full bg-slate-800 text-white px-2.5 py-2 rounded-lg border border-slate-600 focus:border-emerald-500 outline-none text-xs sm:text-sm h-[36px] sm:h-[38px]"
-                                />
-                            </div>
-                        </div>
-
-                        {/* Step 2: Compact Mode Switcher + Pending Summary Strip */}
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                            <div className="grid grid-cols-2 sm:inline-flex bg-slate-900 p-1 rounded-xl border border-slate-700 w-full sm:w-auto">
                                 <button
                                     type="button"
-                                    onClick={() => setInputTab('grid')}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                                        inputTab === 'grid' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                                    onClick={() => setShowMobileConfig(prev => !prev)}
+                                    className={`h-[34px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1.5 transition ${
+                                        showMobileConfig
+                                            ? 'bg-blue-600 border-blue-400 text-white'
+                                            : 'bg-slate-800 border-slate-600 text-slate-200'
                                     }`}
+                                    title="Configure Action Mode, Reason & Note"
                                 >
-                                    <i className="fas fa-list-check"></i>
-                                    <span>Stock Take Grid</span>
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setInputTab('excel')}
-                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                                        inputTab === 'excel' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'
-                                    }`}
-                                >
-                                    <i className="fas fa-file-excel"></i>
-                                    <span>Excel / CSV</span>
+                                    <span className="text-amber-300 font-black">{actionBadgeLabel}</span>
+                                    <i className={`fas ${showMobileConfig ? 'fa-chevron-up' : 'fa-sliders-h'} text-[10px]`}></i>
                                 </button>
                             </div>
 
-                            <div className="flex items-center justify-between sm:justify-end gap-2 text-xs">
-                                <span className={`px-2.5 py-1 rounded-lg font-mono font-bold border ${
-                                    pendingChanges.length > 0
-                                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
-                                        : 'bg-slate-900 text-slate-400 border-slate-700'
-                                }`}>
-                                    Ready: {pendingChanges.length}
-                                    {pendingChanges.length > 0 && ` (${totalNetDelta > 0 ? '+' : ''}${totalNetDelta})`}
-                                </span>
-                                {Object.keys(qtyInputs).length > 0 && (
+                            {/* Quick 1-Tap Operation Presets (Mobile & Desktop) */}
+                            <div className="flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar">
+                                <div className="flex items-center gap-1.5 shrink-0">
                                     <button
                                         type="button"
                                         disabled={isSubmitting}
-                                        onClick={() => { setQtyInputs({}); setItemNotes({}); setUnmatchedRows([]); }}
-                                        className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 font-bold transition"
+                                        onClick={() => applyOperationPreset('count')}
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border flex items-center gap-1 transition whitespace-nowrap ${
+                                            inputTab === 'grid' && reason === 'Inventory Count' && actionType === 'set'
+                                                ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                                                : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                                        }`}
                                     >
-                                        <i className="fas fa-eraser mr-1"></i>Clear
+                                        <i className="fas fa-clipboard-check text-[10px]"></i>
+                                        <span>Stock Count</span>
                                     </button>
-                                )}
+                                    <button
+                                        type="button"
+                                        disabled={isSubmitting}
+                                        onClick={() => applyOperationPreset('opening')}
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border flex items-center gap-1 transition whitespace-nowrap ${
+                                            inputTab === 'grid' && reason === 'Opening Stock'
+                                                ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                                                : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                                        }`}
+                                    >
+                                        <i className="fas fa-box-open text-[10px]"></i>
+                                        <span>Opening Stock</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={isSubmitting}
+                                        onClick={() => setInputTab(inputTab === 'excel' ? 'grid' : 'excel')}
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border flex items-center gap-1 transition whitespace-nowrap ${
+                                            inputTab === 'excel'
+                                                ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm'
+                                                : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                                        }`}
+                                    >
+                                        <i className="fas fa-file-excel text-[10px]"></i>
+                                        <span>Excel / CSV</span>
+                                    </button>
+                                </div>
+
+                                <div className="hidden sm:flex items-center gap-2 text-xs shrink-0">
+                                    <span className={`px-2.5 py-1 rounded-lg font-mono font-bold border ${
+                                        pendingChanges.length > 0
+                                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                            : 'bg-slate-800 text-slate-400 border-slate-700'
+                                    }`}>
+                                        Ready: {pendingChanges.length}
+                                        {pendingChanges.length > 0 && ` (${totalNetDelta > 0 ? '+' : ''}${totalNetDelta})`}
+                                    </span>
+                                    {Object.keys(qtyInputs).length > 0 && (
+                                        <button
+                                            type="button"
+                                            disabled={isSubmitting}
+                                            onClick={() => { setQtyInputs({}); setItemNotes({}); setUnmatchedRows([]); }}
+                                            className="px-2 py-1 rounded-lg bg-red-500/15 hover:bg-red-600 text-red-300 hover:text-white border border-red-500/30 font-bold transition"
+                                        >
+                                            <i className="fas fa-eraser mr-1"></i>Clear
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Full Configuration Drawer (Always visible on sm+, collapsible on mobile) */}
+                            <div className={`${showMobileConfig ? 'grid' : 'hidden'} sm:grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 pt-2 border-t border-slate-800`}>
+                                {/* Target Shop (Desktop/Tablet) */}
+                                <div className="hidden sm:block">
+                                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                        <i className="fas fa-store text-cyan-400 mr-1"></i>Target Shop *
+                                    </label>
+                                    <select
+                                        value={shopId}
+                                        onChange={(e) => setShopId(e.target.value)}
+                                        disabled={isSubmitting}
+                                        className="w-full bg-slate-800 text-white px-2.5 py-1.5 rounded-lg border border-slate-600 focus:border-cyan-500 outline-none text-xs sm:text-sm font-bold h-[36px]"
+                                    >
+                                        {managedShops.map(s => (
+                                            <option key={s.id} value={s.id}>{s.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Action Mode Segmented Control */}
+                                <div>
+                                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                        <i className="fas fa-exchange-alt text-amber-400 mr-1"></i>Action Mode
+                                    </label>
+                                    <div className="grid grid-cols-3 gap-1 bg-slate-800 p-0.5 rounded-lg border border-slate-600 h-[34px] sm:h-[36px] items-center">
+                                        {[
+                                            { id: 'set', label: '= Set', active: 'bg-blue-600 text-white shadow' },
+                                            { id: 'add', label: '+ Add', active: 'bg-emerald-600 text-white shadow' },
+                                            { id: 'remove', label: '− Sub', active: 'bg-rose-600 text-white shadow' }
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.id}
+                                                type="button"
+                                                disabled={isSubmitting}
+                                                onClick={() => setActionType(opt.id)}
+                                                className={`h-full rounded text-xs font-black transition ${actionType === opt.id ? opt.active : 'text-slate-400 hover:text-white'}`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Reason */}
+                                <div>
+                                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                        <i className="fas fa-clipboard-list text-purple-400 mr-1"></i>Reason
+                                    </label>
+                                    <select
+                                        value={reason}
+                                        onChange={(e) => setReason(e.target.value)}
+                                        disabled={isSubmitting}
+                                        className="w-full bg-slate-800 text-white px-2.5 py-1.5 rounded-lg border border-slate-600 focus:border-purple-500 outline-none text-xs sm:text-sm h-[34px] sm:h-[36px]"
+                                    >
+                                        <option>Inventory Count</option>
+                                        <option>Opening Stock</option>
+                                        <option>Damaged / Broken</option>
+                                        <option>Expired</option>
+                                        <option>Theft / Loss</option>
+                                        <option>Internal Use</option>
+                                        <option>Return to Vendor</option>
+                                        <option>Other</option>
+                                    </select>
+                                </div>
+
+                                {/* Batch Note */}
+                                <div>
+                                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                                        <i className="fas fa-sticky-note text-emerald-400 mr-1"></i>Batch Note
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={batchNote}
+                                        onChange={(e) => setBatchNote(e.target.value)}
+                                        disabled={isSubmitting}
+                                        placeholder="e.g. Monthly Stock Take"
+                                        className="w-full bg-slate-800 text-white px-2.5 py-1.5 rounded-lg border border-slate-600 focus:border-emerald-500 outline-none text-xs sm:text-sm h-[34px] sm:h-[36px]"
+                                    />
+                                </div>
                             </div>
                         </div>
 
                         {inputTab === 'excel' ? (
-                            /* TAB 2: EXCEL / CSV UPLOAD & LIVE PREVIEW (Mobile Cards + Desktop Table) */
-                            <div className="space-y-3">
-                                <div className="bg-slate-900/60 p-3 sm:p-4 rounded-xl border border-indigo-500/30 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                            /* TAB 2: EXCEL / CSV UPLOAD & LIVE PREVIEW */
+                            <div className="space-y-2.5">
+                                <div className="bg-slate-900/60 p-3 rounded-xl border border-indigo-500/30 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
                                     <div className="space-y-0.5">
                                         <h4 className="text-xs sm:text-sm font-bold text-indigo-300 flex items-center gap-1.5">
                                             <i className="fas fa-upload"></i>
                                             <span>Upload Stock Sheet (.xlsx / .csv)</span>
                                         </h4>
-                                        <p className="text-[11px] sm:text-xs text-slate-400">
-                                            Columns: <code className="text-slate-200 font-mono">code</code> (or <code className="text-slate-200 font-mono">barcode</code>), <code className="text-slate-200 font-mono">quantity</code>, <code className="text-slate-200 font-mono">note</code>. Mode: <strong className="text-white">{actionType === 'set' ? '= Set' : actionType === 'add' ? '+ Add' : '− Sub'}</strong>.
+                                        <p className="text-[11px] text-slate-400">
+                                            Columns: <code className="text-slate-200 font-mono">code</code> (or <code className="text-slate-200 font-mono">barcode</code>), <code className="text-slate-200 font-mono">quantity</code>, <code className="text-slate-200 font-mono">note</code>. Mode: <strong className="text-white">{actionBadgeLabel}</strong>.
                                         </p>
                                     </div>
                                     <div className="grid grid-cols-2 sm:flex items-center gap-2 shrink-0">
@@ -26504,7 +26610,7 @@
                                 </div>
 
                                 {unmatchedRows.length > 0 && (
-                                    <div className="p-2.5 sm:p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1">
+                                    <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-1">
                                         <div className="font-bold text-amber-300">
                                             <i className="fas fa-exclamation-triangle mr-1.5"></i>
                                             {unmatchedRows.length} Unmatched / Skipped Row(s):
@@ -26519,46 +26625,43 @@
                                 )}
 
                                 {/* Mobile Preview Cards (md:hidden) */}
-                                <div className="md:hidden space-y-2 max-h-[42dvh] overflow-y-auto pr-0.5">
+                                <div className="md:hidden space-y-1.5 max-h-[48dvh] overflow-y-auto pr-0.5">
                                     {pendingChanges.length === 0 ? (
                                         <div className="p-6 text-center text-slate-500 text-xs bg-slate-900/40 rounded-xl border border-slate-700">
-                                            Upload an Excel/CSV file or enter quantities in the grid to preview changes here.
+                                            Upload an Excel/CSV file or enter quantities in the Stock Take Grid to preview changes here.
                                         </div>
                                     ) : pendingChanges.map(({ product, currentStock, newStock, delta, note }) => (
-                                        <div key={product.id} className="bg-slate-900/70 p-2.5 rounded-xl border border-blue-500/40 space-y-2">
-                                            <div className="flex items-start justify-between gap-2">
-                                                <div className="min-w-0">
-                                                    <div className="text-xs font-bold text-slate-100 truncate">{product.name}</div>
-                                                    <div className="text-[10px] font-mono text-slate-400 truncate">
-                                                        {product.code}{note ? ` • ${note}` : ''}
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleQtyInputChange(product.id, '')}
-                                                    className="w-7 h-7 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 flex items-center justify-center shrink-0"
-                                                    title="Remove from batch"
-                                                >
-                                                    <i className="fas fa-times text-xs"></i>
-                                                </button>
-                                            </div>
-                                            <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-800">
-                                                <div className="text-[11px] font-mono text-slate-300 flex items-center gap-1.5">
-                                                    <span className="text-slate-400">{currentStock}</span>
-                                                    <i className="fas fa-arrow-right text-[9px] text-slate-500"></i>
-                                                    <strong className="text-white">{newStock}</strong>
-                                                    <span className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                                        <div key={product.id} className="bg-slate-900/75 p-2 rounded-xl border border-blue-500/40 flex items-center justify-between gap-2">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="text-xs font-bold text-slate-100 truncate">{product.name}</div>
+                                                <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5 mt-0.5">
+                                                    <span className="truncate">{product.code}</span>
+                                                    <span>•</span>
+                                                    <span>{currentStock}→<strong className="text-white">{newStock}</strong></span>
+                                                    <span className={`px-1 rounded font-bold ${delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
                                                         {delta > 0 ? '+' : ''}{delta}
                                                     </span>
                                                 </div>
+                                                {note && <div className="text-[10px] text-amber-300 truncate">{note}</div>}
+                                            </div>
+                                            <div className="flex items-center gap-1.5 shrink-0">
                                                 <input
                                                     type="number"
                                                     inputMode="numeric"
                                                     min="0"
                                                     value={qtyInputs[product.id] ?? ''}
+                                                    onFocus={(e) => e.target.select()}
                                                     onChange={(e) => handleQtyInputChange(product.id, e.target.value)}
-                                                    className="w-20 h-8 bg-slate-800 text-white text-center font-mono font-bold px-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs"
+                                                    className="w-16 h-8 bg-slate-800 text-white text-center font-mono font-bold px-1.5 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs"
                                                 />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleQtyInputChange(product.id, '')}
+                                                    className="w-7 h-8 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 flex items-center justify-center"
+                                                    title="Remove"
+                                                >
+                                                    <i className="fas fa-times text-xs"></i>
+                                                </button>
                                             </div>
                                         </div>
                                     ))}
@@ -26599,6 +26702,7 @@
                                                                 type="number"
                                                                 min="0"
                                                                 value={qtyInputs[product.id] ?? ''}
+                                                                onFocus={(e) => e.target.select()}
                                                                 onChange={(e) => handleQtyInputChange(product.id, e.target.value)}
                                                                 className="w-20 bg-slate-800 text-white text-center font-mono font-bold px-2 py-1 rounded border border-slate-600 focus:border-blue-500 outline-none"
                                                             />
@@ -26629,58 +26733,81 @@
                                 </div>
                             </div>
                         ) : (
-                            /* TAB 1: COMPACT MOBILE CARDS + DESKTOP BULK GRID EDITOR */
-                            <div className="space-y-2.5 sm:space-y-3">
-                                {/* Search Bar + Quick Changed Toggle + Mobile Filter Drawer Button */}
-                                <div className="flex items-center gap-1.5 sm:hidden">
-                                    <div className="relative flex-1 min-w-0">
-                                        <input
-                                            type="text"
-                                            value={searchTerm}
-                                            onChange={(e) => setSearchTerm(e.target.value)}
-                                            placeholder="Search name, code, barcode..."
-                                            className="w-full bg-slate-900 text-white pl-8 pr-7 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs h-[36px]"
-                                        />
-                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
-                                        {searchTerm && (
-                                            <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
-                                                <i className="fas fa-times-circle text-xs"></i>
+                            /* TAB 1: COMPACT MOBILE STOCK-TAKE CARDS + DESKTOP BULK GRID */
+                            <div className="space-y-2">
+                                {/* Search Bar + Quick Filter Chips (Mobile) */}
+                                <div className="sm:hidden space-y-1.5">
+                                    <div className="flex items-center gap-1.5">
+                                        <div className="relative flex-1 min-w-0">
+                                            <input
+                                                ref={searchInputRef}
+                                                type="text"
+                                                value={searchTerm}
+                                                onChange={(e) => setSearchTerm(e.target.value)}
+                                                onKeyDown={handleSearchKeyDown}
+                                                placeholder="Scan barcode or search name/code..."
+                                                className="w-full bg-slate-900 text-white pl-8 pr-7 py-1.5 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs h-[34px]"
+                                            />
+                                            <i className="fas fa-barcode absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            {searchTerm && (
+                                                <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
+                                                    <i className="fas fa-times-circle text-xs"></i>
+                                                </button>
+                                            )}
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowMobileFilters(prev => !prev)}
+                                            className={`h-[34px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1 transition ${
+                                                showMobileFilters || activeFilterCount > 0
+                                                    ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                                                    : 'bg-slate-900 border-slate-600 text-slate-300'
+                                            }`}
+                                            title="Filter by Vendor / Category"
+                                        >
+                                            <i className="fas fa-filter text-[10px]"></i>
+                                            {activeFilterCount > 0 && <span className="text-[10px] font-black">{activeFilterCount}</span>}
+                                        </button>
+                                    </div>
+
+                                    {/* Slim Horizontal Quick Filter Chips */}
+                                    <div className="flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar">
+                                        <div className="flex items-center gap-1 shrink-0">
+                                            {[
+                                                { id: 'all', label: `All (${filteredGridProducts.length})` },
+                                                { id: 'zero', label: `Zero Stock (${zeroStockCount})` },
+                                                { id: 'changed', label: `Changed (${pendingChanges.length})` }
+                                            ].map(chip => (
+                                                <button
+                                                    key={chip.id}
+                                                    type="button"
+                                                    onClick={() => setQuickFilter(chip.id)}
+                                                    className={`px-2 py-1 rounded-md text-[10px] font-bold border transition whitespace-nowrap ${
+                                                        quickFilter === chip.id
+                                                            ? 'bg-blue-600/30 border-blue-400 text-blue-200'
+                                                            : 'bg-slate-900/80 border-slate-700 text-slate-400'
+                                                    }`}
+                                                >
+                                                    {chip.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        {Object.keys(qtyInputs).length > 0 && (
+                                            <button
+                                                type="button"
+                                                disabled={isSubmitting}
+                                                onClick={() => { setQtyInputs({}); setItemNotes({}); setUnmatchedRows([]); }}
+                                                className="px-2 py-1 rounded-md bg-red-500/15 text-red-300 border border-red-500/30 text-[10px] font-bold shrink-0"
+                                            >
+                                                Clear
                                             </button>
                                         )}
                                     </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => setOnlyChanged(prev => !prev)}
-                                        className={`h-[36px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1 transition ${
-                                            onlyChanged
-                                                ? 'bg-blue-600 border-blue-400 text-white shadow'
-                                                : 'bg-slate-900 border-slate-600 text-slate-300'
-                                        }`}
-                                        title="Show Changed Items Only"
-                                    >
-                                        <i className="fas fa-check-double text-[10px]"></i>
-                                        <span>{pendingChanges.length}</span>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowMobileFilters(prev => !prev)}
-                                        className={`h-[36px] px-2.5 rounded-lg border text-[11px] font-bold shrink-0 flex items-center gap-1 transition relative ${
-                                            showMobileFilters || activeFilterCount > 0
-                                                ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                                                : 'bg-slate-900 border-slate-600 text-slate-300'
-                                        }`}
-                                        title="Filter by Vendor / Category"
-                                    >
-                                        <i className="fas fa-filter text-[10px]"></i>
-                                        {activeFilterCount > 0 && (
-                                            <span className="text-[10px] font-black">{activeFilterCount}</span>
-                                        )}
-                                    </button>
                                 </div>
 
                                 {/* Mobile Collapsible Vendor/Category Filter Drawer */}
                                 {showMobileFilters && (
-                                    <div className="sm:hidden bg-slate-900/70 p-2.5 rounded-xl border border-slate-700 grid grid-cols-2 gap-2">
+                                    <div className="sm:hidden bg-slate-900/75 p-2 rounded-xl border border-slate-700 grid grid-cols-2 gap-2">
                                         <select
                                             value={vendorFilter}
                                             onChange={(e) => setVendorFilter(e.target.value)}
@@ -26711,17 +26838,18 @@
                                             type="text"
                                             value={searchTerm}
                                             onChange={(e) => setSearchTerm(e.target.value)}
-                                            placeholder="Search product name, code, barcode..."
+                                            onKeyDown={handleSearchKeyDown}
+                                            placeholder="Scan barcode or search product name, code..."
                                             className="w-full bg-slate-900 text-white pl-8 pr-7 py-2 rounded-lg border border-slate-600 focus:border-blue-500 outline-none text-xs"
                                         />
-                                        <i className="fas fa-search absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                        <i className="fas fa-barcode absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
                                         {searchTerm && (
                                             <button type="button" onClick={() => setSearchTerm('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white">
                                                 <i className="fas fa-times-circle text-xs"></i>
                                             </button>
                                         )}
                                     </div>
-                                    <div className="lg:col-span-3">
+                                    <div className="lg:col-span-2">
                                         <select
                                             value={vendorFilter}
                                             onChange={(e) => setVendorFilter(e.target.value)}
@@ -26741,20 +26869,34 @@
                                             {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
                                         </select>
                                     </div>
-                                    <div className="lg:col-span-3 flex items-center justify-end gap-3 text-[11px] text-slate-300">
-                                        <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <div className="lg:col-span-4 flex items-center justify-end gap-2 text-[11px] text-slate-300">
+                                        <label className="flex items-center gap-1 cursor-pointer">
                                             <input type="checkbox" checked={onlyAssignedToShop} onChange={(e) => setOnlyAssignedToShop(e.target.checked)} className="rounded accent-emerald-500" />
                                             <span>Assigned</span>
                                         </label>
-                                        <label className="flex items-center gap-1.5 cursor-pointer">
-                                            <input type="checkbox" checked={onlyChanged} onChange={(e) => setOnlyChanged(e.target.checked)} className="rounded accent-blue-500" />
-                                            <span>Changed ({pendingChanges.length})</span>
-                                        </label>
+                                        <div className="inline-flex bg-slate-900 p-0.5 rounded-lg border border-slate-700">
+                                            {[
+                                                { id: 'all', label: 'All' },
+                                                { id: 'zero', label: `0 Qty (${zeroStockCount})` },
+                                                { id: 'changed', label: `Changed (${pendingChanges.length})` }
+                                            ].map(chip => (
+                                                <button
+                                                    key={chip.id}
+                                                    type="button"
+                                                    onClick={() => setQuickFilter(chip.id)}
+                                                    className={`px-2 py-1 rounded text-[10px] font-bold transition ${
+                                                        quickFilter === chip.id ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    {chip.label}
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
 
-                                {/* MOBILE COMPACT STOCK-TAKE CARD LIST (md:hidden — Zero Horizontal Scroll & Thumb-Friendly) */}
-                                <div className="md:hidden space-y-2 max-h-[44dvh] overflow-y-auto pr-0.5">
+                                {/* ULTRA-COMPACT MOBILE STOCK-TAKE CARD LIST (md:hidden) */}
+                                <div className="md:hidden space-y-1.5 max-h-[52dvh] overflow-y-auto pr-0.5">
                                     {filteredGridProducts.length === 0 ? (
                                         <div className="p-8 text-center text-slate-500 text-xs bg-slate-900/40 rounded-xl border border-slate-700">
                                             No matching products found.
@@ -26767,52 +26909,76 @@
                                         return (
                                             <div
                                                 key={prod.id}
-                                                className={`p-2.5 rounded-xl border transition-colors ${
+                                                className={`px-2.5 py-2 rounded-xl border transition-colors ${
                                                     isModified
-                                                        ? 'bg-blue-950/35 border-blue-500/60 shadow-sm'
-                                                        : 'bg-slate-900/65 border-slate-700/80'
+                                                        ? 'bg-blue-950/35 border-blue-500/70 border-l-4 border-l-emerald-400 shadow-sm'
+                                                        : 'bg-slate-900/70 border-slate-700/80'
                                                 }`}
                                             >
-                                                {/* Card Row 1: Product Name + Code + Current Stock Badge */}
-                                                <div className="flex items-start justify-between gap-2">
+                                                {/* Row 1: Compact Name + Code + Live Current -> New Badge */}
+                                                <div className="flex items-center justify-between gap-2">
                                                     <div className="min-w-0 flex-1">
-                                                        <div className="text-xs font-bold text-slate-100 leading-snug line-clamp-2">{prod.name}</div>
+                                                        <div className="text-xs font-bold text-slate-100 truncate leading-tight">{prod.name}</div>
                                                         <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
                                                             {prod.code}{prod.barcode ? ` • ${prod.barcode}` : ''}
                                                         </div>
                                                     </div>
-                                                    <div className="text-right shrink-0">
-                                                        <span className="inline-block px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-[10px] font-mono text-slate-300">
-                                                            Curr: <strong className="text-white">{currentStock}</strong>
-                                                        </span>
-                                                    </div>
-                                                </div>
-
-                                                {/* Card Row 2: Live Result/Diff + Touch Stepper (− [input] +) */}
-                                                <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800/80">
-                                                    <div className="flex items-center gap-1.5 text-[11px] font-mono min-w-0">
+                                                    <div className="flex items-center gap-1 shrink-0 font-mono text-[11px]">
                                                         {isModified ? (
                                                             <>
-                                                                <span className="text-slate-400">New:</span>
-                                                                <strong className="text-white text-xs">{newStock}</strong>
+                                                                <span className="text-slate-400">{currentStock}→</span>
+                                                                <strong className="text-white">{newStock}</strong>
                                                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
                                                                     delta > 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
                                                                 }`}>
                                                                     {delta > 0 ? '+' : ''}{delta}
                                                                 </span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleQtyInputChange(prod.id, '')}
-                                                                    className="text-slate-400 hover:text-red-400 px-1"
-                                                                    title="Reset this item"
-                                                                >
-                                                                    <i className="fas fa-undo text-[10px]"></i>
-                                                                </button>
                                                             </>
                                                         ) : (
-                                                            <span className="text-[10px] text-slate-500">
-                                                                {actionType === 'set' ? 'Enter counted qty' : actionType === 'add' ? 'Qty to add' : 'Qty to deduct'}
+                                                            <span className="px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-[10px] text-slate-300">
+                                                                Curr: <strong className={currentStock <= 0 ? 'text-rose-400' : 'text-white'}>{currentStock}</strong>
                                                             </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {/* Row 2: Quick Helper Chips + Thumb-Friendly Stepper (− [input] +) */}
+                                                <div className="flex items-center justify-between gap-2 mt-1.5 pt-1.5 border-t border-slate-800/80">
+                                                    <div className="flex items-center gap-1">
+                                                        {actionType === 'set' ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleQtyInputChange(prod.id, '0')}
+                                                                className="h-7 px-2 rounded-md bg-slate-800 hover:bg-rose-600/30 text-slate-300 hover:text-rose-200 border border-slate-700 text-[10px] font-mono font-bold transition"
+                                                                title="Set stock to 0"
+                                                            >
+                                                                =0
+                                                            </button>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleStepQty(prod, 5)}
+                                                                className="h-7 px-2 rounded-md bg-slate-800 hover:bg-emerald-600/30 text-slate-300 border border-slate-700 text-[10px] font-mono font-bold transition"
+                                                            >
+                                                                +5
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleStepQty(prod, 10)}
+                                                            className="h-7 px-2 rounded-md bg-slate-800 hover:bg-blue-600/30 text-slate-300 border border-slate-700 text-[10px] font-mono font-bold transition"
+                                                        >
+                                                            +10
+                                                        </button>
+                                                        {hasInput && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleQtyInputChange(prod.id, '')}
+                                                                className="h-7 w-7 rounded-md bg-slate-800 hover:bg-red-600/30 text-slate-400 hover:text-red-300 border border-slate-700 flex items-center justify-center transition"
+                                                                title="Reset this item"
+                                                            >
+                                                                <i className="fas fa-undo text-[10px]"></i>
+                                                            </button>
                                                         )}
                                                     </div>
 
@@ -26831,6 +26997,7 @@
                                                             inputMode="numeric"
                                                             min="0"
                                                             value={rawVal}
+                                                            onFocus={(e) => e.target.select()}
                                                             onChange={(e) => handleQtyInputChange(prod.id, e.target.value)}
                                                             placeholder={actionType === 'set' ? String(currentStock) : '0'}
                                                             className={`w-16 h-8 bg-slate-950 text-center font-mono font-black rounded-lg border outline-none text-xs ${
@@ -26906,6 +27073,7 @@
                                                                     type="number"
                                                                     min="0"
                                                                     value={rawVal}
+                                                                    onFocus={(e) => e.target.select()}
                                                                     onChange={(e) => handleQtyInputChange(prod.id, e.target.value)}
                                                                     placeholder={actionType === 'set' ? String(currentStock) : '0'}
                                                                     className={`w-24 bg-slate-800 text-center font-mono font-bold px-2 py-1 rounded-lg border outline-none text-sm ${
@@ -26948,13 +27116,14 @@
                 <ModalFooter>
                     <div className="w-full flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
                         <div className="hidden sm:block text-xs text-slate-400 font-mono truncate">
-                            {progressText || (selectedShop ? `Target: ${selectedShop.name} • Logged in Adjust Stock Log` : '')}
+                            {progressText || (selectedShop ? `Target: ${selectedShop.name} • ${reason} • Logged in Adjust Stock Log` : '')}
                         </div>
-                        {progressText && (
-                            <div className="sm:hidden text-[11px] text-amber-300 font-mono text-center">
-                                {progressText}
-                            </div>
-                        )}
+                        <div className="sm:hidden flex items-center justify-between text-[11px] font-mono px-0.5">
+                            <span className="text-slate-400 truncate">{progressText || `${reason} (${actionBadgeLabel})`}</span>
+                            <span className={`font-bold shrink-0 ${pendingChanges.length > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                                {pendingChanges.length} chg {pendingChanges.length > 0 ? `(${totalNetDelta > 0 ? '+' : ''}${totalNetDelta})` : ''}
+                            </span>
+                        </div>
                         <div className="grid grid-cols-3 sm:flex items-center gap-2">
                             <button
                                 type="button"
@@ -36413,7 +36582,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
         };
 
         return (
-            <div className="fixed inset-0 w-full flex h-[100dvh] pt-[env(safe-area-inset-top)] bg-slate-900 text-slate-300 overflow-hidden">
+            <div className="fixed inset-0 w-full h-full flex pt-[env(safe-area-inset-top)] bg-slate-900 text-slate-300 overflow-hidden">
                 <InstallAppModal
                     show={showInstallModal}
                     onClose={() => setShowInstallModal(false)}
@@ -36437,7 +36606,7 @@ PAYWAY_BOT_TOKEN=${secretFormData.paywayBotToken || ''}`}
                         toggleSidebar={toggleSidebar}
                         onOpenInstallModal={() => setShowInstallModal(true)}
                     />
-                    <main className={`flex-1 min-h-0 overflow-x-hidden bg-slate-800 ${activePage === 'pos-terminal' ? 'overflow-hidden flex flex-col p-1.5 sm:p-3 lg:p-4' : 'overflow-y-auto p-4 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]'}`}>
+                    <main className={`flex-1 min-h-0 overflow-x-hidden bg-slate-800 ${activePage === 'pos-terminal' ? 'overflow-hidden flex flex-col px-1.5 pt-1.5 pb-0 md:p-3 lg:p-4' : 'overflow-y-auto p-4 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]'}`}>
                         <SearchProvider>
                             {renderActivePage()}
                         </SearchProvider>
