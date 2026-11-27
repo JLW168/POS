@@ -569,8 +569,11 @@
         return dv;
     };
 
-    // ========================================================================
-    // 2. KHQR, RENDER BRIDGE, PAYWAY VERIFIER & INVOICE ENGINE
+    // Role-based access helper for Today's Sales Summary (hidden from Staff)
+    const DAILY_SALES_SUMMARY_ALLOWED_ROLES = ['Admin', 'Shop Manager', 'Shop Supervisor'];
+    const canAccessDailySalesSummary = (userProfile) =>
+        DAILY_SALES_SUMMARY_ALLOWED_ROLES.includes(String(userProfile?.role || '').trim());
+
     // ========================================================================
     window.SolarisKHQREngine = {
         _qrCache: new Map(),
@@ -2925,6 +2928,7 @@
         };
 
         const isShiftOpen = !!(activeShift && activeShift.status === 'open');
+        const canViewDailySalesSummary = canAccessDailySalesSummary(userProfile);
 
         return (
             <header className="h-14 bg-slate-900 border-b border-slate-800 px-2 sm:px-4 flex items-center justify-between gap-1.5 sm:gap-2 shrink-0 z-40 select-none">
@@ -2978,15 +2982,17 @@
                         <i className="fas fa-receipt text-xs"></i>
                     </button>
 
-                    {/* Today's Sales Summary / Daily Report */}
-                    <button
-                        type="button"
-                        onClick={onOpenDailyReportModal}
-                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
-                        title="Today's Sales Summary"
-                    >
-                        <i className="fas fa-chart-pie text-xs"></i>
-                    </button>
+                    {/* Today's Sales Summary / Daily Report (Admin, Shop Manager, and Shop Supervisor only) */}
+                    {canViewDailySalesSummary && (
+                        <button
+                            type="button"
+                            onClick={onOpenDailyReportModal}
+                            className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-white border border-slate-700 flex items-center justify-center transition"
+                            title="Today's Sales Summary"
+                        >
+                            <i className="fas fa-chart-pie text-xs"></i>
+                        </button>
+                    )}
 
                     {/* Bank AutoSum */}
                     <button
@@ -7417,6 +7423,7 @@
         const debouncedSearch = useDebounce(searchTerm, 120);
         const searchInputRef = useRef(null);
         const [isVirtualKeyboardEnabled, setIsVirtualKeyboardEnabled] = useState(false);
+        const canViewDailySalesSummary = canAccessDailySalesSummary(userProfile);
 
         const isAnyModalOpen = Boolean(
             modalMsg.show ||
@@ -7431,7 +7438,7 @@
             thankYouModalData ||
             showShiftModal ||
             showHistoryModal ||
-            showDailyReportModal ||
+            (showDailyReportModal && canViewDailySalesSummary) ||
             (showBankAutoSumModal && !!activeShift) ||
             showKhqrSimulatorModal ||
             showQuickGroupModal
@@ -8518,8 +8525,8 @@
                     />
                 )}
 
-                {/* Today's Sales Summary Modal (100% Copycat) */}
-                {showDailyReportModal && (
+                {/* Today's Sales Summary Modal (Admin, Shop Manager, and Shop Supervisor only) */}
+                {showDailyReportModal && canViewDailySalesSummary && (
                     <DailyReportModal
                         shopId={activeShop?.id || ''}
                         sales={todaySales}
@@ -9349,6 +9356,13 @@
         const [showDailyReportModal, setShowDailyReportModal] = useState(false);
         const [showBankAutoSumModal, setShowBankAutoSumModal] = useState(false);
         const [showKhqrSimulatorModal, setShowKhqrSimulatorModal] = useState(false);
+        const canViewDailySalesSummary = canAccessDailySalesSummary(userProfile);
+
+        useEffect(() => {
+            if (showDailyReportModal && !canViewDailySalesSummary) {
+                setShowDailyReportModal(false);
+            }
+        }, [showDailyReportModal, canViewDailySalesSummary]);
 
         // Start Keep-Awake engine only after cashier logs in (deferred so it never slows down boot)
         useEffect(() => {
@@ -9453,7 +9467,11 @@
                     onOpenInstallModal={() => setShowInstallModal(true)}
                     onOpenShiftModal={() => setShowShiftModal(true)}
                     onOpenHistoryModal={() => setShowHistoryModal(true)}
-                    onOpenDailyReportModal={() => setShowDailyReportModal(true)}
+                    onOpenDailyReportModal={() => {
+                        if (canViewDailySalesSummary) {
+                            setShowDailyReportModal(true);
+                        }
+                    }}
                     onOpenBankAutoSumModal={() => setShowBankAutoSumModal(true)}
                     onOpenKhqrSimulatorModal={() => setShowKhqrSimulatorModal(true)}
                 />
